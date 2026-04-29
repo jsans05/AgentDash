@@ -4,17 +4,18 @@ import { NextResponse } from "next/server";
 
 export async function POST(
   req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   const profile = await requireProfile();
   const supabase = await createServerClient();
   const { accolade } = await req.json();
+  const { id: athleteId } = await params;
 
   // Check access
   const { data: athlete } = await supabase
     .from("athletes")
     .select("current_agent_id")
-    .eq("athlete_id", params.id)
+    .eq("athlete_id", athleteId)
     .single();
 
   if (!athlete) return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -25,7 +26,7 @@ export async function POST(
   const { data: current } = await supabase
     .from("athletes")
     .select("accolades")
-    .eq("athlete_id", params.id)
+    .eq("athlete_id", athleteId)
     .single();
 
   const updated = [...(current?.accolades || []), accolade];
@@ -33,7 +34,7 @@ export async function POST(
   const { error } = await supabase
     .from("athletes")
     .update({ accolades: updated })
-    .eq("athlete_id", params.id);
+    .eq("athlete_id", athleteId);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ success: true });
@@ -41,16 +42,17 @@ export async function POST(
 
 export async function DELETE(
   req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   const profile = await requireProfile();
   const supabase = await createServerClient();
   const { index } = await req.json();
+  const { id: athleteId } = await params;
 
   const { data: athlete } = await supabase
     .from("athletes")
     .select("current_agent_id")
-    .eq("athlete_id", params.id)
+    .eq("athlete_id", athleteId)
     .single();
 
   if (!athlete) return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -61,7 +63,7 @@ export async function DELETE(
   const { data: current } = await supabase
     .from("athletes")
     .select("accolades")
-    .eq("athlete_id", params.id)
+    .eq("athlete_id", athleteId)
     .single();
 
   const updated = (current?.accolades || []).filter((_: any, i: number) => i !== index);
@@ -69,7 +71,7 @@ export async function DELETE(
   const { error } = await supabase
     .from("athletes")
     .update({ accolades: updated })
-    .eq("athlete_id", params.id);
+    .eq("athlete_id", athleteId);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ success: true });

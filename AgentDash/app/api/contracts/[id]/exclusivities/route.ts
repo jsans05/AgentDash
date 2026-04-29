@@ -172,11 +172,23 @@ export async function POST(
  */
 export async function DELETE(
   req: Request,
-  { params }: { params: Promise<{ id: string; exclusivityId: string }> }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   const profile = await requireProfile();
-  const { id: contractId, exclusivityId } = await params;
+  const { id: contractId } = await params;
   const supabase = await createServerClient();
+  const url = new URL(req.url);
+  const body = await req.json().catch(() => ({}));
+  const exclusivityId =
+    (typeof body?.exclusivityId === "string" && body.exclusivityId.trim()) ||
+    (typeof body?.id === "string" && body.id.trim()) ||
+    url.searchParams.get("exclusivityId") ||
+    url.searchParams.get("id") ||
+    "";
+
+  if (!exclusivityId) {
+    return NextResponse.json({ error: "exclusivityId required" }, { status: 400 });
+  }
 
   // Check contract access
   const { data: contract } = await supabase

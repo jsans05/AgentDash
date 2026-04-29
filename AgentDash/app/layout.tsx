@@ -3,7 +3,7 @@ import "./globals.css";
 import { Providers } from "./providers";
 
 export const metadata: Metadata = {
-  title: "WassIntel - Sports Agency Dashboard",
+  title: "TeamIntel - Sports Agency Dashboard",
   description: "Manage athletes, contracts, and CreatorIQ insights",
   icons: { icon: "/favicon.png", apple: "/favicon.png" },
 };
@@ -15,7 +15,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className="font-sans antialiased">
+      <body className="app-body antialiased">
         <Providers>{children}</Providers>
       </body>
     </html>

@@ -3,6 +3,13 @@ import { createServerClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
 import Papa from "papaparse";
 import readXlsxFile from "read-excel-file/node";
+import { findAthleteByTalentOrName } from "@/lib/athletes/lookup";
+import {
+  normalizeAudienceRow,
+  normalizeSocialRow,
+  type ImportRowFailure,
+  type SheetImportSummary,
+} from "@/lib/import/social-audience";
 
 function rowsToObjects(rows: unknown[][]): Record<string, unknown>[] {
   if (rows.length === 0) return [];
@@ -32,8 +39,6 @@ const ATHLETE_HEADER_MAP: Record<string, string> = {
   "country of origin": "country",
   "city": "city",
   "state": "state",
-  "creatoriq_publisher_id": "creatoriq_publisher_id",
-  "creatoriq id": "creatoriq_publisher_id",
   "accolades": "accolades",
 };
 
@@ -185,6 +190,97 @@ async function resolveAthleteByName(
   return null;
 }
 
+type NameResolution = {
+  athlete_id: string | null;
+  ambiguous: boolean;
+};
+
+function normalizeForNameMatch(raw: string): string {
+  const lowered = raw
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, ""); // strip diacritics
+
+  // Drop parentheticals like "(JD)"
+  const noParen = lowered.replace(/\([^)]*\)/g, " ");
+
+  // Normalize punctuation/quotes/hyphens to spaces
+  return noParen
+    .replace(/[\"'’`]/g, " ")
+    .replace(/[-–—]/g, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokensFromImportName(rawName: string): string[] {
+  // Handle "Last, First" by swapping
+  if (rawName.includes(",")) {
+    const [lastPart, ...rest] = rawName.split(",");
+    const firstPart = rest.join(","); // includes any commas after the first; unlikely but safe
+    const swapped = normalizeForNameMatch(`${firstPart} ${lastPart}`);
+    return swapped ? swapped.split(" ").filter(Boolean) : [];
+  }
+
+  const normalized = normalizeForNameMatch(rawName);
+  return normalized ? normalized.split(" ").filter(Boolean) : [];
+}
+
+function tokensFromAthleteRow(firstName: string | null, lastName: string | null): string[] {
+  return tokensFromImportName(`${firstName ?? ""} ${lastName ?? ""}`);
+}
+
+function tokensSubsetMatch(aTokens: string[], bTokens: string[]): boolean {
+  if (aTokens.length < 2 || bTokens.length < 2) return false;
+
+  const aFirst = aTokens[0];
+  const aLast = aTokens[aTokens.length - 1];
+  const bFirst = bTokens[0];
+  const bLast = bTokens[bTokens.length - 1];
+
+  // Keep first/last stable; drop middle differences via subset matching
+  if (aFirst !== bFirst || aLast !== bLast) return false;
+
+  const aSet = new Set(aTokens);
+  const bSet = new Set(bTokens);
+
+  const aSubsetB = [...aSet].every((t) => bSet.has(t));
+  const bSubsetA = [...bSet].every((t) => aSet.has(t));
+  return aSubsetB || bSubsetA;
+}
+
+async function resolveAthleteBySocialAudienceExcelName(
+  supabase: Awaited<ReturnType<typeof createServerClient>> ,
+  nameStr: string
+): Promise<NameResolution> {
+  const tokens = tokensFromImportName(nameStr);
+  if (tokens.length < 2) return { athlete_id: null, ambiguous: false };
+
+  const first = tokens[0]!;
+  const last = tokens[tokens.length - 1]!;
+
+  const { data: candidates, error } = await supabase
+    .from("athletes")
+    .select("athlete_id, first_name, last_name")
+    .ilike("first_name", `%${first}%`)
+    .ilike("last_name", `%${last}%`)
+    .limit(50);
+
+  if (error) {
+    return { athlete_id: null, ambiguous: false };
+  }
+
+  const matches = (candidates ?? []).filter((c: any) => {
+    const candTokens = tokensFromAthleteRow(c.first_name, c.last_name);
+    return tokensSubsetMatch(tokens, candTokens);
+  });
+
+  if (matches.length === 1) return { athlete_id: matches[0]!.athlete_id, ambiguous: false };
+  if (matches.length === 0) return { athlete_id: null, ambiguous: false };
+  return { athlete_id: null, ambiguous: true };
+}
+
 /** Resolve one agent string (email, UUID, or "First Last" name) to profile user_id. */
 async function resolveAgentValue(
   supabase: Awaited<ReturnType<typeof createServerClient>>,
@@ -231,6 +327,65 @@ async function resolveAgentValue(
   return null;
 }
 
+function splitName(raw: string | null | undefined): { first_name: string; last_name: string } {
+  const cleaned = String(raw ?? "")
+    .trim()
+    .replace(/\s+/g, " ");
+  if (!cleaned) {
+    return { first_name: "Unknown", last_name: "" };
+  }
+  const parts = cleaned.split(" ");
+  if (parts.length === 1) {
+    return { first_name: parts[0] ?? "Unknown", last_name: "" };
+  }
+  const first_name = parts[0] ?? "";
+  const last_name = parts.slice(1).join(" ");
+  return { first_name, last_name };
+}
+
+async function ensureAthleteForImport(
+  supabase: Awaited<ReturnType<typeof createServerClient>>,
+  rawName: string | null | undefined
+): Promise<string | null> {
+  const name = (rawName ?? "").trim();
+  if (!name) return null;
+
+  // 1) Prefer matching by Name on the existing roster.
+  const resolution = await resolveAthleteBySocialAudienceExcelName(supabase, name);
+  if (resolution.athlete_id) return resolution.athlete_id;
+
+  // If the name could match multiple roster athletes, skip instead of auto-creating duplicates.
+  if (resolution.ambiguous) return null;
+
+  // 2) If still not found, auto-create a simple athlete row.
+  const { first_name, last_name } = splitName(name);
+
+  const { data: inserted, error: insertErr } = await supabase
+    .from("athletes")
+    .insert({
+      first_name,
+      last_name,
+      sport: null,
+      current_agent_id: null,
+      city: null,
+      state: null,
+      country: null,
+      accolades: [],
+    })
+    .select("athlete_id")
+    .single();
+
+  if (insertErr) {
+    console.warn("[Import social_audience] Failed to auto-create athlete", {
+      name,
+      error: insertErr.message,
+    });
+    return null;
+  }
+
+  return (inserted as any)?.athlete_id ?? null;
+}
+
 export async function POST(req: Request) {
   try {
     await requireRole("admin");
@@ -249,20 +404,28 @@ export async function POST(req: Request) {
 
     const buffer = Buffer.from(await file.arrayBuffer());
     const name = (file.name || "").toLowerCase();
-    let rows: Record<string, unknown>[];
 
-    if (name.endsWith(".csv")) {
-      const text = new TextDecoder().decode(buffer);
-      const parsed = Papa.parse<Record<string, unknown>>(text, { header: true, skipEmptyLines: true });
-      rows = parsed.data ?? [];
-    } else {
-      const sheetRows = await readXlsxFile(buffer);
-      rows = rowsToObjects(sheetRows as unknown[][]);
-    }
+    console.log("[Admin Import] Starting import", {
+      type,
+      fileName: file.name,
+      size: buffer.length,
+    });
 
     const supabase = await createServerClient();
     const created: Record<string, number> = {};
     if (type === "athletes") {
+      let rows: Record<string, unknown>[];
+      if (name.endsWith(".csv")) {
+        const text = new TextDecoder().decode(buffer);
+        const parsed = Papa.parse<Record<string, unknown>>(text, {
+          header: true,
+          skipEmptyLines: true,
+        });
+        rows = parsed.data ?? [];
+      } else {
+        const sheetRows = await readXlsxFile(buffer);
+        rows = rowsToObjects(sheetRows as unknown[][]);
+      }
       // Import athletes (supports: First Name, Last Name, Sport, Agent, Country of Origin, plus optional columns)
       let imported = 0;
       for (const rawRow of rows) {
@@ -303,7 +466,6 @@ export async function POST(req: Request) {
             city: row.city != null ? String(row.city).trim() || null : null,
             state: row.state != null ? String(row.state).trim() || null : null,
             country: row.country != null ? String(row.country).trim() || null : null,
-            creatoriq_publisher_id: row.creatoriq_publisher_id != null ? String(row.creatoriq_publisher_id).trim() || null : null,
             accolades,
           })
           .select("athlete_id, id")
@@ -326,11 +488,24 @@ export async function POST(req: Request) {
 
       return NextResponse.json({ imported, created });
     } else if (type === "contracts") {
+      let rows: Record<string, unknown>[];
+      if (name.endsWith(".csv")) {
+        const text = new TextDecoder().decode(buffer);
+        const parsed = Papa.parse<Record<string, unknown>>(text, {
+          header: true,
+          skipEmptyLines: true,
+        });
+        rows = parsed.data ?? [];
+      } else {
+        const sheetRows = await readXlsxFile(buffer);
+        rows = rowsToObjects(sheetRows as unknown[][]);
+      }
       // Import contracts. Columns: athlete_name, sponsor_name, category, contract_start, contract_end, agent (optional).
       // Multiple rows per athlete_name = multiple contracts (supported).
       let imported = 0;
       let skippedNoAthlete = 0;
       let skippedNoData = 0;
+      let skippedDuplicateContract = 0;
       let firstInsertError: string | null = null;
       const importErrors: { row: number; athleteName: string; sponsorName: string; category: string; reason: string }[] = [];
       const { data: adminProfile } = await supabase
@@ -464,7 +639,11 @@ export async function POST(req: Request) {
         });
 
         if (error) {
-          if (!firstInsertError) firstInsertError = error.message;
+          if (error.code === "23505") {
+            skippedDuplicateContract++;
+          } else if (!firstInsertError) {
+            firstInsertError = error.message;
+          }
         } else {
           imported++;
         }
@@ -476,10 +655,336 @@ export async function POST(req: Request) {
         total_rows: rows.length,
         skipped_no_athlete: skippedNoAthlete,
         skipped_no_data: skippedNoData,
+        skipped_duplicate_contract: skippedDuplicateContract || undefined,
         insert_error: firstInsertError ?? undefined,
         import_errors: importErrors.length > 0 ? importErrors : undefined,
         debug,
       });
+    } else if (type === "social_audience") {
+      if (!name.endsWith(".xlsx") && !name.endsWith(".xls")) {
+        return NextResponse.json(
+          { error: "Social & Audience import requires an .xlsx Excel workbook with two sheets." },
+          { status: 400 }
+        );
+      }
+
+      // First, get sheet metadata (names only)
+      const workbook = await readXlsxFile(buffer, { getSheets: true });
+      const sheetNames = workbook.map((s) => String(s.name ?? ""));
+
+      const requiredSheets: Array<"Social Data" | "Audience Data"> = ["Social Data", "Audience Data"];
+      const missingSheets = requiredSheets.filter(
+        (s) => !sheetNames.some((n) => n.trim().toLowerCase() === s.toLowerCase())
+      );
+      if (missingSheets.length > 0) {
+        return NextResponse.json(
+          {
+            error: `Missing required sheet(s): ${missingSheets.join(
+              ", "
+            )}. Expected sheets named "Social Data" and "Audience Data".`,
+          },
+          { status: 400 }
+        );
+      }
+
+      // read-excel-file with getSheets only returns metadata; we must re-read each sheet by name.
+      const socialSheetMeta = workbook.find(
+        (s) => String(s.name ?? "").trim().toLowerCase() === "social data".toLowerCase()
+      );
+      const audienceSheetMeta = workbook.find(
+        (s) => String(s.name ?? "").trim().toLowerCase() === "audience data".toLowerCase()
+      );
+
+      const socialSheetName = String(socialSheetMeta?.name ?? "Social Data");
+      const audienceSheetName = String(audienceSheetMeta?.name ?? "Audience Data");
+
+      const socialSheetRows = await readXlsxFile(buffer, { sheet: socialSheetName });
+      const audienceSheetRows = await readXlsxFile(buffer, { sheet: audienceSheetName });
+
+      const socialRowsRaw = rowsToObjects(
+        socialSheetRows as unknown[][]
+      ) as Record<string, unknown>[];
+      const audienceRowsRaw = rowsToObjects(
+        audienceSheetRows as unknown[][]
+      ) as Record<string, unknown>[];
+
+      console.log("[Admin Import] Parsed sheets", {
+        socialSheetName,
+        audienceSheetName,
+        socialRows: socialRowsRaw.length,
+        audienceRows: audienceRowsRaw.length,
+      });
+
+      const failures: ImportRowFailure[] = [];
+      const socialSummary: SheetImportSummary = {
+        sheet: "Social Data",
+        total: socialRowsRaw.length,
+        inserted: 0,
+        updated: 0,
+        skipped: 0,
+        failed: 0,
+      };
+      const audienceSummary: SheetImportSummary = {
+        sheet: "Audience Data",
+        total: audienceRowsRaw.length,
+        inserted: 0,
+        updated: 0,
+        skipped: 0,
+        failed: 0,
+      };
+
+      const sourceFileName = file.name || null;
+
+      // Process Social Data sheet
+      for (let idx = 0; idx < socialRowsRaw.length; idx++) {
+        const rawRow = socialRowsRaw[idx] as Record<string, unknown>;
+        const rowIndex = idx + 2; // +2 to account for header and 1-based Excel rows
+
+        try {
+          const parsed = normalizeSocialRow(rawRow);
+          if (!parsed.name_raw) {
+            socialSummary.skipped++;
+            failures.push({
+              sheet: "Social Data",
+              rowIndex,
+              reason: "Missing Name",
+            });
+            continue;
+          }
+
+          let athleteId = await ensureAthleteForImport(supabase, parsed.name_raw);
+          if (!athleteId) {
+            socialSummary.skipped++;
+            failures.push({
+              sheet: "Social Data",
+              rowIndex,
+              reason:
+                "Could not find or create athlete from Talent ID / Name. Please check the row and try again.",
+            });
+            continue;
+          }
+
+          const { data: existing, error: fetchErr } = await supabase
+            .from("athlete_social_data")
+            .select("id")
+            .eq("athlete_id", athleteId)
+            .maybeSingle();
+
+          if (fetchErr) {
+            socialSummary.failed++;
+            failures.push({
+              sheet: "Social Data",
+              rowIndex,
+              reason: `Database error: ${fetchErr.message}`,
+            });
+            continue;
+          }
+
+          const payload = {
+            athlete_id: athleteId,
+            talent_id: parsed.talent_id,
+            name_raw: parsed.name_raw,
+            total_followers: parsed.total_followers,
+            avg_er_20p: parsed.avg_er_20p,
+            total_lifetime_posts: parsed.total_lifetime_posts,
+            ig_followers: parsed.ig_followers,
+            avg_er_ig_20p: parsed.avg_er_ig_20p,
+            ig_lifetime_posts: parsed.ig_lifetime_posts,
+            tt_followers: parsed.tt_followers,
+            avg_er_tt_20p: parsed.avg_er_tt_20p,
+            tt_lifetime_posts: parsed.tt_lifetime_posts,
+            fb_followers: parsed.fb_followers,
+            avg_er_fb_20p: parsed.avg_er_fb_20p,
+            fb_lifetime_posts: parsed.fb_lifetime_posts,
+            x_followers: parsed.x_followers,
+            avg_er_x_20p: parsed.avg_er_x_20p,
+            x_lifetime_posts: parsed.x_lifetime_posts,
+            source_file_name: sourceFileName,
+          };
+
+          if (existing?.id) {
+            const { error: updateErr } = await supabase
+              .from("athlete_social_data")
+              .update({
+                ...payload,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", existing.id);
+            if (updateErr) {
+              socialSummary.failed++;
+              failures.push({
+                sheet: "Social Data",
+                rowIndex,
+                reason: `Update failed: ${updateErr.message}`,
+              });
+            } else {
+              socialSummary.updated++;
+            }
+          } else {
+            const { error: insertErr } = await supabase
+              .from("athlete_social_data")
+              .insert({
+                ...payload,
+              });
+            if (insertErr) {
+              socialSummary.failed++;
+              failures.push({
+                sheet: "Social Data",
+                rowIndex,
+                reason: `Insert failed: ${insertErr.message}`,
+              });
+            } else {
+              socialSummary.inserted++;
+            }
+          }
+        } catch (e: any) {
+          socialSummary.failed++;
+          failures.push({
+            sheet: "Social Data",
+            rowIndex,
+            reason: e?.message ?? "Unexpected error while processing row",
+          });
+        }
+      }
+
+      // Process Audience Data sheet
+      for (let idx = 0; idx < audienceRowsRaw.length; idx++) {
+        const rawRow = audienceRowsRaw[idx] as Record<string, unknown>;
+        const rowIndex = idx + 2;
+
+        try {
+          const parsed = normalizeAudienceRow(rawRow);
+          if (!parsed.name_raw) {
+            audienceSummary.skipped++;
+            failures.push({
+              sheet: "Audience Data",
+              rowIndex,
+              reason: "Missing Name",
+            });
+            continue;
+          }
+
+          if (!parsed.audience_name) {
+            audienceSummary.skipped++;
+            failures.push({
+              sheet: "Audience Data",
+              rowIndex,
+              reason: "Missing Audience Name",
+            });
+            continue;
+          }
+
+          let athleteId = await ensureAthleteForImport(supabase, parsed.name_raw);
+          if (!athleteId) {
+            audienceSummary.skipped++;
+            failures.push({
+              sheet: "Audience Data",
+              rowIndex,
+              reason:
+                "Could not find or create athlete from Name. Please check the row and try again.",
+            });
+            continue;
+          }
+
+          if (!parsed.audience_category) {
+            audienceSummary.skipped++;
+            failures.push({
+              sheet: "Audience Data",
+              rowIndex,
+              reason: "Audience Category is missing or invalid",
+            });
+            continue;
+          }
+
+          const { data: existing, error: fetchErr } = await supabase
+            .from("athlete_audience_data")
+            .select("id")
+            .eq("athlete_id", athleteId)
+            .eq("audience_category", parsed.audience_category)
+            .eq("audience_name", parsed.audience_name)
+            .maybeSingle();
+
+          if (fetchErr) {
+            audienceSummary.failed++;
+            failures.push({
+              sheet: "Audience Data",
+              rowIndex,
+              reason: `Database error: ${fetchErr.message}`,
+            });
+            continue;
+          }
+
+          const payload = {
+            athlete_id: athleteId,
+            talent_id: parsed.talent_id,
+            name_raw: parsed.name_raw,
+            audience_category: parsed.audience_category,
+            audience_name: parsed.audience_name,
+            ig_audience_percent: parsed.ig_audience_percent,
+            ig_audience_count: parsed.ig_audience_count,
+            current_ig_following: parsed.current_ig_following,
+            source_file_name: sourceFileName,
+          };
+
+          if (existing?.id) {
+            const { error: updateErr } = await supabase
+              .from("athlete_audience_data")
+              .update({
+                ...payload,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", existing.id);
+            if (updateErr) {
+              audienceSummary.failed++;
+              failures.push({
+                sheet: "Audience Data",
+                rowIndex,
+                reason: `Update failed: ${updateErr.message}`,
+              });
+            } else {
+              audienceSummary.updated++;
+            }
+          } else {
+            const { error: insertErr } = await supabase
+              .from("athlete_audience_data")
+              .insert({
+                ...payload,
+              });
+            if (insertErr) {
+              audienceSummary.failed++;
+              failures.push({
+                sheet: "Audience Data",
+                rowIndex,
+                reason: `Insert failed: ${insertErr.message}`,
+              });
+            } else {
+              audienceSummary.inserted++;
+            }
+          }
+        } catch (e: any) {
+          audienceSummary.failed++;
+          failures.push({
+            sheet: "Audience Data",
+            rowIndex,
+            reason: e?.message ?? "Unexpected error while processing row",
+          });
+        }
+      }
+
+      const totalSummary = {
+        total_rows: socialSummary.total + audienceSummary.total,
+        inserted: socialSummary.inserted + audienceSummary.inserted,
+        updated: socialSummary.updated + audienceSummary.updated,
+        skipped: socialSummary.skipped + audienceSummary.skipped,
+        failed: socialSummary.failed + audienceSummary.failed,
+        imported: socialSummary.inserted + socialSummary.updated + audienceSummary.inserted + audienceSummary.updated,
+        sheets: [socialSummary, audienceSummary],
+        failures,
+      };
+
+      console.log("[Admin Import] Completed social_audience import", totalSummary);
+
+      return NextResponse.json(totalSummary);
     }
 
     return NextResponse.json({ error: "Invalid type" }, { status: 400 });

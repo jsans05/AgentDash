@@ -6,9 +6,9 @@ export default async function AdminTaxonomyPage() {
 
   return (
     <div className="px-4 sm:px-6 lg:px-8">
-      <h1 className="text-2xl font-semibold text-gray-900 mb-2">Sponsorship Taxonomies</h1>
-      <p className="text-sm text-gray-600 mb-6">
-        View and edit per-sport categories (Endemic and Non-Endemic). Used for contract categories and outreach gap logic.
+      <h1 className="mb-2 text-2xl font-semibold text-[#F4F1EB]">Sponsorship Taxonomies</h1>
+      <p className="mb-6 text-sm text-[#B9B2A6]">
+        Edit endemic categories per sport and a single shared non-endemic list. The app merges them for contracts, CRM, and outreach gap logic.
       </p>
       <TaxonomyClient />
     </div>

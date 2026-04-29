@@ -56,24 +56,8 @@ These are already set from your `supabase.env` file:
 
 - ✅ `NEXT_PUBLIC_SUPABASE_URL` - Your Supabase project URL
 - ✅ `SUPABASE_SERVICE_ROLE_KEY` - Service role key (for admin operations)
-- ✅ `CREATORIQ_API_KEY` - CreatorIQ API key
-- ✅ `CREATORIQ_BASE_URL` - CreatorIQ API base URL
 
-### CreatorIQ (Cycle environment)
-
-If your API key is for the **Cycle environment**:
-1. In `AgentDash/.env.local` set:
-   - `CREATORIQ_API_KEY=<your Cycle API key>`
-   - `CREATORIQ_ORG_NAME=Cycle`
-2. Base URL must be **`https://apis.creatoriq.com`** (note the **s** in *apis*). Do not use `https://api.creatoriq.com`.
-3. The **Creator ID** is the number from the CreatorIQ app URL: `https://app.creatoriq.com/#creator/1867893/social` → use `1867893`.
-
-**If you use "Wasserman" / "Wasserman Network" in Select Division**, set `CREATORIQ_ORG_NAME=Wasserman` (and optionally `CREATORIQ_DIVISION=Wasserman`) instead of Cycle.
-
-**If you get 403 Forbidden:** The API key is accepted but not allowed to read publishers. CreatorIQ does not expose API key permissions in the UI. Contact CreatorIQ support and ask:
-- “Our integration calls `GET https://apis.creatoriq.com/api/v1/publishers/{id}` with headers `x-api-key`, `Authorization: Bearer`, `X-Org-Name`, `X-Division` and receives 403 Forbidden. Can you enable read access to the Publishers/CRM API for our key and division (Wasserman), or tell us the exact headers/values required for our environment?”
-
----
+ 
 
 ## Optional Variables
 

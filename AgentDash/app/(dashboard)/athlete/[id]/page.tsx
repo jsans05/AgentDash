@@ -2,13 +2,14 @@ import { createServerClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
-import { getAudienceMetrics } from "@/lib/audience-metrics";
+import { fmtFollowers, getAthleteAudienceProfile } from "@/lib/athlete-data";
 import { AthleteProfileClient } from "./client";
-import { CreatorIQIdEditor } from "./ciq-editor";
 import { AthleteAgentsEditor } from "./agents-editor";
-import { Overview } from "@/components/overview/Overview";
 import { OutreachTab } from "./outreach";
 import { CoveredCategoriesSwitches } from "./CoveredCategoriesSwitches";
+import { SportEditor } from "./sport-editor";
+import { AudiencePercentExpandable } from "@/components/athlete/AudiencePercentExpandable";
+import { GenderPie } from "@/components/athlete/GenderPie";
 
 export default async function AthleteProfilePage({
   params,
@@ -45,10 +46,18 @@ export default async function AthleteProfilePage({
     .select(`
       user_id,
       is_primary,
+      created_at,
       profiles:user_id (first_name, last_name, email)
     `)
     .eq("athlete_id", id)
     .order("is_primary", { ascending: false });
+
+  // Normalize Supabase join shape: profiles:user_id(...) can come back as an array,
+  // but the UI editor expects profiles as a single object (or null).
+  const athleteAgentsForEditor = (athleteAgents ?? []).map((a: any) => ({
+    ...a,
+    profiles: Array.isArray(a.profiles) ? a.profiles[0] ?? null : a.profiles ?? null,
+  }));
 
   // Check access: agent can view if they are in athlete_agents for this athlete
   const agentIds = (athleteAgents ?? []).map((a: any) => a.user_id);
@@ -97,68 +106,38 @@ export default async function AthleteProfilePage({
     };
   });
 
-  // Get latest CIQ snapshots
-  const { data: snapshots } = await supabase
-    .from("creatoriq_snapshots")
-    .select("*")
-    .eq("athlete_id", id)
-    .order("fetched_at", { ascending: false })
-    .limit(10);
-
-  const audienceMetrics = await getAudienceMetrics(supabase, id);
-
-  // TEMP DEBUG: remove this block once matches > 0 and audience charts render correctly
-  const filteredSnapshots = (snapshots || []).filter(
-    (s: { snapshot_type: string }) => s.snapshot_type === "accounts" || s.snapshot_type === "audience"
-  );
-  for (const s of filteredSnapshots) {
-    const snap = s as { snapshot_type: string; raw_json: unknown };
-    console.log("[AthleteProfile] snapshot_type", snap.snapshot_type);
-    console.log("[AthleteProfile] typeof raw_json", typeof snap.raw_json);
-    const raw = snap.raw_json;
-    if (raw != null && typeof raw === "object" && !Array.isArray(raw)) {
-      console.log("[AthleteProfile] top-level keys", Object.keys(raw as Record<string, unknown>));
-    }
-  }
-  const accSnap = filteredSnapshots.find((s: { snapshot_type: string }) => s.snapshot_type === "accounts") as { raw_json: unknown } | undefined;
-  const audSnap = filteredSnapshots.find((s: { snapshot_type: string }) => s.snapshot_type === "audience") as { raw_json: unknown } | undefined;
-  if (accSnap?.raw_json != null && typeof accSnap.raw_json === "object" && !Array.isArray(accSnap.raw_json)) {
-    console.log("[AthleteProfile] accounts snapshot top-level keys", Object.keys(accSnap.raw_json as Record<string, unknown>));
-  }
-  if (audSnap?.raw_json != null && typeof audSnap.raw_json === "object" && !Array.isArray(audSnap.raw_json)) {
-    console.log("[AthleteProfile] audience snapshot top-level keys", Object.keys(audSnap.raw_json as Record<string, unknown>));
-  }
+  const audienceProfile = await getAthleteAudienceProfile(supabase, id);
 
   const canEdit = profile.role === "admin" || (profile.role === "agent" && agentIds.includes(profile.user_id));
 
   return (
     <div className="px-4 sm:px-6 lg:px-8">
       <div className="mb-6">
-        <Link href="/roster" className="text-sm text-blue-600 hover:text-blue-900">
+        <Link href="/roster" className="text-sm text-[#CEE4D4] hover:text-[#E8F6ED]">
           ← Back to Roster
         </Link>
       </div>
 
-      <div className="bg-white shadow rounded-lg">
-        <div className="px-6 py-5 border-b border-gray-200">
-          <h1 className="text-2xl font-semibold text-gray-900">
+      <div className="rounded-lg border border-white/10 bg-[#151A17] shadow">
+        <div className="border-b border-white/10 px-6 py-5">
+          <h1 className="text-2xl font-semibold text-[#F4F1EB]">
             {athlete.first_name} {athlete.last_name}
           </h1>
-          <p className="mt-1 text-sm text-gray-500">
+          <p className="mt-1 text-sm text-[#B9B2A6]">
             {athlete.sport} • {[athlete.city, athlete.state, athlete.country].filter(Boolean).join(", ") || "No location"}
           </p>
         </div>
 
         {/* Tabs */}
-        <div className="border-b border-gray-200">
-          <nav className="-mb-px flex space-x-8 px-6" aria-label="Tabs">
+        <div className="border-b border-white/10 px-6 py-2">
+          <nav className="flex flex-wrap gap-2" aria-label="Tabs">
             <Link
               href={`/athlete/${id}?tab=profile${showArchived ? "&showArchived=1" : ""}`}
               className={`${
                 activeTab === "profile"
-                  ? "border-blue-500 text-blue-600"
-                  : "border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700"
-              } whitespace-nowrap border-b-2 py-4 px-1 text-sm font-medium`}
+                  ? "border-[#2E7040]/70 bg-[#2E7040] text-[#F2FFF5]"
+                  : "border-transparent text-[#B9B2A6] hover:bg-white/5 hover:text-[#F4F1EB]"
+              } whitespace-nowrap rounded-md border px-3 py-1.5 text-sm font-medium transition-colors`}
             >
               Profile
             </Link>
@@ -166,69 +145,171 @@ export default async function AthleteProfilePage({
               href={`/athlete/${id}?tab=outreach`}
               className={`${
                 activeTab === "outreach"
-                  ? "border-blue-500 text-blue-600"
-                  : "border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700"
-              } whitespace-nowrap border-b-2 py-4 px-1 text-sm font-medium`}
+                  ? "border-[#2E7040]/70 bg-[#2E7040] text-[#F2FFF5]"
+                  : "border-transparent text-[#B9B2A6] hover:bg-white/5 hover:text-[#F4F1EB]"
+              } whitespace-nowrap rounded-md border px-3 py-1.5 text-sm font-medium transition-colors`}
             >
               Outreach
             </Link>
           </nav>
         </div>
 
-        <div className="px-6 py-5 space-y-6">
+        <div className="space-y-6 px-6 py-5">
           {activeTab === "profile" ? (
             <>
               {/* Basic Info */}
               <section>
-                <h2 className="text-lg font-medium text-gray-900 mb-3">Basic Information</h2>
+                <h2 className="mb-3 text-lg font-medium text-[#F4F1EB]">Basic Information</h2>
                 <dl className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2">
                   <div>
-                    <dt className="text-sm font-medium text-gray-500">CreatorIQ Creator ID</dt>
-                    <dd className="mt-1">
-                      {canEdit ? (
-                        <CreatorIQIdEditor athleteId={id} initialValue={athlete.creatoriq_publisher_id} />
+                    <dt className="text-sm font-medium text-[#B9B2A6]">Agents</dt>
+                    <dd className="mt-1 text-sm text-[#ECE7DF]">
+                      {profile.role === "admin" ? (
+                        <AthleteAgentsEditor athleteId={id} initialAgents={athleteAgentsForEditor as any} />
                       ) : (
-                        <span className="text-sm text-gray-900">{athlete.creatoriq_publisher_id || "—"}</span>
+                        <>
+                          {athleteAgents && athleteAgents.length > 0
+                            ? athleteAgents.map((a: any) => (
+                                <span key={a.user_id} className="mr-2">
+                                  {a.profiles
+                                    ? `${a.profiles.first_name || ""} ${a.profiles.last_name || ""}`.trim() || a.profiles.email
+                                    : a.user_id}
+                                  {a.is_primary && " (primary)"}
+                                </span>
+                              ))
+                            : "Unassigned"}
+                        </>
                       )}
                     </dd>
                   </div>
-                  {profile.role !== "agent" && (
-                    <div>
-                      <dt className="text-sm font-medium text-gray-500">Agents</dt>
-                      <dd className="mt-1 text-sm text-gray-900">
-                        {profile.role === "admin" ? (
-                          <AthleteAgentsEditor athleteId={id} initialAgents={athleteAgents ?? []} />
-                        ) : (
-                          <>
-                            {athleteAgents && athleteAgents.length > 0
-                              ? athleteAgents.map((a: any) => (
-                                  <span key={a.user_id} className="mr-2">
-                                    {a.profiles
-                                      ? `${a.profiles.first_name || ""} ${a.profiles.last_name || ""}`.trim() || a.profiles.email
-                                      : a.user_id}
-                                    {a.is_primary && " (primary)"}
-                                  </span>
-                                ))
-                              : "Unassigned"}
-                          </>
-                        )}
-                      </dd>
-                    </div>
-                  )}
+                  <SportEditor
+                    athleteId={id}
+                    initialSport={athlete.sport ?? null}
+                    canEdit={canEdit}
+                  />
                 </dl>
               </section>
 
-              {/* Overview (CreatorIQ + manual audience fallback) */}
-              <Overview
+              {/* Accolades */}
+              <AthleteProfileClient
                 athleteId={id}
-                creatoriqId={athlete.creatoriq_publisher_id}
-                snapshots={(snapshots || []).filter(
-                  (s: { snapshot_type: string }) =>
-                    s.snapshot_type === "accounts" || s.snapshot_type === "audience"
-                )}
-                audienceMetrics={audienceMetrics}
-                canRefresh={canEdit}
+                athleteSport={athlete.sport ?? null}
+                initialAccolades={athlete.accolades || []}
+                initialNotes={athlete.notes ?? ""}
+                canEdit={canEdit}
+                contracts={[]}
+                sectionMode="accolades"
               />
+
+              <section>
+                <h2 className="mb-3 text-lg font-medium text-[#F4F1EB]">Social & Audience</h2>
+                <dl className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2">
+                  <div>
+                    <dt className="text-sm font-medium text-[#B9B2A6]">Total Followers</dt>
+                    <dd className="mt-1 text-sm text-[#ECE7DF]">{fmtFollowers(audienceProfile.social?.total_followers ?? null)}</dd>
+                  </div>
+                  {audienceProfile.social?.ig_followers != null && (
+                    <div>
+                      <dt className="text-sm font-medium text-[#B9B2A6]">Instagram Followers</dt>
+                      <dd className="mt-1 text-sm text-[#ECE7DF]">{fmtFollowers(audienceProfile.social.ig_followers)}</dd>
+                    </div>
+                  )}
+                  {audienceProfile.social?.tt_followers != null && (
+                    <div>
+                      <dt className="text-sm font-medium text-[#B9B2A6]">TikTok Followers</dt>
+                      <dd className="mt-1 text-sm text-[#ECE7DF]">{fmtFollowers(audienceProfile.social.tt_followers)}</dd>
+                    </div>
+                  )}
+                  {audienceProfile.social?.fb_followers != null && (
+                    <div>
+                      <dt className="text-sm font-medium text-[#B9B2A6]">Facebook Followers</dt>
+                      <dd className="mt-1 text-sm text-[#ECE7DF]">{fmtFollowers(audienceProfile.social.fb_followers)}</dd>
+                    </div>
+                  )}
+                  {audienceProfile.social?.x_followers != null && (
+                    <div>
+                      <dt className="text-sm font-medium text-[#B9B2A6]">X Followers</dt>
+                      <dd className="mt-1 text-sm text-[#ECE7DF]">{fmtFollowers(audienceProfile.social.x_followers)}</dd>
+                    </div>
+                  )}
+                </dl>
+                <div className="mt-4 grid grid-cols-1 gap-x-4 gap-y-6 sm:grid-cols-2">
+                  <div>
+                    <h3 className="text-sm font-medium text-[#D7D0C4]">Gender</h3>
+                    <GenderPie
+                      rows={audienceProfile.gender.map((r) => ({
+                        name: r.audience_name,
+                        ig_audience_percent: r.ig_audience_percent,
+                        ig_audience_count: r.ig_audience_count,
+                      }))}
+                      emptyText="No gender data."
+                    />
+                  </div>
+                  <div aria-hidden />
+                  <div>
+                    <h3 className="text-sm font-medium text-[#D7D0C4]">Age</h3>
+                    <AudiencePercentExpandable
+                      rows={[...audienceProfile.age]
+                        .sort((a, b) => {
+                          const ageSortKey = (name: string) => {
+                            const n = parseInt(name.match(/\d+/)?.[0] ?? "0", 10);
+                            const trimmed = name.trim();
+                            if (/^</.test(trimmed) || /^under\b/i.test(trimmed)) return n - 1000;
+                            return n;
+                          };
+                          return ageSortKey(a.audience_name) - ageSortKey(b.audience_name);
+                        })
+                        .map((r) => ({
+                          name: r.audience_name,
+                          ig_audience_percent: r.ig_audience_percent,
+                          ig_audience_count: r.ig_audience_count,
+                        }))}
+                      countInLabel
+                      previewLimit={Math.max(1, audienceProfile.age.length)}
+                      emptyText="No age data."
+                    />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-medium text-[#D7D0C4]">Top Countries</h3>
+                    <AudiencePercentExpandable
+                      rows={audienceProfile.countries.map((r) => ({
+                        name: r.audience_name,
+                        ig_audience_percent: r.ig_audience_percent,
+                        ig_audience_count: r.ig_audience_count,
+                      }))}
+                      countInLabel
+                      previewLimit={5}
+                      emptyText="No country data."
+                    />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-medium text-[#D7D0C4]">Top Interests</h3>
+                    <AudiencePercentExpandable
+                      rows={audienceProfile.interests.map((r) => ({
+                        name: r.audience_name,
+                        ig_audience_percent: r.ig_audience_percent,
+                        ig_audience_count: r.ig_audience_count,
+                      }))}
+                      countInLabel
+                      previewLimit={5}
+                      emptyText="No interest data."
+                    />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-medium text-[#D7D0C4]">Top Brand Affinities</h3>
+                    <AudiencePercentExpandable
+                      rows={audienceProfile.brands.map((r) => ({
+                        name: r.audience_name,
+                        ig_audience_percent: r.ig_audience_percent,
+                        ig_audience_count: r.ig_audience_count,
+                      }))}
+                      countInLabel
+                      previewLimit={5}
+                      emptyText="No brand data."
+                    />
+                  </div>
+                </div>
+              </section>
 
               {/* Prospecting: categories marked as covered (AI won't search these) */}
               <CoveredCategoriesSwitches
@@ -237,14 +318,16 @@ export default async function AthleteProfilePage({
                 canEdit={canEdit}
               />
 
-              {/* Accolades */}
+              {/* Notes and contracts */}
               <AthleteProfileClient
                 athleteId={id}
                 athleteSport={athlete.sport ?? null}
                 initialAccolades={athlete.accolades || []}
+                initialNotes={athlete.notes ?? ""}
                 canEdit={canEdit}
                 contracts={contracts || []}
                 showArchived={showArchived}
+                sectionMode="notes-contracts"
               />
             </>
           ) : (

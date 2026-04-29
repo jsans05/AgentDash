@@ -1,5 +1,10 @@
 import { createServerClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
+import {
+  ensureAthleteAccess,
+  getContractCategoryDisplay,
+  resolveOrCreateCompanyId,
+} from "@/lib/features/contracts/service";
 import { NextResponse } from "next/server";
 
 type NewContractBody = {
@@ -13,12 +18,12 @@ type NewContractBody = {
 
 export async function POST(
   req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   const profile = await requireProfile();
   const supabase = await createServerClient();
 
-  const athleteId = params.id;
+  const { id: athleteId } = await params;
   const body = (await req.json()) as NewContractBody;
 
   const companyName = body.company_name?.trim();
@@ -46,66 +51,26 @@ export async function POST(
       ? body.status
       : "active";
 
-  // Basic access check
-  const { data: athlete } = await supabase
-    .from("athletes")
-    .select("athlete_id, current_agent_id")
-    .eq("athlete_id", athleteId)
-    .single();
-
-  if (!athlete) {
-    return NextResponse.json({ error: "Athlete not found" }, { status: 404 });
+  const access = await ensureAthleteAccess(supabase, profile, athleteId);
+  if (!access.ok) {
+    return NextResponse.json({ error: access.error }, { status: access.status });
   }
 
-  if (profile.role === "agent") {
-    const { data: links } = await supabase
-      .from("athlete_agents")
-      .select("athlete_id")
-      .eq("athlete_id", athleteId)
-      .eq("user_id", profile.user_id)
-      .limit(1);
-    const isLinked =
-      (links && links.length > 0) || athlete.current_agent_id === profile.user_id;
-    if (!isLinked) {
-      return NextResponse.json(
-        { error: "You are not assigned to this athlete" },
-        { status: 403 }
-      );
-    }
-  }
-
-  // Get or create company
   let companyId: string;
-  const { data: existingCompany } = await supabase
-    .from("companies")
-    .select("company_id")
-    .eq("name", companyName)
-    .maybeSingle();
-
-  if (existingCompany) {
-    companyId = existingCompany.company_id;
-  } else {
-    const { data: newCompany, error: companyError } = await supabase
-      .from("companies")
-      .insert({ name: companyName, industry: null })
-      .select("company_id")
-      .single();
-    if (companyError || !newCompany) {
-      return NextResponse.json(
-        { error: companyError?.message || "Failed to create company" },
-        { status: 500 }
-      );
-    }
-    companyId = newCompany.company_id;
+  try {
+    companyId = await resolveOrCreateCompanyId(supabase, companyName);
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Failed to resolve company";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 
-  // First category name for contracts.category (display)
-  const { data: firstTaxonomy } = await supabase
-    .from("sponsorship_taxonomies")
-    .select("category")
-    .eq("id", categoryTaxonomyIds[0])
-    .single();
-  const categoryDisplay = firstTaxonomy?.category ?? "Unknown";
+  let categoryDisplay = "Unknown";
+  try {
+    categoryDisplay = await getContractCategoryDisplay(supabase, categoryTaxonomyIds[0]);
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Failed to resolve category";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
 
   const { data: newContract, error: insertError } = await supabase
     .from("contracts")
@@ -123,6 +88,15 @@ export async function POST(
     .single();
 
   if (insertError) {
+    if (insertError.code === "23505") {
+      return NextResponse.json(
+        {
+          error:
+            "A contract with this company and dates already exists for this athlete.",
+        },
+        { status: 409 }
+      );
+    }
     return NextResponse.json({ error: insertError.message }, { status: 500 });
   }
 

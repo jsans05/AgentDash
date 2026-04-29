@@ -10,9 +10,9 @@ export default async function DashboardLayout({
   const profile = await requireProfile();
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-[#0B0E0D] text-[#ECE7DF]">
       <Nav />
-      <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">{children}</main>
+      <main className="w-full px-4 py-6 sm:px-6 lg:px-8">{children}</main>
     </div>
   );
 }

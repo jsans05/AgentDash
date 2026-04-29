@@ -6,14 +6,15 @@
 INSERT INTO public.sponsorship_taxonomies (sport, tier, category, sort_order) VALUES
   ('Surf', 'NON_ENDEMIC', 'Alcohol', 1000),
   ('Surf', 'NON_ENDEMIC', 'Cannabis / CBD', 1001),
-  ('Surf', 'NON_ENDEMIC', 'Grooming / Skincare', 1002),
-  ('Surf', 'NON_ENDEMIC', 'Automotive', 1003),
-  ('Surf', 'NON_ENDEMIC', 'Tech Hardware', 1004),
-  ('Surf', 'NON_ENDEMIC', 'Financial Services / Fintech', 1005),
-  ('Surf', 'NON_ENDEMIC', 'Telecommunications', 1006),
-  ('Surf', 'NON_ENDEMIC', 'Health & Wellness', 1007),
-  ('Surf', 'NON_ENDEMIC', 'Audio & Headphones', 1008),
-  ('Surf', 'NON_ENDEMIC', 'Unknown', 1009)
+  ('Surf', 'NON_ENDEMIC', 'Grooming', 1002),
+  ('Surf', 'NON_ENDEMIC', 'Skincare', 1003),
+  ('Surf', 'NON_ENDEMIC', 'Automotive', 1004),
+  ('Surf', 'NON_ENDEMIC', 'Tech Hardware', 1005),
+  ('Surf', 'NON_ENDEMIC', 'Financial Services / Fintech', 1006),
+  ('Surf', 'NON_ENDEMIC', 'Telecommunications', 1007),
+  ('Surf', 'NON_ENDEMIC', 'Health & Wellness', 1008),
+  ('Surf', 'NON_ENDEMIC', 'Audio & Headphones', 1009),
+  ('Surf', 'NON_ENDEMIC', 'Unknown', 1010)
 ON CONFLICT (sport, tier, category) DO NOTHING;
 
 -- Surf ENDEMIC

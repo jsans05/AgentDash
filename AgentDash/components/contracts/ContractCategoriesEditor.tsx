@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { X } from "lucide-react";
 
 type TaxonomyNode = {
@@ -39,7 +39,9 @@ export function ContractCategoriesEditor({
   const [availableTaxonomy, setAvailableTaxonomy] = useState<TaxonomyNode[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedTaxonomyId, setSelectedTaxonomyId] = useState<string>("");
+  const [categoryQuery, setCategoryQuery] = useState("");
+  const [categoryListOpen, setCategoryListOpen] = useState(false);
+  const categoryPickerRef = useRef<HTMLDivElement>(null);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
 
   // Load taxonomy nodes for the athlete's sport
@@ -106,10 +108,25 @@ export function ContractCategoriesEditor({
     if (resolved.length > 0) onChange(resolved);
   }, [initialLoadDone, availableTaxonomy, initialCategoryNames, value.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  function addCategory() {
-    if (!selectedTaxonomyId || value.includes(selectedTaxonomyId)) return;
-    onChange([...value, selectedTaxonomyId]);
-    setSelectedTaxonomyId("");
+  useEffect(() => {
+    function handlePointerDown(e: MouseEvent) {
+      if (!categoryPickerRef.current?.contains(e.target as Node)) {
+        setCategoryListOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, []);
+
+  function addCategoryById(taxonomyId: string) {
+    if (!taxonomyId || value.includes(taxonomyId)) return;
+    onChange([...value, taxonomyId]);
+    setCategoryQuery("");
+  }
+
+  function categoryMatchesQuery(node: TaxonomyNode, q: string) {
+    if (!q) return true;
+    return normalizeCategory(node.category).includes(normalizeCategory(q));
   }
 
   function removeCategory(taxonomyId: string) {
@@ -120,6 +137,10 @@ export function ContractCategoriesEditor({
   const availableToAdd = availableTaxonomy.filter((t) => !valueSet.has(t.id));
   const endemic = availableToAdd.filter((t) => t.tier === "ENDEMIC").sort((a, b) => a.sort_order - b.sort_order);
   const nonEndemic = availableToAdd.filter((t) => t.tier === "NON_ENDEMIC").sort((a, b) => a.sort_order - b.sort_order);
+  const endemicFiltered = endemic.filter((t) => categoryMatchesQuery(t, categoryQuery));
+  const nonEndemicFiltered = nonEndemic.filter((t) => categoryMatchesQuery(t, categoryQuery));
+  const firstFilteredId =
+    endemicFiltered[0]?.id ?? nonEndemicFiltered[0]?.id ?? null;
 
   const selectedNodes: { id: string; category: string }[] = value.map((id) => {
     const node = availableTaxonomy.find((t) => t.id === id);
@@ -161,37 +182,86 @@ export function ContractCategoriesEditor({
       )}
 
       {availableToAdd.length > 0 && (
-        <div className="flex gap-2">
-          <select
-            value={selectedTaxonomyId}
-            onChange={(e) => setSelectedTaxonomyId(e.target.value)}
+        <div ref={categoryPickerRef} className="relative">
+          <input
+            type="text"
+            role="combobox"
+            aria-expanded={categoryListOpen}
+            aria-autocomplete="list"
+            aria-controls="contract-category-suggestions"
+            value={categoryQuery}
+            onChange={(e) => {
+              setCategoryQuery(e.target.value);
+              setCategoryListOpen(true);
+            }}
+            onFocus={() => setCategoryListOpen(true)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setCategoryListOpen(false);
+              }
+              if (e.key === "Enter" && firstFilteredId) {
+                e.preventDefault();
+                addCategoryById(firstFilteredId);
+              }
+            }}
             disabled={loading}
-            className="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm disabled:opacity-50"
-          >
-            <option value="">Add category...</option>
-            {endemic.length > 0 && (
-              <optgroup label="Endemic">
-                {endemic.map((t) => (
-                  <option key={t.id} value={t.id}>{t.category}</option>
-                ))}
-              </optgroup>
-            )}
-            {nonEndemic.length > 0 && (
-              <optgroup label="Non-Endemic">
-                {nonEndemic.map((t) => (
-                  <option key={t.id} value={t.id}>{t.category}</option>
-                ))}
-              </optgroup>
-            )}
-          </select>
-          <button
-            type="button"
-            onClick={addCategory}
-            disabled={loading || !selectedTaxonomyId}
-            className="px-3 py-2 bg-blue-600 text-white rounded-md text-sm hover:bg-blue-700 disabled:opacity-50"
-          >
-            Add
-          </button>
+            placeholder="Type to search categories…"
+            autoComplete="off"
+            className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+          />
+          {categoryListOpen && (
+            <div
+              id="contract-category-suggestions"
+              role="listbox"
+              className="absolute z-50 mt-1 w-full max-h-60 overflow-auto rounded-md border border-gray-200 bg-white py-1 text-sm shadow-lg"
+            >
+              {endemicFiltered.length === 0 && nonEndemicFiltered.length === 0 ? (
+                <div className="px-3 py-2 text-gray-500">No matching categories</div>
+              ) : (
+                <>
+                  {endemicFiltered.length > 0 && (
+                    <div className="pt-1 pb-0.5">
+                      <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+                        Endemic
+                      </div>
+                      {endemicFiltered.map((t) => (
+                        <button
+                          key={t.id}
+                          type="button"
+                          role="option"
+                          onMouseDown={(ev) => ev.preventDefault()}
+                          onClick={() => addCategoryById(t.id)}
+                          className="flex w-full px-3 py-2 text-left text-gray-900 hover:bg-gray-100"
+                        >
+                          {t.category}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {nonEndemicFiltered.length > 0 && (
+                    <div className="pt-1 pb-0.5">
+                      <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+                        Non-Endemic
+                      </div>
+                      {nonEndemicFiltered.map((t) => (
+                        <button
+                          key={t.id}
+                          type="button"
+                          role="option"
+                          onMouseDown={(ev) => ev.preventDefault()}
+                          onClick={() => addCategoryById(t.id)}
+                          className="flex w-full px-3 py-2 text-left text-gray-900 hover:bg-gray-100"
+                        >
+                          {t.category}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
 

@@ -4,13 +4,13 @@ import { NextResponse } from "next/server";
 
 export async function PATCH(
   req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   await requireRole("admin");
 
   const body = await req.json();
   const { email, password, first_name, last_name, role } = body;
-  const userId = params.id;
+  const { id: userId } = await params;
 
   const supabase = await createServiceRoleClient();
 
@@ -48,11 +48,11 @@ export async function PATCH(
 
 export async function DELETE(
   _req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   await requireRole("admin");
 
-  const userId = params.id;
+  const { id: userId } = await params;
   const supabase = await createServiceRoleClient();
 
   const { error } = await supabase.auth.admin.deleteUser(userId);

@@ -11,13 +11,22 @@ export async function POST() {
   try {
     const fakeId = "00000000-0000-0000-0000-000000000000";
 
-    const { error: ciqError } = await supabase
-      .from("creatoriq_snapshots")
+    const { error: audienceError } = await supabase
+      .from("athlete_audience_data")
       .delete()
-      .neq("snapshot_id", fakeId);
+      .neq("id", fakeId);
 
-    if (ciqError) {
-      return NextResponse.json({ error: ciqError.message }, { status: 500 });
+    if (audienceError) {
+      return NextResponse.json({ error: audienceError.message }, { status: 500 });
+    }
+
+    const { error: socialError } = await supabase
+      .from("athlete_social_data")
+      .delete()
+      .neq("id", fakeId);
+
+    if (socialError) {
+      return NextResponse.json({ error: socialError.message }, { status: 500 });
     }
 
     const { error: contractsError } = await supabase

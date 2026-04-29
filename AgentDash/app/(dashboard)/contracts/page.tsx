@@ -1,7 +1,7 @@
 import { createServerClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
 import Link from "next/link";
-import { getContractDisplayStatus } from "@/lib/contracts";
+import { formatContractDateForDisplay, getContractDisplayStatus } from "@/lib/contracts";
 import { ArchiveContractButton } from "@/components/contracts/ArchiveContractButton";
 
 export default async function ContractsPage({
@@ -88,15 +88,15 @@ export default async function ContractsPage({
     <div className="px-4 sm:px-6 lg:px-8">
       <div className="sm:flex sm:items-center sm:justify-between">
         <div className="sm:flex-auto">
-          <h1 className="text-2xl font-semibold text-gray-900">Contracts</h1>
-          <p className="mt-2 text-sm text-gray-700">
+          <h1 className="text-2xl font-semibold text-[#F4F1EB]">Contracts</h1>
+          <p className="mt-2 text-sm text-[#D7D0C4]">
             {contractsWithRelations?.length ?? 0} contracts
             {!showArchived && (
               <>
                 {" "}
                 <Link
                   href={`/contracts?${new URLSearchParams({ ...searchParams, showArchived: "1" } as any).toString()}`}
-                  className="text-blue-600 hover:text-blue-800"
+                  className="text-[#CEE4D4] hover:text-[#E8F6ED]"
                 >
                   Show archived
                 </Link>
@@ -107,7 +107,7 @@ export default async function ContractsPage({
                 {" "}
                 <Link
                   href={`/contracts?${new URLSearchParams(Object.fromEntries(Object.entries(searchParams).filter(([k, v]) => k !== "showArchived" && v != null))).toString()}`}
-                  className="text-blue-600 hover:text-blue-800"
+                  className="text-[#CEE4D4] hover:text-[#E8F6ED]"
                 >
                   Hide archived
                 </Link>
@@ -121,7 +121,7 @@ export default async function ContractsPage({
       <div className="mt-4 flex flex-wrap gap-4">
         <select
           defaultValue={searchParams.status}
-          className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+          className="rounded-md border border-white/20 bg-[#111513] px-3 py-2 text-sm text-[#F4F1EB] focus:border-[#2E7040] focus:outline-none"
         >
           <option value="">All Statuses</option>
           <option value="active">Active</option>
@@ -131,7 +131,7 @@ export default async function ContractsPage({
         {distinctCategories.length > 0 && (
           <select
             defaultValue={searchParams.category}
-            className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+            className="rounded-md border border-white/20 bg-[#111513] px-3 py-2 text-sm text-[#F4F1EB] focus:border-[#2E7040] focus:outline-none"
           >
             <option value="">All Categories</option>
             {distinctCategories.map((cat) => (
@@ -145,36 +145,37 @@ export default async function ContractsPage({
 
       {/* Table */}
       <div className="mt-8">
-        <table className="min-w-full divide-y divide-gray-300">
+        <table className="min-w-full divide-y divide-white/15 rounded-xl border border-white/10 bg-[#121614]">
           <thead>
             <tr>
-              <th className="py-3.5 text-left text-sm font-semibold text-gray-900">Athlete</th>
-              <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Company</th>
-              <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Category</th>
-              <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Dates</th>
-              <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Status</th>
-              <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">Actions</th>
+              <th className="py-3.5 pl-4 text-left text-sm font-semibold text-[#F4F1EB]">Athlete</th>
+              <th className="px-3 py-3.5 text-left text-sm font-semibold text-[#F4F1EB]">Company</th>
+              <th className="px-3 py-3.5 text-left text-sm font-semibold text-[#F4F1EB]">Category</th>
+              <th className="px-3 py-3.5 text-left text-sm font-semibold text-[#F4F1EB]">Dates</th>
+              <th className="px-3 py-3.5 text-left text-sm font-semibold text-[#F4F1EB]">Status</th>
+              <th className="px-3 py-3.5 text-left text-sm font-semibold text-[#F4F1EB]">Actions</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-gray-200">
+          <tbody className="divide-y divide-white/10">
             {contractsWithRelations?.map((contract: any) => (
-              <tr key={contract.contract_id}>
-                <td className="py-4 text-sm">
+              <tr key={contract.contract_id} className="hover:bg-white/5">
+                <td className="py-4 pl-4 text-sm">
                   <Link
                     href={`/athlete/${contract.athlete_id}`}
-                    className="text-blue-600 hover:text-blue-900"
+                    className="text-[#CEE4D4] hover:text-[#E8F6ED]"
                   >
                     {contract.athletes?.first_name} {contract.athletes?.last_name}
                   </Link>
                 </td>
-                <td className="px-3 py-4 text-sm text-gray-500">
+                <td className="px-3 py-4 text-sm text-[#D7D0C4]">
                   {contract.companies?.name}
                 </td>
-                <td className="px-3 py-4 text-sm text-gray-500">
+                <td className="px-3 py-4 text-sm text-[#D7D0C4]">
                   {contract.category}
                 </td>
-                <td className="px-3 py-4 text-sm text-gray-500">
-                  {contract.start_date} - {contract.end_date || "Ongoing"}
+                <td className="px-3 py-4 text-sm text-[#D7D0C4]">
+                  {formatContractDateForDisplay(contract.start_date) ?? "—"} -{" "}
+                  {formatContractDateForDisplay(contract.end_date) ?? "Ongoing"}
                 </td>
                 <td className="px-3 py-4">
                   {(() => {
@@ -185,14 +186,14 @@ export default async function ContractsPage({
                     return (
                       <div className="flex flex-col gap-0.5">
                         <span className={`inline-flex w-fit px-2 py-1 text-xs rounded ${
-                          displayStatus === "active" ? "bg-green-100 text-green-800" :
-                          displayStatus === "expired" ? "bg-gray-100 text-gray-800" :
-                          "bg-red-100 text-red-800"
+                          displayStatus === "active" ? "bg-[#1B2F21] text-[#DBEEE0] border border-[#2E7040]/60" :
+                          displayStatus === "expired" ? "bg-[#2A2F2B] text-[#D7D0C4] border border-white/15" :
+                          "bg-[#3A1E1E] text-[#FFD9D9] border border-[#A35A5A]/50"
                         }`}>
                           {displayStatus}
                         </span>
                         {displayStatus === "active" && expiresInMonths !== null && (
-                          <span className="text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded w-fit">
+                          <span className="w-fit rounded border border-[#87652E]/60 bg-[#3A2E1A] px-2 py-0.5 text-xs text-[#F3D8A2]">
                             Expires in {expiresInMonths} {expiresInMonths === 1 ? "month" : "months"}
                           </span>
                         )}

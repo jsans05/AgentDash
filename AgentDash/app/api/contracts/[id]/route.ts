@@ -1,5 +1,10 @@
 import { createServerClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
+import {
+  ensureAthleteAccess,
+  getContractCategoryDisplay,
+  resolveOrCreateCompanyId,
+} from "@/lib/features/contracts/service";
 import { NextResponse } from "next/server";
 
 type UpdateContractBody = {
@@ -34,27 +39,9 @@ export async function PATCH(
 
   const athleteId = contract.athlete_id;
 
-  if (profile.role === "agent") {
-    const { data: links } = await supabase
-      .from("athlete_agents")
-      .select("athlete_id")
-      .eq("athlete_id", athleteId)
-      .eq("user_id", profile.user_id)
-      .limit(1);
-    const { data: athlete } = await supabase
-      .from("athletes")
-      .select("current_agent_id")
-      .eq("athlete_id", athleteId)
-      .single();
-    const isLinked =
-      (links && links.length > 0) ||
-      athlete?.current_agent_id === profile.user_id;
-    if (!isLinked) {
-      return NextResponse.json(
-        { error: "You are not assigned to this athlete" },
-        { status: 403 }
-      );
-    }
+  const access = await ensureAthleteAccess(supabase, profile, athleteId);
+  if (!access.ok) {
+    return NextResponse.json({ error: access.error }, { status: access.status });
   }
 
   let companyId: string | undefined;
@@ -66,26 +53,11 @@ export async function PATCH(
         { status: 400 }
       );
     }
-    const { data: existingCompany } = await supabase
-      .from("companies")
-      .select("company_id")
-      .eq("name", companyName)
-      .maybeSingle();
-    if (existingCompany) {
-      companyId = existingCompany.company_id;
-    } else {
-      const { data: newCompany, error: companyError } = await supabase
-        .from("companies")
-        .insert({ name: companyName, industry: null })
-        .select("company_id")
-        .single();
-      if (companyError || !newCompany) {
-        return NextResponse.json(
-          { error: companyError?.message || "Failed to create company" },
-          { status: 500 }
-        );
-      }
-      companyId = newCompany.company_id;
+    try {
+      companyId = await resolveOrCreateCompanyId(supabase, companyName);
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : "Failed to resolve company";
+      return NextResponse.json({ error: message }, { status: 500 });
     }
   }
 
@@ -118,12 +90,12 @@ export async function PATCH(
     if (categoryTaxonomyIds.length === 0) {
       return NextResponse.json({ error: "At least one category is required." }, { status: 400 });
     }
-    const { data: firstTaxonomy } = await supabase
-      .from("sponsorship_taxonomies")
-      .select("category")
-      .eq("id", categoryTaxonomyIds[0])
-      .single();
-    updates.category = firstTaxonomy?.category ?? "Unknown";
+    try {
+      updates.category = await getContractCategoryDisplay(supabase, categoryTaxonomyIds[0]);
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : "Failed to resolve category";
+      return NextResponse.json({ error: message }, { status: 500 });
+    }
   }
 
   if (Object.keys(updates).length > 0) {
@@ -133,6 +105,15 @@ export async function PATCH(
       .eq("contract_id", contractId);
 
     if (updateError) {
+      if (updateError.code === "23505") {
+        return NextResponse.json(
+          {
+            error:
+              "Another contract with this company and dates already exists for this athlete.",
+          },
+          { status: 409 }
+        );
+      }
       return NextResponse.json({ error: updateError.message }, { status: 500 });
     }
   }

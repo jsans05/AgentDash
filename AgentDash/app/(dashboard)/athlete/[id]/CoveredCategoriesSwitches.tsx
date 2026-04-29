@@ -90,8 +90,8 @@ export function CoveredCategoriesSwitches({ athleteId, sport, canEdit }: Props) 
   if (!sport) {
     return (
       <section>
-        <h2 className="text-lg font-medium text-gray-900 mb-3">Prospecting categories</h2>
-        <p className="text-sm text-gray-500">Set the athlete&apos;s sport to manage which categories are marked as covered.</p>
+        <h2 className="mb-3 text-lg font-medium text-[#F4F1EB]">Prospecting categories</h2>
+        <p className="text-sm text-[#B9B2A6]">Set the athlete&apos;s sport to manage which categories are marked as covered.</p>
       </section>
     );
   }
@@ -99,8 +99,8 @@ export function CoveredCategoriesSwitches({ athleteId, sport, canEdit }: Props) 
   if (loading) {
     return (
       <section>
-        <h2 className="text-lg font-medium text-gray-900 mb-3">Prospecting categories</h2>
-        <p className="text-sm text-gray-500">Loading categories…</p>
+        <h2 className="mb-3 text-lg font-medium text-[#F4F1EB]">Prospecting categories</h2>
+        <p className="text-sm text-[#B9B2A6]">Loading categories…</p>
       </section>
     );
   }
@@ -108,8 +108,8 @@ export function CoveredCategoriesSwitches({ athleteId, sport, canEdit }: Props) 
   if (nodes.length === 0) {
     return (
       <section>
-        <h2 className="text-lg font-medium text-gray-900 mb-3">Prospecting categories</h2>
-        <p className="text-sm text-gray-500">No taxonomy categories for this sport.</p>
+        <h2 className="mb-3 text-lg font-medium text-[#F4F1EB]">Prospecting categories</h2>
+        <p className="text-sm text-[#B9B2A6]">No taxonomy categories for this sport.</p>
       </section>
     );
   }
@@ -118,19 +118,19 @@ export function CoveredCategoriesSwitches({ athleteId, sport, canEdit }: Props) 
 
   return (
     <section>
-      <h2 className="text-lg font-medium text-gray-900 mb-2">Prospecting categories</h2>
-      <p className="text-sm text-gray-500 mb-3">
+      <h2 className="mb-2 text-lg font-medium text-[#F4F1EB]">Prospecting categories</h2>
+      <p className="mb-3 text-sm text-[#B9B2A6]">
         Turn <strong>on</strong> for categories that are already covered (e.g. exclusive or not pursuing). Mystery Machine will not search in those categories.
       </p>
       {error && (
-        <p className="mb-3 text-sm text-red-600" role="alert">
+        <p className="mb-3 text-sm text-[#F1A2A2]" role="alert">
           {error}
         </p>
       )}
       <div className="space-y-4">
         {byTier.ENDEMIC.length > 0 && (
           <div>
-            <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Endemic</h3>
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#B9B2A6]">Endemic</h3>
             <div className="flex flex-wrap gap-x-4 gap-y-2">
               {byTier.ENDEMIC.map((n) => (
                 <label key={n.id} className="flex items-center gap-2 cursor-pointer">
@@ -139,9 +139,9 @@ export function CoveredCategoriesSwitches({ athleteId, sport, canEdit }: Props) 
                     checked={coveredIds.has(n.id)}
                     onChange={() => toggle(n.id)}
                     disabled={!canEdit || saving}
-                    className="rounded border-gray-300 text-teal-600 focus:ring-teal-500"
+                    className="rounded border-white/20 bg-[#101513] text-[#2E7040] focus:ring-[#2E7040]"
                   />
-                  <span className="text-sm text-gray-700">{n.category}</span>
+                  <span className="text-sm text-[#D7D0C4]">{n.category}</span>
                 </label>
               ))}
             </div>
@@ -149,7 +149,7 @@ export function CoveredCategoriesSwitches({ athleteId, sport, canEdit }: Props) 
         )}
         {byTier.NON_ENDEMIC.length > 0 && (
           <div>
-            <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Non-endemic</h3>
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#B9B2A6]">Non-endemic</h3>
             <div className="flex flex-wrap gap-x-4 gap-y-2">
               {byTier.NON_ENDEMIC.map((n) => (
                 <label key={n.id} className="flex items-center gap-2 cursor-pointer">
@@ -158,16 +158,16 @@ export function CoveredCategoriesSwitches({ athleteId, sport, canEdit }: Props) 
                     checked={coveredIds.has(n.id)}
                     onChange={() => toggle(n.id)}
                     disabled={!canEdit || saving}
-                    className="rounded border-gray-300 text-teal-600 focus:ring-teal-500"
+                    className="rounded border-white/20 bg-[#101513] text-[#2E7040] focus:ring-[#2E7040]"
                   />
-                  <span className="text-sm text-gray-700">{n.category}</span>
+                  <span className="text-sm text-[#D7D0C4]">{n.category}</span>
                 </label>
               ))}
             </div>
           </div>
         )}
       </div>
-      {saving && <p className="mt-2 text-xs text-gray-500">Saving…</p>}
+      {saving && <p className="mt-2 text-xs text-[#9E978B]">Saving…</p>}
     </section>
   );
 }

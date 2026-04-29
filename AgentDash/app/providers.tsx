@@ -5,6 +5,18 @@ import type { User } from "@supabase/supabase-js";
 import type { Profile } from "@/lib/supabase/types";
 import { supabase } from "@/lib/supabase/client";
 
+async function fetchProfileFromServer(): Promise<Profile | null> {
+  try {
+    const res = await fetch("/api/auth/me", { credentials: "include" });
+    if (res.status === 401) return null;
+    if (!res.ok) return null;
+    const data: { profile?: Profile | null } = await res.json();
+    return data.profile ?? null;
+  } catch {
+    return null;
+  }
+}
+
 type AuthContextType = {
   user: User | null;
   profile: Profile | null;
@@ -28,12 +40,8 @@ export function Providers({ children }: { children: React.ReactNode }) {
     } = supabase.auth.onAuthStateChange(async (event, session) => {
       setUser(session?.user ?? null);
       if (session?.user) {
-        const { data } = await supabase
-          .from("profiles")
-          .select("*")
-          .eq("user_id", session.user.id)
-          .single();
-        setProfile(data);
+        const profile = await fetchProfileFromServer();
+        setProfile((prev) => profile ?? (prev?.user_id === session.user.id ? prev : null));
       } else {
         setProfile(null);
       }
@@ -43,12 +51,8 @@ export function Providers({ children }: { children: React.ReactNode }) {
     supabase.auth.getSession().then(async ({ data: { session } }) => {
       setUser(session?.user ?? null);
       if (session?.user) {
-        const { data } = await supabase
-          .from("profiles")
-          .select("*")
-          .eq("user_id", session.user.id)
-          .single();
-        setProfile(data);
+        const profile = await fetchProfileFromServer();
+        setProfile((prev) => profile ?? (prev?.user_id === session.user.id ? prev : null));
       }
       setLoading(false);
     });

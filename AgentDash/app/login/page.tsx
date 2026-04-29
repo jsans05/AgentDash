@@ -16,7 +16,16 @@ export default function LoginPage() {
     e.preventDefault();
     setError("");
     setLoading(true);
-    const { error: err } = await supabase.auth.signInWithPassword({ email, password });
+    let err: { message: string } | null = null;
+    try {
+      const result = await supabase.auth.signInWithPassword({ email, password });
+      err = result.error;
+    } catch (e) {
+      setLoading(false);
+      const msg = e instanceof Error ? e.message : "Unknown error";
+      setError(msg === "Failed to fetch" ? "Could not reach Supabase. Check NEXT_PUBLIC_SUPABASE_URL and that the project is not paused." : msg);
+      return;
+    }
     if (err) {
       setLoading(false);
       setError(err.message);
@@ -32,7 +41,7 @@ export default function LoginPage() {
     <div className="min-h-screen flex items-center justify-center bg-gray-50">
       <div className="max-w-md w-full space-y-8 p-8 bg-white rounded-lg shadow">
         <div>
-          <h2 className="text-3xl font-bold text-center">WassIntel</h2>
+          <h2 className="text-3xl font-bold text-center">TeamIntel</h2>
           <p className="mt-2 text-center text-sm text-gray-600">Sign in to your account</p>
         </div>
         <form onSubmit={handleSubmit} className="mt-8 space-y-6">

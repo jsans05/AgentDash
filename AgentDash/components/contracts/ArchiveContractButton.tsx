@@ -38,7 +38,7 @@ export function ArchiveContractButton({
         type="button"
         onClick={handleClick}
         disabled={loading}
-        className="text-sm text-blue-600 hover:text-blue-800 disabled:opacity-50 inline-flex items-center gap-1"
+        className="inline-flex items-center gap-1 text-sm text-[#CEE4D4] hover:text-[#E8F6ED] disabled:opacity-50"
       >
         <ArchiveRestore className="h-3.5 w-3.5" />
         {label && "Unarchive"}
@@ -50,7 +50,7 @@ export function ArchiveContractButton({
       type="button"
       onClick={handleClick}
       disabled={loading}
-      className="text-sm text-gray-600 hover:text-gray-800 disabled:opacity-50 inline-flex items-center gap-1"
+      className="inline-flex items-center gap-1 text-sm text-[#D7D0C4] hover:text-[#F4F1EB] disabled:opacity-50"
       title="Hide from main view (keeps contract for history)"
     >
       <Archive className="h-3.5 w-3.5" />

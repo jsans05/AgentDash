@@ -60,7 +60,7 @@ export default async function RosterPage({
     query = query.eq("country", searchParams.country);
   }
 
-  // Search: names, sport, city, state, country, and agent (by agent name)
+  // Search: names (incl. full "First Last"), sport, city, state, country, and agent (by agent name)
   if (searchParams.search?.trim()) {
     const term = searchParams.search.trim().replace(/,/g, " "); // commas would break .or()
     const escaped = escapeForIlike(term);
@@ -73,12 +73,62 @@ export default async function RosterPage({
       `state.ilike.${pattern}`,
       `country.ilike.${pattern}`,
     ];
+
+    // Multi-word search: treat as "first last" and match first_name AND last_name combinations.
+    const tokens = term.split(/\s+/).filter(Boolean);
+    if (tokens.length >= 2) {
+      const firstTok = escapeForIlike(tokens[0]);
+      const lastTok = escapeForIlike(tokens[tokens.length - 1]);
+      const middleTok = escapeForIlike(tokens.slice(1).join(" "));
+      const middleTokRev = escapeForIlike(tokens.slice(0, -1).join(" "));
+
+      // Try a couple of split variants so "Mary Jane Smith" matches either split.
+      const [fnMatches1, fnMatches2] = await Promise.all([
+        supabase
+          .from("athletes")
+          .select("athlete_id")
+          .ilike("first_name", `%${firstTok}%`)
+          .ilike("last_name", `%${middleTok}%`),
+        supabase
+          .from("athletes")
+          .select("athlete_id")
+          .ilike("first_name", `%${middleTokRev}%`)
+          .ilike("last_name", `%${lastTok}%`),
+      ]);
+      const nameAthleteIds = [
+        ...(fnMatches1.data?.map((r) => r.athlete_id) ?? []),
+        ...(fnMatches2.data?.map((r) => r.athlete_id) ?? []),
+      ].filter(Boolean);
+      if (nameAthleteIds.length > 0) {
+        orParts.push(`athlete_id.in.(${[...new Set(nameAthleteIds)].join(",")})`);
+      }
+    }
+
     if (profile.role !== "agent") {
+      const agentOrParts = [
+        `first_name.ilike.${pattern}`,
+        `last_name.ilike.${pattern}`,
+      ];
+      if (tokens.length >= 2) {
+        const firstTok = escapeForIlike(tokens[0]);
+        const lastTok = escapeForIlike(tokens[tokens.length - 1]);
+        // Match agents where first_name ~ firstTok AND last_name ~ lastTok via a second query
+        const { data: fullNameAgents } = await supabase
+          .from("profiles")
+          .select("user_id")
+          .eq("role", "agent")
+          .ilike("first_name", `%${firstTok}%`)
+          .ilike("last_name", `%${lastTok}%`);
+        const fullNameAgentIds = fullNameAgents?.map((r) => r.user_id).filter(Boolean) ?? [];
+        if (fullNameAgentIds.length > 0) {
+          agentOrParts.push(`user_id.in.(${fullNameAgentIds.join(",")})`);
+        }
+      }
       const { data: matchingAgents } = await supabase
         .from("profiles")
         .select("user_id")
         .eq("role", "agent")
-        .or(`first_name.ilike.${pattern},last_name.ilike.${pattern}`);
+        .or(agentOrParts.join(","));
       const agentIds = matchingAgents?.map((r) => r.user_id).filter(Boolean) ?? [];
       if (agentIds.length > 0) {
         orParts.push(`current_agent_id.in.(${agentIds.join(",")})`);
@@ -93,13 +143,11 @@ export default async function RosterPage({
   if (sort === "name") {
     query = query.order("last_name", { ascending: order }).order("first_name", { ascending: order });
   } else if (sort === "sport") {
-    query = query.order("sport", { ascending: order, nullFirst: false });
+    query = query.order("sport", { ascending: order, nullsFirst: false });
   } else if (sort === "location") {
-    query = query.order("country", { ascending: order, nullFirst: false }).order("state", { ascending: order }).order("city", { ascending: order });
+    query = query.order("country", { ascending: order, nullsFirst: false }).order("state", { ascending: order }).order("city", { ascending: order });
   } else if (sort === "agent" && profile.role !== "agent") {
-    query = query.order("current_agent_id", { ascending: order, nullFirst: true });
-  } else if (sort === "creatoriq") {
-    query = query.order("creatoriq_publisher_id", { ascending: order, nullFirst: true });
+    query = query.order("current_agent_id", { ascending: order, nullsFirst: true });
   } else {
     query = query.order("last_name", { ascending: true }).order("first_name", { ascending: true });
   }
@@ -154,10 +202,10 @@ export default async function RosterPage({
     <th className={className}>
       <Link
         href={sortLink(sortKey)}
-        className="group inline-flex font-semibold text-gray-900 hover:text-blue-600"
+        className="group inline-flex font-semibold text-[#F4F1EB] hover:text-[#CEE4D4]"
       >
         {children}
-        <span className="ml-1 text-gray-400 group-hover:text-blue-600">
+        <span className="ml-1 text-[#AFA89C] group-hover:text-[#CEE4D4]">
           {currentSort === sortKey ? (currentOrder === "asc" ? "↑" : "↓") : "↕"}
         </span>
       </Link>
@@ -168,8 +216,8 @@ export default async function RosterPage({
     <div className="px-4 sm:px-6 lg:px-8">
       <div className="sm:flex sm:items-center">
         <div className="sm:flex-auto">
-          <h1 className="text-2xl font-semibold text-gray-900">Roster</h1>
-          <p className="mt-2 text-sm text-gray-700">
+          <h1 className="text-2xl font-semibold text-[#F4F1EB]">Roster</h1>
+          <p className="mt-2 text-sm text-[#D7D0C4]">
             {athletes?.length || 0} athletes
           </p>
         </div>
@@ -184,12 +232,12 @@ export default async function RosterPage({
           name="search"
           placeholder="Search names, sport, location, agent..."
           defaultValue={searchParams.search}
-          className="px-3 py-2 border border-gray-300 rounded-md text-sm min-w-[200px]"
+          className="min-w-[240px] rounded-md border border-white/20 bg-[#111513] px-3 py-2 text-sm text-[#F4F1EB] placeholder:text-[#8E877A] focus:border-[#2E7040] focus:outline-none"
         />
         <select
           name="sport"
           defaultValue={searchParams.sport}
-          className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+          className="rounded-md border border-white/20 bg-[#111513] px-3 py-2 text-sm text-[#F4F1EB] focus:border-[#2E7040] focus:outline-none"
         >
           <option value="">All Sports</option>
           {uniqueSports.map((sport) => (
@@ -201,7 +249,7 @@ export default async function RosterPage({
         <select
           name="country"
           defaultValue={searchParams.country}
-          className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+          className="rounded-md border border-white/20 bg-[#111513] px-3 py-2 text-sm text-[#F4F1EB] focus:border-[#2E7040] focus:outline-none"
         >
           <option value="">All Countries</option>
           {uniqueCountries.map((country) => (
@@ -214,7 +262,7 @@ export default async function RosterPage({
           <select
             name="agent"
             defaultValue={searchParams.agent}
-            className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+            className="rounded-md border border-white/20 bg-[#111513] px-3 py-2 text-sm text-[#F4F1EB] focus:border-[#2E7040] focus:outline-none"
           >
             <option value="">All Agents</option>
             {agents.map((agent) => (
@@ -226,7 +274,7 @@ export default async function RosterPage({
         )}
         <button
           type="submit"
-          className="px-4 py-2 bg-blue-600 text-white rounded-md text-sm hover:bg-blue-700"
+          className="rounded-md bg-[#2E7040] px-4 py-2 text-sm text-white hover:bg-[#285F36]"
         >
           Search
         </button>
@@ -236,10 +284,10 @@ export default async function RosterPage({
       <div className="mt-8 flow-root">
         <div className="-mx-4 -my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
           <div className="inline-block min-w-full py-2 align-middle sm:px-6 lg:px-8">
-            <table className="min-w-full divide-y divide-gray-300">
+            <table className="min-w-full divide-y divide-white/15 rounded-xl border border-white/10 bg-[#121614]">
               <thead>
                 <tr>
-                  <SortableTh sortKey="name" className="py-3.5 pl-4 pr-3 text-left text-sm sm:pl-0">
+                  <SortableTh sortKey="name" className="py-3.5 pl-4 pr-3 text-left text-sm sm:pl-4">
                     Name
                   </SortableTh>
                   <SortableTh sortKey="sport" className="px-3 py-3.5 text-left text-sm">
@@ -253,38 +301,32 @@ export default async function RosterPage({
                       Agent
                     </SortableTh>
                   )}
-                  <SortableTh sortKey="creatoriq" className="px-3 py-3.5 text-left text-sm">
-                    CreatorIQ ID
-                  </SortableTh>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-200">
+              <tbody className="divide-y divide-white/10">
                 {athletes?.map((athlete: any) => (
-                  <tr key={athlete.athlete_id}>
-                    <td className="whitespace-nowrap py-4 pl-4 pr-3 text-sm font-medium text-gray-900 sm:pl-0">
+                  <tr key={athlete.athlete_id} className="hover:bg-white/5">
+                    <td className="whitespace-nowrap py-4 pl-4 pr-3 text-sm font-medium text-[#F4F1EB] sm:pl-4">
                       <Link
                         href={`/athlete/${athlete.athlete_id}`}
-                        className="text-blue-600 hover:text-blue-900"
+                        className="text-[#CEE4D4] hover:text-[#E8F6ED]"
                       >
                         {athlete.first_name} {athlete.last_name}
                       </Link>
                     </td>
-                    <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
+                    <td className="whitespace-nowrap px-3 py-4 text-sm text-[#D7D0C4]">
                       {athlete.sport || "—"}
                     </td>
-                    <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
+                    <td className="whitespace-nowrap px-3 py-4 text-sm text-[#D7D0C4]">
                       {[athlete.city, athlete.state, athlete.country].filter(Boolean).join(", ") || "—"}
                     </td>
                     {profile.role !== "agent" && (
-                      <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
+                      <td className="whitespace-nowrap px-3 py-4 text-sm text-[#D7D0C4]">
                         {athlete.profiles
                           ? `${athlete.profiles.first_name || ""} ${athlete.profiles.last_name || ""}`.trim() || athlete.profiles.email
                           : "—"}
                       </td>
                     )}
-                    <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
-                      {athlete.creatoriq_publisher_id || "—"}
-                    </td>
                   </tr>
                 ))}
               </tbody>

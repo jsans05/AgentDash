@@ -1,10 +1,16 @@
 import { createServerClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
 import { NextResponse } from "next/server";
-import { getAudienceMetrics } from "@/lib/audience-metrics";
+import { audiencePercentPoints, getAthleteAudienceProfile } from "@/lib/athlete-data";
 import { searchCompanies } from "@/lib/enrichment";
-import { getTaxonomyBySport, resolveCategoryToTaxonomy } from "@/lib/taxonomy";
+import {
+  fetchTaxonomyNodesForSport,
+  getTaxonomyBySport,
+  resolveCategoryToTaxonomy,
+} from "@/lib/taxonomy";
 import OpenAI from "openai";
+import { validateProspectingTable } from "@/lib/ai/output-validation";
+import { OPENAI_CHAT_MODEL, OPENAI_REASONING_EFFORT } from "@/lib/ai/openai-chat-defaults";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -32,15 +38,33 @@ function getMissingByTier(
 }
 
 /**
- * Extract audience signals from unified metrics (CreatorIQ or manual fallback).
+ * Extract audience signals from athlete_audience_data rows.
  */
-function audienceSignalsFromSummary(summary: { age: { label: string; value: number }[]; countries: { name: string; value: number }[]; interests: { name: string; value: number }[]; brands?: { name: string; value: number }[] }) {
+function audienceSignalsFromSummary(summary: {
+  age: { audience_name: string; ig_audience_percent: number }[];
+  countries: { audience_name: string; ig_audience_percent: number }[];
+  interests: { audience_name: string; ig_audience_percent: number }[];
+  brands?: { audience_name: string; ig_audience_percent: number }[];
+}) {
   return {
-    ageBands: summary.age.map((a) => `${a.label} (${a.value}%)`),
-    topCountries: summary.countries.slice(0, 5).map((c) => `${c.name} (${c.value}%)`),
-    interests: summary.interests.slice(0, 10).map((i) => `${i.name} (${i.value}%)`),
-    brands: (summary.brands ?? []).slice(0, 10).map((b) => `${b.name} (${b.value}%)`),
+    ageBands: summary.age.map((a) => `${a.audience_name} (${audiencePercentPoints(a.ig_audience_percent).toFixed(1)}%)`),
+    topCountries: summary.countries.slice(0, 5).map((c) => `${c.audience_name} (${audiencePercentPoints(c.ig_audience_percent).toFixed(1)}%)`),
+    interests: summary.interests.slice(0, 10).map((i) => `${i.audience_name} (${audiencePercentPoints(i.ig_audience_percent).toFixed(1)}%)`),
+    brands: (summary.brands ?? []).slice(0, 10).map((b) => `${b.audience_name} (${audiencePercentPoints(b.ig_audience_percent).toFixed(1)}%)`),
   };
+}
+
+function buildDeterministicProspectTable(
+  athleteName: string,
+  companies: Array<{ name: string; industry: string; category: string }>
+): string {
+  const header = "| Athlete | Company Recommendation | Industry | Rationale |";
+  const divider = "| --- | --- | --- | --- |";
+  const rows = companies.slice(0, 10).map((company) => {
+    const rationale = `Targets open ${company.category} category and aligns with this athlete's known audience profile.`;
+    return `| ${athleteName} | ${company.name} | ${company.industry || company.category} | ${rationale} |`;
+  });
+  return [header, divider, ...rows].join("\n");
 }
 
 export async function POST(
@@ -122,15 +146,9 @@ export async function POST(
     existingCategories = (contracts as any[]).map((c) => c.category).filter(Boolean);
   }
 
-  const { data: taxonomyNodes } = sport
-    ? await supabase
-        .from("sponsorship_taxonomies")
-        .select("id, category, sport")
-        .eq("sport", sport)
-        .eq("is_active", true)
-    : { data: [] };
+  const taxonomyNodes = sport ? await fetchTaxonomyNodesForSport(sport) : [];
   const categoryToTaxonomyId = new Map<string, string>();
-  for (const node of taxonomyNodes || []) {
+  for (const node of taxonomyNodes) {
     const normalized = normalizeCategory(node.category);
     categoryToTaxonomyId.set(normalized, node.id);
   }
@@ -143,7 +161,7 @@ export async function POST(
   );
   const categoriesMissing = [...endemicMissing, ...nonEndemicMissing];
 
-  const { summary: audienceSummary } = await getAudienceMetrics(supabase, athleteId);
+  const audienceSummary = await getAthleteAudienceProfile(supabase, athleteId);
   const audienceSignals = audienceSignalsFromSummary(audienceSummary);
 
   // For top 5-10 missing categories, find candidate companies
@@ -244,7 +262,8 @@ Rules:
 
   try {
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: OPENAI_CHAT_MODEL,
+      reasoning_effort: OPENAI_REASONING_EFFORT,
       messages: [
         {
           role: "system",
@@ -257,6 +276,10 @@ Rules:
     });
 
     aiResponse = completion.choices[0].message.content || "";
+    const validation = validateProspectingTable(aiResponse);
+    if (!validation.ok) {
+      aiResponse = buildDeterministicProspectTable(athleteName, companyCandidates);
+    }
     sources = companyCandidates.map((c) => c.website || c.name).filter(Boolean);
   } catch (error) {
     console.error("AI prospecting error:", error);

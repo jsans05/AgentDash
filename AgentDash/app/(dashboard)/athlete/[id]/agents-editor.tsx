@@ -105,13 +105,13 @@ export function AthleteAgentsEditor({
 
   return (
     <div className="space-y-2">
-      <ul className="list-disc list-inside text-sm text-gray-900">
+      <ul className="list-disc list-inside text-sm text-[#ECE7DF]">
         {agents.map((a) => (
           <li key={a.user_id} className="flex items-center gap-2 flex-wrap">
             <span>
               {label(a.profiles, a.user_id)}
               {a.is_primary && (
-                <span className="ml-1 text-xs text-gray-500">(primary)</span>
+                <span className="ml-1 text-xs text-[#9E978B]">(primary)</span>
               )}
             </span>
             {!a.is_primary && (
@@ -119,7 +119,7 @@ export function AthleteAgentsEditor({
                 type="button"
                 onClick={() => setPrimary(a.user_id)}
                 disabled={busy}
-                className="text-xs text-blue-600 hover:text-blue-800 disabled:opacity-50"
+                className="text-xs text-[#CEE4D4] hover:text-[#E8F6ED] disabled:opacity-50"
               >
                 Set primary
               </button>
@@ -128,7 +128,7 @@ export function AthleteAgentsEditor({
               type="button"
               onClick={() => removeAgent(a.user_id)}
               disabled={busy}
-              className="text-xs text-red-600 hover:text-red-800 disabled:opacity-50"
+              className="text-xs text-[#F1A2A2] hover:text-[#FFD2D2] disabled:opacity-50"
             >
               Remove
             </button>
@@ -140,7 +140,7 @@ export function AthleteAgentsEditor({
           <select
             value={selectedUserId}
             onChange={(e) => setSelectedUserId(e.target.value)}
-            className="border border-gray-300 rounded px-2 py-1 text-sm"
+            className="rounded border border-white/20 bg-[#101513] px-2 py-1 text-sm text-[#ECE7DF]"
           >
             <option value="">Select agent</option>
             {availableAgents.map((a) => (
@@ -153,14 +153,14 @@ export function AthleteAgentsEditor({
             type="button"
             onClick={addAgent}
             disabled={busy || !selectedUserId}
-            className="text-sm text-blue-600 hover:text-blue-800 disabled:opacity-50"
+            className="text-sm text-[#CEE4D4] hover:text-[#E8F6ED] disabled:opacity-50"
           >
             Add
           </button>
           <button
             type="button"
             onClick={() => { setAdding(false); setSelectedUserId(""); }}
-            className="text-sm text-gray-600 hover:text-gray-800"
+            className="text-sm text-[#B9B2A6] hover:text-[#F4F1EB]"
           >
             Cancel
           </button>
@@ -169,7 +169,7 @@ export function AthleteAgentsEditor({
         <button
           type="button"
           onClick={() => setAdding(true)}
-          className="text-sm text-blue-600 hover:text-blue-800"
+          className="text-sm text-[#CEE4D4] hover:text-[#E8F6ED]"
         >
           + Add agent
         </button>

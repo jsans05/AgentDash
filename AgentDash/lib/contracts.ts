@@ -1,4 +1,27 @@
 /**
+ * Format a stored contract date as MM/DD/YYYY.
+ * Prefers the calendar YYYY-MM-DD prefix when present so the day does not shift by timezone.
+ */
+export function formatContractDateForDisplay(value: string | null | undefined): string | null {
+  if (value == null || String(value).trim() === "") return null;
+  const head = String(value).slice(0, 10);
+  const cal = /^(\d{4})-(\d{2})-(\d{2})$/.exec(head);
+  if (cal) {
+    const [, y, m, d] = cal;
+    return `${m}/${d}/${y}`;
+  }
+  const t = Date.parse(String(value));
+  if (!Number.isNaN(t)) {
+    const dt = new Date(t);
+    const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(dt.getUTCDate()).padStart(2, "0");
+    const y = String(dt.getUTCFullYear());
+    return `${m}/${day}/${y}`;
+  }
+  return String(value);
+}
+
+/**
  * Derive display status from contract end_date.
  * - "terminated" in DB stays "terminated".
  * - If end_date has passed → "expired".

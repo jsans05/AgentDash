@@ -1,0 +1,45 @@
+import { createServerClient } from "@/lib/supabase/server";
+import { requireProfile } from "@/lib/auth";
+import { NextResponse } from "next/server";
+
+export async function PATCH(
+  req: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id: athleteId } = await params;
+  const profile = await requireProfile();
+  const supabase = await createServerClient();
+
+  if (profile.role === "agent") {
+    const { data: link } = await supabase
+      .from("athlete_agents")
+      .select("user_id")
+      .eq("athlete_id", athleteId)
+      .eq("user_id", profile.user_id)
+      .maybeSingle();
+    if (!link) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+    }
+  }
+
+  let body: { sport?: unknown } = {};
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  const rawSport = typeof body.sport === "string" ? body.sport.trim() : "";
+  const sport = rawSport.length > 0 ? rawSport : null;
+
+  const { error } = await supabase
+    .from("athletes")
+    .update({ sport })
+    .eq("athlete_id", athleteId);
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ sport });
+}

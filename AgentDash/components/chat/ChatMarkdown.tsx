@@ -27,6 +27,23 @@ export function ChatMarkdown({ content, className }: { content: string; classNam
   const out: React.ReactNode[] = [];
   let key = 0;
 
+  // Normalize common LaTeX-style output from model responses so it displays
+  // cleanly in plain markdown (without requiring a full math renderer).
+  function normalizeMathLikeText(input: string): string {
+    let s = input;
+    s = s.replace(/\\\[/g, "\n").replace(/\\\]/g, "\n");
+    s = s.replace(/\\\(/g, "").replace(/\\\)/g, "");
+    s = s.replace(/\\text\{([^}]*)\}/g, "$1");
+    s = s.replace(/\\frac\{([^}]*)\}\{([^}]*)\}/g, "($1)/($2)");
+    s = s.replace(/\\times/g, "×");
+    s = s.replace(/\\cdot/g, "·");
+    s = s.replace(/\\approx/g, "≈");
+    s = s.replace(/\\leq/g, "≤").replace(/\\geq/g, "≥");
+    s = s.replace(/\\\{/g, "{").replace(/\\\}/g, "}");
+    s = s.replace(/\\%/g, "%");
+    return s;
+  }
+
   // Split by fenced code blocks first
   const codeBlockRe = /^```(\w*)\n([\s\S]*?)```/gm;
   let lastIndex = 0;
@@ -47,24 +64,69 @@ export function ChatMarkdown({ content, className }: { content: string; classNam
     parts.push({ type: "text", lang: "", body: content });
   }
 
-  function renderInline(text: string) {
+  function autolinkPlain(text: string): React.ReactNode[] {
     const nodes: React.ReactNode[] = [];
-    let i = 0;
-    const re = /\*\*(.+?)\*\*|__(.+?)__|\*(.+?)\*|_(.+?)_|`([^`]+)`/g;
+    const re = /(https?:\/\/[^\s<>()[\]{}]+)(?=[.,;:!?)\]}]*(?:\s|$))/g;
     let m: RegExpExecArray | null;
     let lastEnd = 0;
     while ((m = re.exec(text)) !== null) {
-      if (m.index > lastEnd) {
-        nodes.push(text.slice(lastEnd, m.index));
+      if (m.index > lastEnd) nodes.push(text.slice(lastEnd, m.index));
+      const url = m[1].replace(/[.,;:!?)\]}]+$/, "");
+      let label = url;
+      try {
+        label = new URL(url).hostname.replace(/^www\./, "");
+      } catch {
+        // fall back to raw url
       }
-      if (m[1] !== undefined) nodes.push(<strong key={`b-${key++}`} className="font-semibold">{m[1]}</strong>);
-      else if (m[2] !== undefined) nodes.push(<strong key={`b-${key++}`} className="font-semibold">{m[2]}</strong>);
-      else if (m[3] !== undefined) nodes.push(<em key={`i-${key++}`}>{m[3]}</em>);
-      else if (m[4] !== undefined) nodes.push(<em key={`i-${key++}`}>{m[4]}</em>);
-      else if (m[5] !== undefined) nodes.push(<code key={`c-${key++}`} className="rounded bg-muted px-1.5 py-0.5 text-sm font-mono">{m[5]}</code>);
-      lastEnd = re.lastIndex;
+      nodes.push(
+        <a
+          key={`u-${key++}`}
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          {label}
+        </a>
+      );
+      const consumedEnd = m.index + m[1].length - (m[1].length - url.length);
+      lastEnd = consumedEnd;
+      re.lastIndex = consumedEnd;
     }
     if (lastEnd < text.length) nodes.push(text.slice(lastEnd));
+    return nodes;
+  }
+
+  function renderInline(text: string) {
+    const nodes: React.ReactNode[] = [];
+    const re = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|\*\*(.+?)\*\*|__(.+?)__|\*(.+?)\*|_(.+?)_|`([^`]+)`/g;
+    let m: RegExpExecArray | null;
+    let lastEnd = 0;
+    const pushPlain = (s: string) => {
+      for (const n of autolinkPlain(s)) nodes.push(n);
+    };
+    while ((m = re.exec(text)) !== null) {
+      if (m.index > lastEnd) {
+        pushPlain(text.slice(lastEnd, m.index));
+      }
+      if (m[1] !== undefined && m[2] !== undefined) {
+        nodes.push(
+          <a
+            key={`l-${key++}`}
+            href={m[2]}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {m[1]}
+          </a>
+        );
+      } else if (m[3] !== undefined) nodes.push(<strong key={`b-${key++}`} className="font-semibold">{m[3]}</strong>);
+      else if (m[4] !== undefined) nodes.push(<strong key={`b-${key++}`} className="font-semibold">{m[4]}</strong>);
+      else if (m[5] !== undefined) nodes.push(<em key={`i-${key++}`}>{m[5]}</em>);
+      else if (m[6] !== undefined) nodes.push(<em key={`i-${key++}`}>{m[6]}</em>);
+      else if (m[7] !== undefined) nodes.push(<code key={`c-${key++}`} className="rounded bg-muted px-1.5 py-0.5 text-sm font-mono">{m[7]}</code>);
+      lastEnd = re.lastIndex;
+    }
+    if (lastEnd < text.length) pushPlain(text.slice(lastEnd));
     return nodes.length === 1 && typeof nodes[0] === "string" ? nodes[0] : <>{nodes}</>;
   }
 
@@ -160,7 +222,7 @@ export function ChatMarkdown({ content, className }: { content: string; classNam
         </div>
       );
     } else {
-      out.push(...renderTextBlock(part.body));
+      out.push(...renderTextBlock(normalizeMathLikeText(part.body)));
     }
   }
 

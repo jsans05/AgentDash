@@ -6,7 +6,7 @@ export default async function AdminImportPage() {
 
   return (
     <div className="px-4 sm:px-6 lg:px-8">
-      <h1 className="text-2xl font-semibold text-gray-900 mb-6">Import Data</h1>
+      <h1 className="mb-6 text-2xl font-semibold text-[#F4F1EB]">Import Data</h1>
       <ImportClient />
     </div>
   );

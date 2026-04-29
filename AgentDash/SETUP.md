@@ -36,9 +36,6 @@ SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
 
 OPENAI_API_KEY=your_openai_key
 
-CREATORIQ_API_KEY=your_creatoriq_key
-CREATORIQ_BASE_URL=https://api.creatoriq.com
-
 TAVILY_API_KEY=your_tavily_key
 ENRICH_PROVIDER=tavily
 ```
@@ -57,26 +54,25 @@ Visit http://localhost:3000, log in with `admin@example.com` / `AdminPassword123
 
 ✅ **Auth & RBAC**: Supabase Auth + Postgres RLS (admin/sales/agent roles)  
 ✅ **Roster List**: Search, filters (sport, country, agent), role-scoped  
-✅ **Athlete Profile**: Info, accolades editor, contracts list, CreatorIQ snapshots  
+✅ **Athlete Profile**: Info, accolades editor, contracts list, audience insights
 ✅ **Contracts List**: Filter by status/category, conflict checking  
 ✅ **Admin Import**: CSV/XLSX for athletes and contracts  
-✅ **CreatorIQ**: Refresh endpoint + snapshot storage (raw JSON)  
+✅ **Manual Audience**: Admin uploads for audience metrics
 ✅ **AI Assistant**: Tool calling, prospecting table, sales insights, email templates  
 ✅ **Web Enrichment**: Tavily/SERP/Google CSE for company discovery  
 
 ## Next Steps (Enhancements)
 
 - [ ] Add contract create/edit modals
-- [ ] Add charts for CIQ trends (Recharts)
+- [ ] Add audience analytics charts (Recharts)
 - [ ] Add athlete reassignment UI (admin)
 - [ ] Add company contact management UI
 - [ ] Enhance AI outputs with better formatting
 - [ ] Add export functionality
-- [ ] Set up Vercel cron for monthly CIQ refresh
+- [ ] (optional) Set up scheduled audience refresh workflow
 
 ## Notes
 
 - **RLS enforced**: All access controlled at database level
 - **AI is read-only**: No DB writes from AI in v1
-- **CreatorIQ**: Store snapshots monthly; refresh on-demand
 - **Import**: Auto-creates companies/categories if missing

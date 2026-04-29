@@ -18,6 +18,7 @@ export type Athlete = {
   country: string | null;
   creatoriq_publisher_id: string | null;
   accolades: string[];
+  notes: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -34,6 +35,8 @@ export type Company = {
   name: string;
   industry: string | null;
   website: string | null;
+  instagram_url: string | null;
+  support_email: string | null;
   notes: string | null;
   created_at: string;
 };
@@ -55,40 +58,6 @@ export type Contract = {
   archived: boolean;
 };
 
-export type CreatorIQSnapshot = {
-  snapshot_id: string;
-  athlete_id: string;
-  fetched_at: string;
-  snapshot_type: "audience" | "social" | "publisher" | "accounts" | "other";
-  raw_json: Record<string, any>;
-};
-
-export type CiqEngagementRateSnapshot = {
-  id: string;
-  athlete_id: string;
-  publisher_id: string;
-  social_id: string | null;
-  network: string | null;
-  start_date: string | null;
-  end_date: string | null;
-  metrics: Record<string, any>;
-  raw: Record<string, any>;
-  created_at: string;
-};
-
-export type CiqAccountInfoSnapshot = {
-  id: string;
-  athlete_id: string;
-  publisher_id: string;
-  network: string | null;
-  account_handle: string | null;
-  account_url: string | null;
-  ciq_account_id: string | null;
-  metrics: Record<string, any>;
-  raw: Record<string, any>;
-  created_at: string;
-};
-
 export type CompanyContact = {
   contact_id: string;
   company_id: string;
@@ -98,5 +67,145 @@ export type CompanyContact = {
   contact_email: string | null;
   contact_phone: string | null;
   notes: string | null;
+  created_at: string;
+};
+
+export type CrmContact = {
+  contact_id: string;
+  company_id: string;
+  created_by_user_id: string;
+
+  first_name: string;
+  last_name: string;
+  /** Person role/title at the company */
+  role: string | null;
+
+  email: string | null;
+  linkedin_url: string | null;
+  zoominfo_url: string | null;
+
+  taxonomy_id: string | null;
+  /** Denormalized display category for the selected taxonomy node */
+  category: string | null;
+
+  /** Notes about product/category fit (user-provided) */
+  product_description: string | null;
+
+  notes: string | null;
+  last_outreach_at: string | null;
+  status_tag: "none" | "green_conversation" | "yellow_authenticated" | "red_bounced";
+  archived: boolean;
+  outreach_mode: "email" | "linkedin" | "other";
+
+  created_at: string;
+  updated_at: string;
+};
+
+export type CrmContactAthlete = {
+  contact_id: string;
+  athlete_id: string;
+  created_at: string;
+};
+
+export type CrmOutreachLog = {
+  id: string;
+  contact_id: string;
+  athlete_id: string | null;
+  user_id: string;
+
+  outreach_channel: string;
+  outreach_at: string;
+  outreach_notes: string | null;
+
+  created_at: string;
+};
+
+export type CrmCompanyPipeline = {
+  id: string;
+  company_id: string;
+  created_by_user_id: string;
+  status: "in_progress" | "promoted_to_crm";
+  funnel_stage: "idea" | "research" | "contacted" | "negotiating" | "paused" | "won" | "lost";
+  priority: 1 | 2 | 3;
+  next_follow_up_at: string | null;
+  archived: boolean;
+  support_email: string | null;
+  contact_emails: string[];
+  relevant_people: Array<{
+    name?: string | null;
+    linkedin_url?: string | null;
+    email?: string | null;
+    source_contact_id?: string | null;
+  }>;
+  notes: string | null;
+  sent_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AthleteSocialData = {
+  id: string;
+  athlete_id: string;
+  talent_id: string | null;
+  name_raw: string | null;
+  total_followers: number;
+  avg_er_20p: number | null;
+  total_lifetime_posts: number | null;
+  ig_followers: number | null;
+  avg_er_ig_20p: number | null;
+  ig_lifetime_posts: number | null;
+  tt_followers: number | null;
+  avg_er_tt_20p: number | null;
+  tt_lifetime_posts: number | null;
+  fb_followers: number | null;
+  avg_er_fb_20p: number | null;
+  fb_lifetime_posts: number | null;
+  x_followers: number | null;
+  avg_er_x_20p: number | null;
+  x_lifetime_posts: number | null;
+  imported_at: string;
+  updated_at: string;
+};
+
+export type AthleteAudienceData = {
+  id: string;
+  athlete_id: string;
+  talent_id: string | null;
+  name_raw: string | null;
+  audience_category: "Brands" | "Cities" | "Combined_Age" | "Countries" | "Ethnicity" | "Gender" | "Interests" | "States";
+  audience_name: string;
+  ig_audience_percent: number;
+  ig_audience_count: number;
+  current_ig_following: number | null;
+  imported_at: string;
+  updated_at: string;
+};
+
+export type AIProject = {
+  project_id: string;
+  owner_user_id: string;
+  name: string;
+  instructions: string;
+  memory_notes: string[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type AIConversation = {
+  conversation_id: string;
+  project_id: string;
+  owner_user_id: string;
+  title: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AIMessage = {
+  message_id: string;
+  conversation_id: string;
+  project_id: string;
+  owner_user_id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
   created_at: string;
 };

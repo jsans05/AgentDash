@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import { TAXONOMY_NON_ENDEMIC_GLOBAL_SPORT } from "@/lib/taxonomy-constants";
 
 type TaxonomyRow = {
   id: string;
@@ -13,47 +14,103 @@ type TaxonomyRow = {
   created_at: string;
 };
 
+type AdminTab = "global" | "endemic";
+
 export function TaxonomyClient() {
   const router = useRouter();
   const [rows, setRows] = useState<TaxonomyRow[]>([]);
+  const [endemicSports, setEndemicSports] = useState<string[]>([]);
+  const [mergedPreview, setMergedPreview] = useState<{
+    endemic: string[];
+    nonEndemic: string[];
+  } | null>(null);
   const [loading, setLoading] = useState(true);
-  const [sportFilter, setSportFilter] = useState<string>("");
+  const [adminTab, setAdminTab] = useState<AdminTab>("endemic");
+  const [endemicSportPick, setEndemicSportPick] = useState<string>("");
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState<{ category: string; sort_order: number; is_active: boolean }>({ category: "", sort_order: 0, is_active: true });
+  const [editForm, setEditForm] = useState<{
+    category: string;
+    sort_order: number;
+    is_active: boolean;
+  }>({ category: "", sort_order: 0, is_active: true });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [globalLegacyFallback, setGlobalLegacyFallback] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
-  const [newRow, setNewRow] = useState<{ sport: string; tier: string; category: string; sort_order: number }>({ sport: "", tier: "ENDEMIC", category: "", sort_order: 0 });
+  const [newRow, setNewRow] = useState<{ category: string; sort_order: number }>({
+    category: "",
+    sort_order: 0,
+  });
 
-  async function load() {
+  const loadEndemicSports = useCallback(async () => {
+    const res = await fetch("/api/admin/taxonomy?sports_only=1", { credentials: "include" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Failed to load sports");
+    const list = Array.isArray(data) ? data : [];
+    setEndemicSports(list);
+    setEndemicSportPick((prev) => {
+      if (prev && list.includes(prev)) return prev;
+      return list[0] ?? "";
+    });
+  }, []);
+
+  const loadRows = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const url = sportFilter ? `/api/admin/taxonomy?sport=${encodeURIComponent(sportFilter)}` : "/api/admin/taxonomy";
-      const res = await fetch(url, { credentials: "include" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to load");
-      setRows(Array.isArray(data) ? data : []);
-    } catch (e: any) {
-      setError(e.message || "Failed to load taxonomies");
+      if (adminTab === "global") {
+        const url = `/api/admin/taxonomy?sport=${encodeURIComponent(TAXONOMY_NON_ENDEMIC_GLOBAL_SPORT)}`;
+        const res = await fetch(url, { credentials: "include" });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed to load");
+        setGlobalLegacyFallback(res.headers.get("x-taxonomy-global-legacy") === "1");
+        setRows(Array.isArray(data) ? data : []);
+        setMergedPreview(null);
+      } else {
+        if (!endemicSportPick) {
+          setRows([]);
+          setMergedPreview(null);
+        } else {
+          const url = `/api/admin/taxonomy?sport=${encodeURIComponent(endemicSportPick)}`;
+          const res = await fetch(url, { credentials: "include" });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "Failed to load");
+          const list = (Array.isArray(data) ? data : []) as TaxonomyRow[];
+          setRows(list.filter((r) => r.tier === "ENDEMIC"));
+
+          const prevRes = await fetch(
+            `/api/taxonomy?sport=${encodeURIComponent(endemicSportPick)}`,
+            { credentials: "include" }
+          );
+          const prevJson = await prevRes.json();
+          if (prevRes.ok && prevJson && typeof prevJson === "object") {
+            setMergedPreview({
+              endemic: Array.isArray(prevJson.endemic) ? prevJson.endemic : [],
+              nonEndemic: Array.isArray(prevJson.nonEndemic) ? prevJson.nonEndemic : [],
+            });
+          } else {
+            setMergedPreview(null);
+          }
+        }
+      }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Failed to load taxonomies";
+      setError(msg);
       setRows([]);
+      setMergedPreview(null);
+      setGlobalLegacyFallback(false);
     } finally {
       setLoading(false);
     }
-  }
+  }, [adminTab, endemicSportPick]);
 
   useEffect(() => {
-    load();
-  }, [sportFilter]);
+    loadEndemicSports().catch((e) => setError(e instanceof Error ? e.message : "Failed to load sports"));
+  }, [loadEndemicSports]);
 
-  const sports = Array.from(new Set(rows.map((r) => r.sport))).sort();
-  const allSports = sportFilter ? sports : [...sports];
-  const grouped = rows.reduce<Record<string, { endemic: TaxonomyRow[]; nonEndemic: TaxonomyRow[] }>>((acc, r) => {
-    if (!acc[r.sport]) acc[r.sport] = { endemic: [], nonEndemic: [] };
-    if (r.tier === "ENDEMIC") acc[r.sport].endemic.push(r);
-    else acc[r.sport].nonEndemic.push(r);
-    return acc;
-  }, {});
+  useEffect(() => {
+    loadRows();
+  }, [loadRows]);
 
   function startEdit(row: TaxonomyRow) {
     setEditingId(row.id);
@@ -78,10 +135,10 @@ export function TaxonomyClient() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to update");
       setEditingId(null);
-      await load();
+      await loadRows();
       router.refresh();
-    } catch (e: any) {
-      setError(e.message || "Failed to save");
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to save");
     } finally {
       setSaving(false);
     }
@@ -95,125 +152,217 @@ export function TaxonomyClient() {
       const res = await fetch(`/api/admin/taxonomy/${id}`, { method: "DELETE", credentials: "include" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to delete");
-      await load();
+      await loadRows();
+      await loadEndemicSports();
       router.refresh();
-    } catch (e: any) {
-      setError(e.message || "Failed to delete");
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to delete");
     } finally {
       setSaving(false);
     }
   }
 
   async function addRow() {
-    if (!newRow.sport.trim() || !newRow.category.trim()) {
-      setError("Sport and category are required");
+    if (!newRow.category.trim()) {
+      setError("Category is required");
+      return;
+    }
+    if (adminTab === "endemic" && !endemicSportPick) {
+      setError("Select a sport for endemic categories");
       return;
     }
     setSaving(true);
     setError(null);
     try {
+      const body =
+        adminTab === "global"
+          ? { tier: "NON_ENDEMIC", category: newRow.category.trim(), sort_order: newRow.sort_order }
+          : {
+              tier: "ENDEMIC",
+              sport: endemicSportPick,
+              category: newRow.category.trim(),
+              sort_order: newRow.sort_order,
+            };
       const res = await fetch("/api/admin/taxonomy", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...newRow, is_active: true }),
+        body: JSON.stringify(body),
         credentials: "include",
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to add");
       setShowAdd(false);
-      setNewRow({ sport: "", tier: "ENDEMIC", category: "", sort_order: 0 });
-      await load();
+      setNewRow({ category: "", sort_order: 0 });
+      await loadRows();
+      await loadEndemicSports();
       router.refresh();
-    } catch (e: any) {
-      setError(e.message || "Failed to add");
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to add");
     } finally {
       setSaving(false);
     }
   }
 
-  if (loading) {
-    return <p className="text-sm text-gray-500">Loading…</p>;
-  }
-
   return (
     <div className="space-y-6">
       {error && (
-        <div className="rounded-md bg-red-50 p-3 text-sm text-red-700">
-          {error}
+        <div className="rounded-md border border-[#8C3A3A]/50 bg-[#3A1E1E] p-3 text-sm text-[#F1A2A2]">{error}</div>
+      )}
+
+      <div className="flex flex-wrap gap-2 border-b border-white/10 pb-3">
+        <button
+          type="button"
+          onClick={() => {
+            setAdminTab("endemic");
+            setEditingId(null);
+            setShowAdd(false);
+          }}
+          className={`px-4 py-2 rounded-md text-sm font-medium ${
+            adminTab === "endemic"
+              ? "bg-[#2E7040] text-white"
+              : "bg-[#1A211D] text-[#D7D0C4] hover:bg-[#222A26]"
+          }`}
+        >
+          Per-sport endemic
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setAdminTab("global");
+            setEditingId(null);
+            setShowAdd(false);
+          }}
+          className={`px-4 py-2 rounded-md text-sm font-medium ${
+            adminTab === "global"
+              ? "bg-[#2E7040] text-white"
+              : "bg-[#1A211D] text-[#D7D0C4] hover:bg-[#222A26]"
+          }`}
+        >
+          Global non-endemic
+        </button>
+      </div>
+
+      <p className="text-sm text-[#B9B2A6]">
+        {adminTab === "global"
+          ? "These categories apply to every sport (one shared list). Contracts and imports merge them with each sport’s endemic list."
+          : "Endemic categories are specific to the selected sport. Use the preview below to see the full merged taxonomy used by the app."}
+      </p>
+
+      {adminTab === "global" && globalLegacyFallback && (
+        <div className="rounded-md border border-[#87652E]/60 bg-[#3A2E1A] p-3 text-sm text-[#F3D8A2]">
+          The database has not been consolidated yet: there are no rows under{" "}
+          <code className="rounded bg-[#5A4522] px-1">{TAXONOMY_NON_ENDEMIC_GLOBAL_SPORT}</code>. Showing
+          legacy per-sport non-endemic rows (same categories you had before migration). Edits apply to those
+          rows until you run the migration{" "}
+          <code className="rounded bg-[#5A4522] px-1">20260330120000_global_non_endemic_taxonomy.sql</code>{" "}
+          on Supabase. New rows you add here still go into the global bucket.
+        </div>
+      )}
+
+      {adminTab === "endemic" && (
+        <label className="flex flex-wrap items-center gap-2">
+          <span className="text-sm font-medium text-[#D7D0C4]">Sport</span>
+          <select
+            value={endemicSportPick}
+            onChange={(e) => setEndemicSportPick(e.target.value)}
+            className="min-w-[220px] rounded-md border border-white/20 bg-[#101513] px-3 py-2 text-sm text-[#ECE7DF]"
+          >
+            {endemicSports.length === 0 ? (
+              <option value="">No sports yet — add endemic rows</option>
+            ) : (
+              endemicSports.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))
+            )}
+          </select>
+        </label>
+      )}
+
+      {adminTab === "endemic" && mergedPreview && endemicSportPick && (
+        <div className="rounded-lg border border-dashed border-white/20 bg-[#151A17] p-4 text-sm">
+          <h3 className="mb-2 font-medium text-[#F4F1EB]">Merged preview (endemic + global)</h3>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <div className="mb-1 text-xs font-medium text-[#B9B2A6]">ENDEMIC</div>
+              <ul className="max-h-40 list-inside list-disc overflow-y-auto text-[#D7D0C4]">
+                {mergedPreview.endemic.map((c) => (
+                  <li key={c}>{c}</li>
+                ))}
+              </ul>
+            </div>
+            <div>
+              <div className="mb-1 text-xs font-medium text-[#B9B2A6]">NON_ENDEMIC (global)</div>
+              <ul className="max-h-40 list-inside list-disc overflow-y-auto text-[#D7D0C4]">
+                {mergedPreview.nonEndemic.map((c) => (
+                  <li key={c}>{c}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
         </div>
       )}
 
       <div className="flex flex-wrap items-center gap-4">
-        <label className="flex items-center gap-2">
-          <span className="text-sm font-medium text-gray-700">Sport</span>
-          <select
-            value={sportFilter}
-            onChange={(e) => setSportFilter(e.target.value)}
-            className="px-3 py-2 border border-gray-300 rounded-md text-sm"
-          >
-            <option value="">All sports</option>
-            {sports.map((s) => (
-              <option key={s} value={s}>{s}</option>
-            ))}
-          </select>
-        </label>
         <button
           type="button"
           onClick={() => setShowAdd(true)}
-          className="px-4 py-2 bg-blue-600 text-white rounded-md text-sm hover:bg-blue-700"
+          className="rounded-md bg-[#2E7040] px-4 py-2 text-sm text-white hover:bg-[#285F36]"
         >
           Add row
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            loadEndemicSports();
+            loadRows();
+          }}
+          className="rounded-md border border-white/20 px-4 py-2 text-sm text-[#D7D0C4] hover:bg-white/5"
+        >
+          Refresh
         </button>
       </div>
 
       {showAdd && (
-        <div className="border border-gray-200 rounded-lg p-4 bg-gray-50 space-y-3">
-          <h3 className="text-sm font-medium text-gray-900">New taxonomy row</h3>
+        <div className="space-y-3 rounded-lg border border-white/15 bg-[#151A17] p-4">
+          <h3 className="text-sm font-medium text-[#F4F1EB]">
+            New {adminTab === "global" ? "global non-endemic" : "endemic"} row
+            {adminTab === "endemic" && endemicSportPick ? ` — ${endemicSportPick}` : ""}
+          </h3>
           <div className="flex flex-wrap gap-3 items-end">
             <div>
-              <label className="block text-xs text-gray-600 mb-1">Sport</label>
-              <input
-                type="text"
-                value={newRow.sport}
-                onChange={(e) => setNewRow((p) => ({ ...p, sport: e.target.value }))}
-                placeholder="e.g. Surf"
-                className="px-3 py-2 border border-gray-300 rounded-md text-sm w-48"
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-600 mb-1">Tier</label>
-              <select
-                value={newRow.tier}
-                onChange={(e) => setNewRow((p) => ({ ...p, tier: e.target.value as "ENDEMIC" | "NON_ENDEMIC" }))}
-                className="px-3 py-2 border border-gray-300 rounded-md text-sm"
-              >
-                <option value="ENDEMIC">ENDEMIC</option>
-                <option value="NON_ENDEMIC">NON_ENDEMIC</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs text-gray-600 mb-1">Category</label>
+              <label className="mb-1 block text-xs text-[#B9B2A6]">Category</label>
               <input
                 type="text"
                 value={newRow.category}
                 onChange={(e) => setNewRow((p) => ({ ...p, category: e.target.value }))}
                 placeholder="Category name"
-                className="px-3 py-2 border border-gray-300 rounded-md text-sm w-56"
+                className="w-56 rounded-md border border-white/20 bg-[#101513] px-3 py-2 text-sm text-[#ECE7DF]"
               />
             </div>
             <div>
-              <label className="block text-xs text-gray-600 mb-1">Sort order</label>
+              <label className="mb-1 block text-xs text-[#B9B2A6]">Sort order</label>
               <input
                 type="number"
                 value={newRow.sort_order}
                 onChange={(e) => setNewRow((p) => ({ ...p, sort_order: Number(e.target.value) || 0 }))}
-                className="px-3 py-2 border border-gray-300 rounded-md text-sm w-20"
+                className="w-20 rounded-md border border-white/20 bg-[#101513] px-3 py-2 text-sm text-[#ECE7DF]"
               />
             </div>
-            <button type="button" onClick={addRow} disabled={saving} className="px-4 py-2 bg-blue-600 text-white rounded-md text-sm hover:bg-blue-700 disabled:opacity-50">
+            <button
+              type="button"
+              onClick={addRow}
+              disabled={saving}
+              className="rounded-md bg-[#2E7040] px-4 py-2 text-sm text-white hover:bg-[#285F36] disabled:opacity-50"
+            >
               {saving ? "Adding…" : "Add"}
             </button>
-            <button type="button" onClick={() => setShowAdd(false)} className="px-4 py-2 border border-gray-300 rounded-md text-sm text-gray-700 hover:bg-gray-100">
+            <button
+              type="button"
+              onClick={() => setShowAdd(false)}
+              className="rounded-md border border-white/20 px-4 py-2 text-sm text-[#D7D0C4] hover:bg-white/5"
+            >
               Cancel
             </button>
           </div>
@@ -221,56 +370,36 @@ export function TaxonomyClient() {
       )}
 
       <div className="space-y-8">
-        {Object.entries(grouped).length === 0 ? (
-          <p className="text-sm text-gray-500">No taxonomy rows. Use &quot;Add row&quot; or run the seed migration.</p>
+        {loading ? (
+          <p className="text-sm text-[#B9B2A6]">Loading…</p>
+        ) : adminTab === "endemic" && !endemicSportPick ? (
+          <p className="text-sm text-[#B9B2A6]">
+            No endemic sports found. Add a global non-endemic list (migration), then add endemic rows for a sport.
+          </p>
+        ) : rows.length === 0 ? (
+          <p className="text-sm text-[#B9B2A6]">No rows for this view. Use &quot;Add row&quot;.</p>
         ) : (
-          Object.entries(grouped)
-            .sort(([a], [b]) => a.localeCompare(b))
-            .map(([sport, { endemic, nonEndemic }]) => (
-              <div key={sport} className="border border-gray-200 rounded-lg overflow-hidden">
-                <h2 className="px-4 py-2 bg-gray-100 font-medium text-gray-900">{sport}</h2>
-                <div className="divide-y divide-gray-200">
-                  {endemic.length > 0 && (
-                    <>
-                      <div className="px-4 py-2 bg-gray-50 text-xs font-medium text-gray-600">ENDEMIC</div>
-                      {endemic.map((r) => (
-                        <RowBlock
-                          key={r.id}
-                          row={r}
-                          isEditing={editingId === r.id}
-                          editForm={editForm}
-                          setEditForm={setEditForm}
-                          onStartEdit={() => startEdit(r)}
-                          onCancel={cancelEdit}
-                          onSave={saveEdit}
-                          onDelete={() => remove(r.id)}
-                          saving={saving}
-                        />
-                      ))}
-                    </>
-                  )}
-                  {nonEndemic.length > 0 && (
-                    <>
-                      <div className="px-4 py-2 bg-gray-50 text-xs font-medium text-gray-600">NON_ENDEMIC</div>
-                      {nonEndemic.map((r) => (
-                        <RowBlock
-                          key={r.id}
-                          row={r}
-                          isEditing={editingId === r.id}
-                          editForm={editForm}
-                          setEditForm={setEditForm}
-                          onStartEdit={() => startEdit(r)}
-                          onCancel={cancelEdit}
-                          onSave={saveEdit}
-                          onDelete={() => remove(r.id)}
-                          saving={saving}
-                        />
-                      ))}
-                    </>
-                  )}
-                </div>
-              </div>
-            ))
+          <div className="overflow-hidden rounded-lg border border-white/10">
+            <h2 className="bg-[#1A211D] px-4 py-2 font-medium text-[#F4F1EB]">
+              {adminTab === "global" ? "Non-endemic (all sports)" : `Endemic — ${endemicSportPick}`}
+            </h2>
+            <div className="divide-y divide-white/10 bg-[#151A17]">
+              {rows.map((r) => (
+                <RowBlock
+                  key={r.id}
+                  row={r}
+                  isEditing={editingId === r.id}
+                  editForm={editForm}
+                  setEditForm={setEditForm}
+                  onStartEdit={() => startEdit(r)}
+                  onCancel={cancelEdit}
+                  onSave={saveEdit}
+                  onDelete={() => remove(r.id)}
+                  saving={saving}
+                />
+              ))}
+            </div>
+          </div>
         )}
       </div>
     </div>
@@ -306,15 +435,15 @@ function RowBlock({
             type="text"
             value={editForm.category}
             onChange={(e) => setEditForm({ ...editForm, category: e.target.value })}
-            className="flex-1 min-w-[200px] px-2 py-1 border border-gray-300 rounded text-sm"
+            className="min-w-[200px] flex-1 rounded border border-white/20 bg-[#101513] px-2 py-1 text-sm text-[#ECE7DF]"
           />
           <input
             type="number"
             value={editForm.sort_order}
             onChange={(e) => setEditForm({ ...editForm, sort_order: Number(e.target.value) || 0 })}
-            className="w-16 px-2 py-1 border border-gray-300 rounded text-sm"
+            className="w-16 rounded border border-white/20 bg-[#101513] px-2 py-1 text-sm text-[#ECE7DF]"
           />
-          <label className="flex items-center gap-1 text-sm">
+          <label className="flex items-center gap-1 text-sm text-[#D7D0C4]">
             <input
               type="checkbox"
               checked={editForm.is_active}
@@ -322,24 +451,39 @@ function RowBlock({
             />
             Active
           </label>
-          <button type="button" onClick={onSave} disabled={saving} className="px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 disabled:opacity-50">
+          <button
+            type="button"
+            onClick={onSave}
+            disabled={saving}
+            className="rounded bg-[#2E7040] px-2 py-1 text-xs text-white hover:bg-[#285F36] disabled:opacity-50"
+          >
             Save
           </button>
-          <button type="button" onClick={onCancel} className="px-2 py-1 border border-gray-300 rounded text-xs hover:bg-gray-100">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded border border-white/20 px-2 py-1 text-xs text-[#D7D0C4] hover:bg-white/5"
+          >
             Cancel
           </button>
         </>
       ) : (
         <>
-          <span className="flex-1 text-sm text-gray-900">{row.category}</span>
-          <span className="text-xs text-gray-500 w-10">#{row.sort_order}</span>
-          <span className={`text-xs px-1.5 py-0.5 rounded ${row.is_active ? "bg-green-100 text-green-800" : "bg-gray-200 text-gray-600"}`}>
+          <span className="flex-1 text-sm text-[#ECE7DF]">{row.category}</span>
+          <span className="w-10 text-xs text-[#B9B2A6]">#{row.sort_order}</span>
+          <span
+            className={`rounded px-1.5 py-0.5 text-xs ${
+              row.is_active
+                ? "border border-[#2E7040]/60 bg-[#1B2F21] text-[#DBEEE0]"
+                : "border border-white/15 bg-[#202723] text-[#B9B2A6]"
+            }`}
+          >
             {row.is_active ? "Active" : "Inactive"}
           </span>
-          <button type="button" onClick={onStartEdit} className="text-xs text-blue-600 hover:text-blue-800">
+          <button type="button" onClick={onStartEdit} className="text-xs text-[#CEE4D4] hover:text-[#E8F6ED]">
             Edit
           </button>
-          <button type="button" onClick={onDelete} className="text-xs text-red-600 hover:text-red-800">
+          <button type="button" onClick={onDelete} className="text-xs text-[#F1A2A2] hover:text-[#FFD2D2]">
             Delete
           </button>
         </>

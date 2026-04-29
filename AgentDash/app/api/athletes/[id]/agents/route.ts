@@ -5,10 +5,11 @@ import { NextResponse } from "next/server";
 /** GET: list agents for an athlete (admin only; page uses server data for others) */
 export async function GET(
   _req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   await requireRole("admin");
   const supabase = await createServiceRoleClient();
+  const { id: athleteId } = await params;
   const { data, error } = await supabase
     .from("athlete_agents")
     .select(`
@@ -17,7 +18,7 @@ export async function GET(
       created_at,
       profiles:user_id (first_name, last_name, email)
     `)
-    .eq("athlete_id", params.id)
+    .eq("athlete_id", athleteId)
     .order("is_primary", { ascending: false });
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -27,9 +28,10 @@ export async function GET(
 /** POST: add an agent to an athlete (admin only) */
 export async function POST(
   req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   await requireRole("admin");
+  const { id: athleteId } = await params;
   const body = await req.json().catch(() => ({}));
   const user_id = body.user_id as string | undefined;
   const is_primary = Boolean(body.is_primary);
@@ -44,11 +46,11 @@ export async function POST(
     await supabase
       .from("athlete_agents")
       .update({ is_primary: false })
-      .eq("athlete_id", params.id);
+      .eq("athlete_id", athleteId);
   }
 
   const { error } = await supabase.from("athlete_agents").insert({
-    athlete_id: params.id,
+    athlete_id: athleteId,
     user_id,
     is_primary,
   });
@@ -65,9 +67,10 @@ export async function POST(
 /** PATCH: set primary agent (admin only) */
 export async function PATCH(
   req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   await requireRole("admin");
+  const { id: athleteId } = await params;
   const body = await req.json().catch(() => ({}));
   const user_id = body.user_id as string | undefined;
   if (!user_id) {
@@ -78,12 +81,12 @@ export async function PATCH(
   await supabase
     .from("athlete_agents")
     .update({ is_primary: false })
-    .eq("athlete_id", params.id);
+    .eq("athlete_id", athleteId);
 
   const { error } = await supabase
     .from("athlete_agents")
     .update({ is_primary: true })
-    .eq("athlete_id", params.id)
+    .eq("athlete_id", athleteId)
     .eq("user_id", user_id);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -93,7 +96,7 @@ export async function PATCH(
 /** DELETE: remove an agent from an athlete (admin only) */
 export async function DELETE(
   req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   await requireRole("admin");
   const url = new URL(req.url);
@@ -103,10 +106,11 @@ export async function DELETE(
   }
 
   const supabase = await createServiceRoleClient();
+  const { id: athleteId } = await params;
   const { error } = await supabase
     .from("athlete_agents")
     .delete()
-    .eq("athlete_id", params.id)
+    .eq("athlete_id", athleteId)
     .eq("user_id", user_id);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
