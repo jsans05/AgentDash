@@ -1,8 +1,9 @@
-import { createServerClient } from "@/lib/supabase/server";
+import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import type { Profile } from "@/lib/supabase/types";
-import { getTaxonomyBySport } from "@/lib/taxonomy";
+import { fetchTaxonomyNodesForSport, getTaxonomyBySport, normalizeCategoryForMatch } from "@/lib/taxonomy";
 import { buildAthleteIntelligencePayload } from "@/lib/ai/retrieval";
 import { canonicalInterestByNormalized } from "@/lib/industry-interest-map";
+import { buildProspectingAudienceSignals, prioritizeProspectingCategories } from "@/lib/ai/prospecting-signals";
 import {
   audiencePercentPoints,
   fmtPct,
@@ -10,12 +11,19 @@ import {
   normalizeIgAudiencePercentToFraction,
 } from "@/lib/athlete-data";
 import {
+  renderGeneralOutreachEmailMarkdown,
+  renderCombinedAthleteOutreachEmailMarkdown,
   renderGroupOutreachEmailMarkdown,
   renderSingleAthleteOutreachEmailMarkdown,
+  validateGeneralOutreachEmailInput,
+  validateCombinedAthleteOutreachEmailInput,
   validateGroupOutreachEmailInput,
   validateSingleAthleteOutreachEmailInput,
 } from "@/lib/ai/email-templates";
+import { buildDraftFromTemplate, bulletizeProofPoints, normalizeSportForPitch } from "@/lib/ai/email-generation";
+import { getActiveEmailTemplate } from "@/lib/ai/email-template-store";
 import { APPROVED_INTEREST_CATEGORIES } from "@/lib/ai/interest-taxonomy";
+import { ilikeContains, normalizeOrIlikeFragment } from "@/lib/supabase/ilike";
 
 /** Hardcoded roster sport values for "find athletes for [company]" STEP 2 (must match prompt in chat route). */
 export const FIND_ATHLETES_FOR_COMPANY_SPORTS = [
@@ -70,18 +78,16 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
-/** Strip LIKE wildcards from user-supplied fragments for safe ilike patterns. */
+/** Normalize user fragments for safe use in PostgREST filters. */
 function safeIlikeFragment(s: string): string {
-  return String(s ?? "")
-    .trim()
-    .replace(/[%_,]/g, "");
+  return String(s ?? "").trim().replace(/,/g, " ");
 }
 
 async function resolveProfileUserIdsByAgentNameSearch(
   supabase: Awaited<ReturnType<typeof createServerClient>>,
   q: string
 ): Promise<string[]> {
-  const frag = safeIlikeFragment(q);
+  const frag = normalizeOrIlikeFragment(q);
   if (!frag) return [];
   const pattern = `%${frag}%`;
   const { data, error } = await supabase
@@ -138,10 +144,10 @@ async function fetchRosterAthletesWithFilters(
 
   const applyLocationSportFilters = (q: any) => {
     let x = q;
-    if (filters.country) x = x.ilike("country", `%${filters.country}%`);
-    if (filters.city) x = x.ilike("city", `%${filters.city}%`);
-    if (filters.state) x = x.ilike("state", `%${filters.state}%`);
-    if (filters.sport) x = x.ilike("sport", `%${filters.sport}%`);
+    if (filters.country) x = x.ilike("country", ilikeContains(filters.country));
+    if (filters.city) x = x.ilike("city", ilikeContains(filters.city));
+    if (filters.state) x = x.ilike("state", ilikeContains(filters.state));
+    if (filters.sport) x = x.ilike("sport", ilikeContains(filters.sport));
     return x;
   };
 
@@ -350,6 +356,8 @@ async function fetchIgFollowersByAthleteId(
 
 export async function createAITools(profile: Profile) {
   const supabase = await createServerClient();
+  /** Company rows are shared globally; CRM routes use service role for get/create. Mirror that here so agents are not blocked by stale prod RLS on `companies` INSERT/UPDATE. */
+  const supabaseCompanies = await createServiceRoleClient();
 
   const normalizeEmails = (emails: unknown): string[] => {
     if (!Array.isArray(emails)) return [];
@@ -399,10 +407,14 @@ export async function createAITools(profile: Profile) {
     const name = String(nameInput ?? "").trim();
     if (!name) throw new Error("company name required");
 
-    const { data: existing } = await supabase.from("companies").select("company_id").eq("name", name).maybeSingle();
+    const { data: existing } = await supabaseCompanies
+      .from("companies")
+      .select("company_id")
+      .eq("name", name)
+      .maybeSingle();
     if (existing?.company_id) return existing.company_id;
 
-    const { data: created, error: createError } = await supabase
+    const { data: created, error: createError } = await supabaseCompanies
       .from("companies")
       .insert({ name, industry: null })
       .select("company_id")
@@ -534,7 +546,7 @@ export async function createAITools(profile: Profile) {
       const { data: companyRows, error: companyErr } = await supabase
         .from("companies")
         .select("company_id, name")
-        .ilike("name", `%${rawName}%`)
+        .ilike("name", ilikeContains(rawName))
         .limit(10);
       if (companyErr) throw companyErr;
       const rows = Array.isArray(companyRows) ? companyRows : [];
@@ -613,7 +625,9 @@ export async function createAITools(profile: Profile) {
         return { sports: [] };
       }
 
-      const sportOrFilter = selectedSports.map((s: string) => `sport.ilike.%${s}%`).join(",");
+      const sportOrFilter = selectedSports
+        .map((s: string) => `sport.ilike.%${normalizeOrIlikeFragment(s)}%`)
+        .join(",");
 
       const { data: athletesInSports } = await supabase
         .from("athletes")
@@ -805,7 +819,7 @@ export async function createAITools(profile: Profile) {
         query = query.in("athlete_id", ids);
       }
       if (params?.sport?.trim()) {
-        query = query.ilike("sport", `%${params.sport.trim()}%`);
+        query = query.ilike("sport", ilikeContains(params.sport.trim()));
       }
       const { data } = await query.order("last_name");
       return data || [];
@@ -1062,7 +1076,7 @@ export async function createAITools(profile: Profile) {
         .maybeSingle();
       if (companyReadError) return { error: companyReadError.message };
       if (!String(companyRow?.product_category ?? "").trim()) {
-        const { error: categoryErr } = await supabase
+        const { error: categoryErr } = await supabaseCompanies
           .from("companies")
           .update({ product_category: desiredCategory })
           .eq("company_id", company_id);
@@ -1307,7 +1321,7 @@ export async function createAITools(profile: Profile) {
 
       let company_id: string;
       if (!pickedCo?.company_id) {
-        const { data: inserted, error: insErr } = await supabase
+        const { data: inserted, error: insErr } = await supabaseCompanies
           .from("companies")
           .insert({ name: company_name, industry: null })
           .select("company_id")
@@ -1804,7 +1818,7 @@ export async function createAITools(profile: Profile) {
       // 1. Get athlete basic info
       const { data: athlete } = await supabase
         .from("athletes")
-        .select("athlete_id, first_name, last_name, sport, accolades")
+        .select("athlete_id, first_name, last_name, sport, accolades, notes")
         .eq("athlete_id", athlete_id)
         .single();
       if (!athlete) return null;
@@ -1812,7 +1826,7 @@ export async function createAITools(profile: Profile) {
       // 2. Get athlete's covered categories (DO NOT suggest companies in these)
       const { data: coveredRaw } = await supabase
         .from("athlete_covered_categories")
-        .select("sponsorship_taxonomies:taxonomy_id(category)")
+        .select("taxonomy_id, sponsorship_taxonomies:taxonomy_id(category)")
         .eq("athlete_id", athlete_id);
       const coveredCategories: string[] = (coveredRaw ?? [])
         .map((r: any) => r.sponsorship_taxonomies?.category)
@@ -1821,59 +1835,69 @@ export async function createAITools(profile: Profile) {
       // 3. Get athlete's existing contracts (DO NOT suggest companies already contracted)
       const { data: contractsRaw } = await supabase
         .from("contracts")
-        .select("company_id, category")
+        .select("contract_id, company_id, category")
         .eq("athlete_id", athlete_id)
         .eq("archived", false)
         .in("status", ["active"]);
 
+      const contractIds = (contractsRaw ?? []).map((c: any) => c.contract_id).filter(Boolean);
+      const { data: exclusivitiesRaw } = contractIds.length
+        ? await supabase
+            .from("contract_exclusivities")
+            .select("taxonomy_id, sponsorship_taxonomies:taxonomy_id(category)")
+            .in("contract_id", contractIds)
+        : { data: [] };
+
       const existingCompanyIds = new Set((contractsRaw ?? []).map((c: any) => c.company_id).filter(Boolean));
-      const existingCategories: string[] = [...new Set((contractsRaw ?? []).map((c: any) => c.category).filter(Boolean))];
+      const existingCategories: string[] = [
+        ...new Set([
+          ...(contractsRaw ?? []).map((c: any) => c.category).filter(Boolean),
+          ...(exclusivitiesRaw ?? []).map((e: any) => e.sponsorship_taxonomies?.category).filter(Boolean),
+          ...coveredCategories,
+        ]),
+      ];
+
+      const restrictedTaxonomyIds = new Set<string>([
+        ...(coveredRaw ?? []).map((r: any) => String(r.taxonomy_id ?? "")).filter(Boolean),
+        ...(exclusivitiesRaw ?? []).map((e: any) => String(e.taxonomy_id ?? "")).filter(Boolean),
+      ]);
 
       // 4. Get top brand affinities from athlete's audience
-      //    These are brands the athlete's audience already follows/knows
-      const { data: brandRows } = await supabase
-        .from("athlete_audience_data")
-        .select("audience_name, ig_audience_percent, ig_audience_count")
-        .eq("athlete_id", athlete_id)
-        .eq("audience_category", "Brands")
-        .order("ig_audience_percent", { ascending: false })
-        .limit(50);
-
-      // 5. Get top interests from athlete's audience
-      const { data: interestRows } = await supabase
-        .from("athlete_audience_data")
-        .select("audience_name, ig_audience_percent, ig_audience_count")
-        .eq("athlete_id", athlete_id)
-        .eq("audience_category", "Interests")
-        .order("ig_audience_percent", { ascending: false })
-        .limit(20);
+      //    These are brands the athlete's audience already follows/knows.
+      const audienceSummary = await getAthleteAudienceProfile(supabase, athlete_id);
+      const audienceSignals = buildProspectingAudienceSignals(audienceSummary);
 
       // 6. Get taxonomy for athlete's sport to identify open categories
-      const { endemic, nonEndemic } = await getTaxonomyBySport(athlete.sport ?? null);
-      const allTaxonomyCategories = [...endemic, ...nonEndemic];
-      const blockedCategories = new Set([
-        ...coveredCategories.map((c: string) => c.toLowerCase()),
-        ...existingCategories.map((c: string) => c.toLowerCase()),
-      ]);
-      const openCategories = allTaxonomyCategories.filter((c) => !blockedCategories.has(c.toLowerCase()));
+      const taxonomyNodes = await fetchTaxonomyNodesForSport(athlete.sport ?? null);
+      const allTaxonomyCategories = taxonomyNodes.map((node) => node.category);
+      const categoryToTaxonomyId = new Map<string, string>();
+      for (const node of taxonomyNodes) {
+        categoryToTaxonomyId.set(normalizeCategoryForMatch(node.category), node.id);
+      }
+
+      const blockedCategorySet = new Set(existingCategories.map((c) => normalizeCategoryForMatch(c)));
+      const openCategories = allTaxonomyCategories.filter((category) => {
+        const normalized = normalizeCategoryForMatch(category);
+        const taxonomyId = categoryToTaxonomyId.get(normalized);
+        if (blockedCategorySet.has(normalized)) return false;
+        if (taxonomyId && restrictedTaxonomyIds.has(taxonomyId)) return false;
+        return true;
+      });
+
+      const prioritized = prioritizeProspectingCategories({
+        categories: openCategories,
+        categoryHint: params.category_hint ?? null,
+        athleteNotes: String(athlete.notes ?? ""),
+      });
 
       // 7. Build brand targets from audience brand affinity data
-      //    Filter out brands that are already sponsors
-      const brandTargets = (brandRows ?? [])
-        .filter((r: any) => {
-          // Skip if category_hint provided and brand doesn't seem relevant
-          if (params.category_hint) {
-            // Keep all — let the AI filter by relevance using category_hint context
-          }
-          return true;
-        })
-        .map((r: any) => ({
-          company_name: r.audience_name,
+      const brandTargets = audienceSignals.topBrandAffinities.map((row) => ({
+          company_name: row.name,
           source: "audience_brand_affinity" as const,
-          ig_audience_percent: Number(r.ig_audience_percent ?? 0),
-          ig_audience_pct_display: `${(Number(r.ig_audience_percent ?? 0) * 100).toFixed(1)}%`,
-          ig_audience_count: Number(r.ig_audience_count ?? 0),
-          rationale: `${(Number(r.ig_audience_percent ?? 0) * 100).toFixed(1)}% of ${athlete.first_name}'s audience already follows this brand`,
+          ig_audience_percent: row.percent / 100,
+          ig_audience_pct_display: `${row.percent.toFixed(1)}%`,
+          ig_audience_count: null,
+          rationale: `${row.percent.toFixed(1)}% of ${athlete.first_name}'s audience already follows this brand`,
         }));
 
       // 8. Also look up companies in the DB that match open categories
@@ -1900,21 +1924,31 @@ export async function createAITools(profile: Profile) {
           name: [athlete.first_name, athlete.last_name].filter(Boolean).join(" "),
           sport: athlete.sport,
           accolades: athlete.accolades ?? [],
+          notes: athlete.notes ?? null,
         },
         context: {
           existing_sponsor_categories: existingCategories,
           covered_categories: coveredCategories,
-          open_taxonomy_categories: openCategories,
+          open_taxonomy_categories: prioritized.orderedCategories,
+          prioritized_open_categories: prioritized.prioritizedCategories,
+          unmet_priority_terms: prioritized.unmatchedPriorityTerms,
+          restricted_taxonomy_ids: Array.from(restrictedTaxonomyIds),
           category_hint: params.category_hint ?? null,
         },
         audience_brand_targets: brandTargets.slice(0, limit),
-        top_interests: (interestRows ?? []).slice(0, 10).map((r: any) => ({
-          interest: r.audience_name,
-          pct_display: `${(Number(r.ig_audience_percent ?? 0) * 100).toFixed(1)}%`,
-          ig_audience_percent: Number(r.ig_audience_percent ?? 0),
+        top_interests: audienceSignals.topInterests.slice(0, 10).map((row) => ({
+          interest: row.name,
+          pct_display: `${row.percent.toFixed(1)}%`,
+          ig_audience_percent: row.percent / 100,
         })),
+        demographics: {
+          age_bands: audienceSignals.ageBands,
+          gender_split: audienceSignals.genderSplit,
+          top_countries: audienceSignals.topCountries,
+          inferred_fit_notes: audienceSignals.demographicInferences,
+        },
         known_company_targets: knownTargets.slice(0, 20),
-        open_categories: openCategories,
+        open_categories: prioritized.orderedCategories,
       };
     },
 
@@ -2129,15 +2163,107 @@ export async function createAITools(profile: Profile) {
       athlete_sport: string;
       audience_insights: string[];
       open_category_reason: string;
+      accolades?: string[];
+      past_partnerships?: string;
+      company_description?: string;
       cta?: string;
     }) => {
       const validated = validateSingleAthleteOutreachEmailInput(params);
       if (!validated.ok) {
         return { error: validated.error };
       }
+      const template = await getActiveEmailTemplate(supabase as any, "one_to_one");
+      const vars = {
+        recipient_name: validated.data.recipient_name || "[Recipient Name]",
+        athlete_name: validated.data.athlete_name,
+        company_name: validated.data.brand_name,
+        athlete_sport: normalizeSportForPitch(validated.data.athlete_sport),
+        intro_line: `I wanted to introduce ${validated.data.athlete_name}, a ${normalizeSportForPitch(validated.data.athlete_sport)} athlete who could be a strong fit for ${validated.data.brand_name}.`,
+        proof_points: bulletizeProofPoints(
+          [
+            ...validated.data.audience_insights,
+            ...((params.accolades ?? []).map((row) => String(row ?? "").trim()).filter(Boolean).slice(0, 2)),
+            String(params.company_description ?? "").trim(),
+          ],
+          3
+        ),
+        fit_rationale: validated.data.open_category_reason,
+        past_partnership_line: String(params.past_partnerships ?? "").trim()
+          ? `I recently noticed ${String(params.past_partnerships ?? "").trim()}`
+          : "",
+        cta: validated.data.cta,
+      };
+      const draft = buildDraftFromTemplate({
+        mode: "one_to_one",
+        template,
+        vars,
+      });
       return {
-        subject: `Potential Collaboration with ${validated.data.athlete_name}`,
-        body_markdown: renderSingleAthleteOutreachEmailMarkdown(validated.data),
+        subject: draft.subject || `Potential Collaboration with ${validated.data.athlete_name}`,
+        body_markdown: draft.body || renderSingleAthleteOutreachEmailMarkdown(validated.data),
+      };
+    },
+    generateCombinedAthleteOutreachEmail: async (params: {
+      recipient_name: string;
+      brand_name: string;
+      athletes: Array<{
+        athlete_name: string;
+        athlete_sport: string;
+        audience_insights: string[];
+        open_category_reason: string;
+      }>;
+      cta?: string;
+    }) => {
+      const validated = validateCombinedAthleteOutreachEmailInput(params);
+      if (!validated.ok) {
+        return { error: validated.error };
+      }
+      return {
+        subject: `Potential Collaboration with ${validated.data.athletes
+          .map((a) => a.athlete_name)
+          .join(", ")}`,
+        body_markdown: renderCombinedAthleteOutreachEmailMarkdown(validated.data),
+      };
+    },
+    generateGeneralOutreachEmail: async (params: {
+      recipient_name?: string;
+      company_name: string;
+      lead_athletes?: Array<{
+        athlete_name: string;
+        athlete_sport?: string;
+      }>;
+      proof_points: string[];
+      cta?: string;
+      high_level?: boolean;
+    }) => {
+      const validated = validateGeneralOutreachEmailInput(params);
+      if (!validated.ok) {
+        return { error: validated.error };
+      }
+      const mode = validated.data.high_level ? "general_high_level" : "general_athlete_led";
+      const template = await getActiveEmailTemplate(supabase as any, mode);
+      const leadAthletes = validated.data.lead_athletes.map((row) => row.athlete_name).join(", ");
+      const draft = buildDraftFromTemplate({
+        mode,
+        template,
+        vars: {
+          recipient_name: validated.data.recipient_name,
+          company_name: validated.data.company_name,
+          lead_athletes: leadAthletes || "The Team athletes",
+          intro_line: validated.data.high_level
+            ? `I wanted to share a quick high-level partnership concept for ${validated.data.company_name}.`
+            : `I wanted to share a quick athlete-led partnership concept for ${validated.data.company_name}, featuring ${leadAthletes || "our athletes"}.`,
+          proof_points: bulletizeProofPoints(validated.data.proof_points, 3),
+          cta: validated.data.cta,
+        },
+      });
+      return {
+        subject:
+          draft.subject ||
+          (validated.data.high_level
+            ? `Partnership opportunities with ${validated.data.company_name}`
+            : `Athlete partnership concept for ${validated.data.company_name}`),
+        body_markdown: draft.body || renderGeneralOutreachEmailMarkdown(validated.data),
       };
     },
 
@@ -2282,7 +2408,7 @@ export async function createAITools(profile: Profile) {
 
           let companyId: string;
           if (!pickedCo?.company_id) {
-            const { data: inserted, error: insErr } = await supabase
+            const { data: inserted, error: insErr } = await supabaseCompanies
               .from("companies")
               .insert({
                 name: company_name,
@@ -2308,7 +2434,11 @@ export async function createAITools(profile: Profile) {
           if (!pickedCo.product_category) companyPatch.product_category = rowCategory;
 
           if (Object.keys(companyPatch).length > 0) {
-            await supabase.from("companies").update(companyPatch).eq("company_id", companyId);
+            const { error: companyUpErr } = await supabaseCompanies
+              .from("companies")
+              .update(companyPatch)
+              .eq("company_id", companyId);
+            if (companyUpErr) throw new Error(companyUpErr.message);
           }
 
           // Pipeline card is scoped per user (unique (company_id, created_by_user_id)).
@@ -2374,22 +2504,32 @@ export async function createAITools(profile: Profile) {
           if (inputContacts.length > 0) {
             const { data: existingContacts } = await supabase
               .from("crm_contacts")
-              .select("contact_id, first_name, last_name")
+              .select("contact_id, first_name, last_name, email")
               .eq("company_id", companyId);
 
-            const seen = new Set<string>(
-              (existingContacts ?? []).map(
-                (c: any) =>
-                  `${String(c.first_name ?? "").trim().toLowerCase()}||${String(c.last_name ?? "").trim().toLowerCase()}`
-              )
-            );
+            const normalizeContactField = (value: unknown) => String(value ?? "").trim().toLowerCase();
+            const toNameKey = (first: unknown, last: unknown) =>
+              `name:${normalizeContactField(first)}||${normalizeContactField(last)}`;
+            const toEmailKey = (emailValue: unknown) => {
+              const normalized = normalizeContactField(emailValue);
+              return normalized ? `email:${normalized}` : "";
+            };
+
+            const seen = new Set<string>();
+            for (const c of existingContacts ?? []) {
+              seen.add(toNameKey(c?.first_name, c?.last_name));
+              const emailKey = toEmailKey(c?.email);
+              if (emailKey) seen.add(emailKey);
+            }
 
             for (const c of inputContacts) {
               const first = String(c?.first_name ?? "").trim();
               const last = String(c?.last_name ?? "").trim();
               if (!first || !last) continue;
-              const key = `${first.toLowerCase()}||${last.toLowerCase()}`;
-              if (seen.has(key)) {
+              const nameKey = toNameKey(first, last);
+              const emailKey = toEmailKey(c?.email);
+              const isDuplicate = seen.has(nameKey) || (!!emailKey && seen.has(emailKey));
+              if (isDuplicate) {
                 contactsExisting += 1;
                 continue;
               }
@@ -2420,7 +2560,8 @@ export async function createAITools(profile: Profile) {
                 continue;
               }
               contactsCreated += 1;
-              seen.add(key);
+              seen.add(nameKey);
+              if (emailKey) seen.add(emailKey);
             }
           }
 
