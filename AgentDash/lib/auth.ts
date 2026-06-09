@@ -1,31 +1,31 @@
-import { createServerClient, createServiceRoleClient } from "./supabase/server";
+import { createServiceRoleClient } from "./supabase/server";
 import { redirect } from "next/navigation";
 import type { Profile } from "./supabase/types";
+import { validateServerSession } from "./auth-session";
 
 export async function getCurrentUser() {
-  const supabase = await createServerClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  return user;
+  const validation = await validateServerSession();
+  return validation.user;
+}
+
+export async function getProfileForUserId(userId: string): Promise<Profile | null> {
+  const supabase = await createServiceRoleClient();
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("user_id, role, first_name, last_name, email, created_at")
+    .eq("user_id", userId)
+    .single();
+  if (error) {
+    console.error("[auth] getProfileForUserId error", error);
+    return null;
+  }
+  return data;
 }
 
 export async function getCurrentProfile(): Promise<Profile | null> {
   const user = await getCurrentUser();
   if (!user) return null;
-  // Use service-role client for profiles to avoid RLS-related 406s on /rest/v1/profiles
-  // and ensure the logged-in user can always read their own profile on the server.
-  const supabase = await createServiceRoleClient();
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("*")
-    .eq("user_id", user.id)
-    .single();
-  if (error) {
-    console.error("[auth] getCurrentProfile error", error);
-    return null;
-  }
-  return data;
+  return getProfileForUserId(user.id);
 }
 
 export async function requireAuth() {

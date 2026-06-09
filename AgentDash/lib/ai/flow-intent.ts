@@ -1,5 +1,9 @@
+import type { PitchType } from "@/lib/ai/pitch-spec";
+
 export type AIFlowIntent =
   | "general"
+  | "inbound_company_athlete_match"
+  | "email_general_outreach"
   | "email_single_athlete"
   | "email_group_outreach"
   | "email_roster_outreach"
@@ -93,6 +97,34 @@ export function detectEmailIntent(messages: any[]): boolean {
   return /(write|draft|create|generate).*(email|outreach)|\bemail\b.*(for|to)\b/.test(text);
 }
 
+export function detectGeneralOutreachIntent(messages: any[]): boolean {
+  const text = latestUserText(messages);
+  if (!text) return false;
+  const mentionsEmail = /(email|outreach|reach out|intro|pitch|draft|write|generate)/.test(text);
+  const mentionsGeneral = /\bgeneral outreach\b|\bhigh[- ]level\b|\bnot specific athlete\b|\bathlete-led\b/.test(text);
+  return mentionsEmail && mentionsGeneral;
+}
+
+/** Inbound sponsor asks which roster athletes fit (FLOW 1 — company → athletes). */
+export function detectInboundCompanyAthleteMatchIntent(messages: any[]): boolean {
+  const text = latestUserText(messages);
+  if (!text) return false;
+
+  if (detectRosterOutreachIntent(messages) || detectGroupOutreachIntent(messages)) return false;
+  if (detectEmailIntent(messages) || detectGeneralOutreachIntent(messages)) return false;
+
+  return (
+    /looking to sponsor/.test(text) ||
+    /who should (they|we) pick/.test(text) ||
+    /which athlete(s)? (should|to|would|might|could)/.test(text) ||
+    /find athletes for/.test(text) ||
+    /which athletes? (for|should|fit|match)/.test(text) ||
+    /who should we pitch/.test(text) ||
+    (/company|brand|eyewear|sponsor|partnership/.test(text) &&
+      /(who should|which athlete|pick\b|recommend)/.test(text))
+  );
+}
+
 export function detectCompanyTargetsIntent(messages: any[]): boolean {
   const text = latestUserText(messages);
   if (!text) return false;
@@ -149,6 +181,9 @@ export function userReplyingAfterFlow5InterestPrompt(messages: any[]): boolean {
   const prevRaw = String(prev.content ?? "");
   const prevText = normalize(prevRaw);
   if (!prevText) return false;
+  const userText = normalize(String(last.content ?? ""));
+  if (userText.startsWith("selected:")) return true;
+
   const askedAudiences =
     prevText.includes("which audience interest") ||
     prevText.includes("which interest") ||
@@ -160,7 +195,9 @@ export function userReplyingAfterFlow5InterestPrompt(messages: any[]): boolean {
     /\b(select|choose|pick)\b[\s\S]{0,120}\b(interests?|categories?)\b/.test(prevText);
   const showedNumberedCatalog =
     (prevRaw.match(/\n\s*\d+\.\s+/g) ?? []).length >= 5 && /interest|categor/i.test(prevRaw);
-  return askedAudiences || showedNumberedCatalog;
+  const skippedOrDismissed =
+    userText.includes("skipped the selection") || userText.includes("dismissed the selection");
+  return askedAudiences || showedNumberedCatalog || skippedOrDismissed;
 }
 
 /** Alias: interest gate applies to Flow 4 / 5 / 6 / 7. */
@@ -233,6 +270,44 @@ function extractStructuredCompanyListBlock(rawAssistantText: string): string | n
   return block || null;
 }
 
+/** User wants the in-app athlete Target List outreach columns updated — not CRM pipeline drafting. */
+export function detectTargetListOutreachPushIntent(messages: any[]): boolean {
+  const text = latestUserText(messages);
+  if (!text) return false;
+
+  const mentionsTargetList =
+    /\b(target list|athlete target list|their target list|his target list|her target list)\b/.test(text) ||
+    /\b(on|to|into)\s+(the\s+)?target\s+list\b/.test(text);
+  if (!mentionsTargetList) return false;
+
+  const mentionsEmail =
+    /\b(this|the|that)\s+email\b/.test(text) ||
+    /\b(email|outreach|subject|body|draft)\b/.test(text) ||
+    /\b(push|save|add|put|copy|update|store)\b/.test(text);
+
+  return mentionsEmail;
+}
+
+/** Broader target-list outreach save: spreadsheet columns, outreach email, without requiring "target list". */
+export function detectTargetListSaveIntent(messages: any[]): boolean {
+  const text = latestUserText(messages);
+  if (!text) return false;
+
+  const mentionsTargetList =
+    /\b(target list|athlete target list|their target list|his target list|her target list)\b/.test(text) ||
+    /\b(on|to|into)\s+(the\s+)?target\s+list\b/.test(text);
+  if (mentionsTargetList) return true;
+
+  const outreachColumn =
+    /\b(outreach\s+(email|column)|email\s+subject\s+column|spreadsheet\s+column)\b/.test(text) ||
+    /\b(outreach\s+email|email\s+subject)\s+(column|field|cell)\b/.test(text);
+  const saveOutreach =
+    /\b(save|push|update|store|put|copy|add)\b/.test(text) &&
+    /\b(outreach|email|subject|body|draft|spreadsheet)\b/.test(text);
+
+  return outreachColumn || saveOutreach;
+}
+
 export function detectChatBulkImportIntent(messages: any[]): ChatBulkImportIntent {
   if (!Array.isArray(messages) || messages.length < 2) {
     return { detected: false, listBlock: null, athleteName: null };
@@ -274,12 +349,59 @@ export function detectChatBulkImportIntent(messages: any[]): ChatBulkImportInten
   return { detected: true, listBlock, athleteName };
 }
 
+export function detectSeparateEmailsIntent(messages: any[]): boolean {
+  const text = latestUserText(messages);
+  if (!text) return false;
+  return (
+    /\b(separate|individual)\s+emails?\b/.test(text) ||
+    /\bone email (each|per athlete)\b/.test(text) ||
+    /\beach athlete (gets?|should have) (their )?own\b/.test(text) ||
+    /\bdon'?t combine\b/.test(text) ||
+    /\bnot combined\b/.test(text)
+  );
+}
+
+export function pitchTypeFromFlowIntent(
+  flowIntent: AIFlowIntent,
+  options?: { highLevelGeneral?: boolean; athleteLedGeneral?: boolean; separateEmailsPerAthlete?: boolean }
+): PitchType | null {
+  switch (flowIntent) {
+    case "email_roster_outreach":
+      return "roster_aggregate";
+    case "email_group_outreach":
+      return options?.separateEmailsPerAthlete ? "multi_athlete_per_contact" : "multi_athlete_combined";
+    case "email_single_athlete":
+      return "single_athlete";
+    case "email_general_outreach":
+      if (options?.highLevelGeneral) return "roster_aggregate";
+      return "roster_athlete_led";
+    default:
+      return null;
+  }
+}
+
+/** Map chat flow intent to normalized pitch_type for curatePitchInterests / composePitchEmail. */
+export function resolvePitchTypeFromMessages(
+  messages: any[],
+  options?: ClassifyFlowIntentOptions
+): PitchType | null {
+  const text = latestUserText(messages);
+  const intent = classifyFlowIntent(messages, options);
+  return pitchTypeFromFlowIntent(intent, {
+    highLevelGeneral: /\bhigh[- ]level\b/.test(text) && !/\bathlete[- ]led\b/.test(text),
+    athleteLedGeneral: intent === "email_general_outreach" && /\bathlete[- ]led\b/.test(text),
+    separateEmailsPerAthlete: detectSeparateEmailsIntent(messages),
+  });
+}
+
 /** Prefer roster → group → single → company targets so intents are not downgraded. */
 export function classifyFlowIntent(messages: any[], options?: ClassifyFlowIntentOptions): AIFlowIntent {
   const pipelineDrafting = options?.pipelineDrafting === true;
   if (detectRosterOutreachIntent(messages, pipelineDrafting)) return "email_roster_outreach";
   if (detectGroupOutreachIntent(messages, pipelineDrafting)) return "email_group_outreach";
+  if (detectGeneralOutreachIntent(messages)) return "email_general_outreach";
   if (detectEmailIntent(messages)) return "email_single_athlete";
+  if (detectInboundCompanyAthleteMatchIntent(messages)) return "inbound_company_athlete_match";
   if (detectCompanyTargetsIntent(messages)) return "company_targets";
   return "general";
 }

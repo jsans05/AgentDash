@@ -69,6 +69,7 @@ export function CompanyCategorySelect({ value, valueKey, onChange }: CompanyCate
     for (const node of nodes) {
       const category = String(node.category ?? "").trim();
       if (!category) continue;
+      if ((node as { is_group?: boolean }).is_group) continue;
       if (node.tier === "ENDEMIC") endemicSet.add(category);
       if (node.tier === "NON_ENDEMIC") nonEndemicSet.add(category);
     }

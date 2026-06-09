@@ -52,6 +52,9 @@ Copy `.env.example` to `.env.local` and fill in:
 NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your_anon_key
 SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+AUTH_LOGIN_WINDOW_SECONDS=900
+AUTH_LOGIN_MAX_FAILURES=5
+AUTH_LOGIN_LOCKOUT_SECONDS=900
 
 # OpenAI (required for AI assistant)
 OPENAI_API_KEY=your_openai_key
@@ -65,6 +68,20 @@ ENRICH_PROVIDER=tavily  # or 'serpapi' or 'google_cse'
 # GOOGLE_CSE_API_KEY=your_google_cse_key
 # GOOGLE_CSE_CX=your_google_cse_cx
 ```
+
+### Auth Security Controls (Runbook)
+
+- Login attempts are gated through `/api/auth/login` and tracked by hashed email/IP buckets in `public.auth_login_attempts`.
+- Default policy is `5` failed attempts in `15` minutes, then a `15` minute lockout.
+- Tune policy with:
+  - `AUTH_LOGIN_WINDOW_SECONDS`
+  - `AUTH_LOGIN_MAX_FAILURES`
+  - `AUTH_LOGIN_LOCKOUT_SECONDS`
+- `AUTH_LOGIN_RATE_LIMIT_DISABLED=true` is for local debugging only and should remain disabled in production.
+- Session checks now explicitly validate:
+  - active auth user/session match
+  - token expiry
+  - backing `auth.sessions` row presence via service-role lookup (revocation-oriented safeguard)
 
 ### 3. Install & Run
 
@@ -149,3 +166,14 @@ Auto-creates companies and categories if missing.
 - [ ] Configure web enrichment provider (Tavily/SERP/Google CSE)
 - [ ] Test CSV/XLSX import
 - [ ] Test AI assistant outputs
+
+## Security Notes
+
+### Excel import dependency (`exceljs`)
+
+- `exceljs` is currently retained because no clear upstream advisory remediation path was available during this update cycle.
+- Compensating controls:
+  - only allow trusted admin users to upload files,
+  - validate extension and reject oversized files before parsing,
+  - treat uploaded spreadsheets as untrusted input and avoid macro execution or shelling out.
+- Revisit trigger: replace `exceljs` when a clearly patched advisory path is published or at next scheduled dependency review (target: 2026-07-01), whichever comes first.

@@ -142,11 +142,23 @@ function previewText(body: string, max = 160): string {
   return `${oneLine.slice(0, max)}…`;
 }
 
+async function markPipelineDraftSent(pipelineId: string, createdAt: string): Promise<void> {
+  const res = await fetch(`/api/crm/pipeline/${encodeURIComponent(pipelineId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ mark_draft_sent: createdAt }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error ?? "Failed to mark sent");
+}
+
 export default function CrmPipelineDraftsPage() {
   const [loading, setLoading] = useState(true);
   const [cards, setCards] = useState<PipelineCard[]>([]);
   const [contactDrafts, setContactDrafts] = useState<ContactDraftRow[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [markingKey, setMarkingKey] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [filterSport, setFilterSport] = useState("");
   const [filterCategory, setFilterCategory] = useState("");
@@ -174,6 +186,22 @@ export default function CrmPipelineDraftsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const handleMarkSent = useCallback(
+    async (pipelineId: string, createdAt: string, rowKey: string) => {
+      setMarkingKey(rowKey);
+      setError(null);
+      try {
+        await markPipelineDraftSent(pipelineId, createdAt);
+        await load();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to mark sent");
+      } finally {
+        setMarkingKey(null);
+      }
+    },
+    [load]
+  );
 
   const filterOptions = useMemo(() => buildFilterOptionsFromCards(cards), [cards]);
   const filteredCards = useMemo(
@@ -343,6 +371,23 @@ export default function CrmPipelineDraftsPage() {
                       {r.subject && <p className="mt-1 text-sm font-medium text-[#ECE7DF]">{r.subject}</p>}
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
+                      {!r.sent_at && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 text-xs"
+                          disabled={markingKey === key}
+                          onClick={() => void handleMarkSent(r.pipeline_id, r.created_at, key)}
+                        >
+                          {markingKey === key ? "Saving…" : "Mark sent"}
+                        </Button>
+                      )}
+                      {r.sent_at && (
+                        <span className="text-xs text-[#7FA88A]">
+                          Sent {new Date(r.sent_at).toLocaleDateString()}
+                        </span>
+                      )}
                       <button
                         type="button"
                         className="text-xs font-medium text-[#CEE4D4] hover:underline"

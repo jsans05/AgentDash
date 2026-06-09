@@ -9,6 +9,7 @@ type TaxonomyNode = {
   tier: string;
   category: string;
   sort_order: number;
+  is_group?: boolean;
 };
 
 type ExclusivityRow = {
@@ -25,8 +26,25 @@ type Props = {
   initialCategoryNames?: string[];
 };
 
+type CategoryOption = {
+  key: string;
+  label: string;
+  tier: string;
+  sort_order: number;
+  taxonomyIds: string[];
+  searchText: string;
+};
+
+const EYEWEAR_CATEGORY_LABEL = "Eyewear";
+const EYEWEAR_KEYWORDS = ["eyewear", "eye wear", "goggle", "goggles", "sunglass", "sunglasses", "glasses"];
+
 function normalizeCategory(s: string) {
-  return s.toLowerCase().trim().replace(/\s+/g, " ");
+  return s.toLowerCase().trim().replace(/[^\w\s]/g, " ").replace(/\s+/g, " ");
+}
+
+function isEyewearCategory(category: string) {
+  const normalized = normalizeCategory(category);
+  return EYEWEAR_KEYWORDS.some((keyword) => normalized.includes(keyword));
 }
 
 export function ContractCategoriesEditor({
@@ -118,61 +136,117 @@ export function ContractCategoriesEditor({
     return () => document.removeEventListener("mousedown", handlePointerDown);
   }, []);
 
-  function addCategoryById(taxonomyId: string) {
-    if (!taxonomyId || value.includes(taxonomyId)) return;
-    onChange([...value, taxonomyId]);
+  function addCategoryByIds(taxonomyIds: string[]) {
+    if (!taxonomyIds.length) return;
+    const merged = [...new Set([...value, ...taxonomyIds])];
+    if (merged.length === value.length) return;
+    onChange(merged);
     setCategoryQuery("");
   }
 
-  function categoryMatchesQuery(node: TaxonomyNode, q: string) {
+  function optionMatchesQuery(option: CategoryOption, q: string) {
     if (!q) return true;
-    return normalizeCategory(node.category).includes(normalizeCategory(q));
+    return normalizeCategory(option.searchText).includes(normalizeCategory(q));
   }
 
-  function removeCategory(taxonomyId: string) {
-    onChange(value.filter((id) => id !== taxonomyId));
+  function removeCategory(taxonomyIds: string[]) {
+    onChange(value.filter((id) => !taxonomyIds.includes(id)));
   }
 
   const valueSet = new Set(value);
-  const availableToAdd = availableTaxonomy.filter((t) => !valueSet.has(t.id));
-  const endemic = availableToAdd.filter((t) => t.tier === "ENDEMIC").sort((a, b) => a.sort_order - b.sort_order);
-  const nonEndemic = availableToAdd.filter((t) => t.tier === "NON_ENDEMIC").sort((a, b) => a.sort_order - b.sort_order);
-  const endemicFiltered = endemic.filter((t) => categoryMatchesQuery(t, categoryQuery));
-  const nonEndemicFiltered = nonEndemic.filter((t) => categoryMatchesQuery(t, categoryQuery));
-  const firstFilteredId =
-    endemicFiltered[0]?.id ?? nonEndemicFiltered[0]?.id ?? null;
+  const eyewearNodes = availableTaxonomy.filter((node) => isEyewearCategory(node.category));
+  const eyewearIds = eyewearNodes.map((node) => node.id);
+  const eyewearSelected = eyewearIds.some((id) => valueSet.has(id));
 
-  const selectedNodes: { id: string; category: string }[] = value.map((id) => {
+  useEffect(() => {
+    if (!eyewearIds.length) return;
+    const allEyewearSelected = eyewearIds.every((id) => valueSet.has(id));
+    if (eyewearSelected && !allEyewearSelected) {
+      onChange([...new Set([...value, ...eyewearIds])]);
+    }
+  }, [eyewearIds.join(","), eyewearSelected, valueSet, value, onChange]);
+
+  const availableToAdd = availableTaxonomy.filter((t) => !valueSet.has(t.id));
+  const options: CategoryOption[] = [];
+  const hasEyewearAvailable = !eyewearSelected && eyewearNodes.length > 0;
+
+  if (hasEyewearAvailable) {
+    const eyewearSortOrder = Math.min(...eyewearNodes.map((node) => node.sort_order));
+    const eyewearTier = eyewearNodes.some((node) => node.tier === "ENDEMIC") ? "ENDEMIC" : (eyewearNodes[0]?.tier ?? "ENDEMIC");
+    options.push({
+      key: "__eyewear__",
+      label: EYEWEAR_CATEGORY_LABEL,
+      tier: eyewearTier,
+      sort_order: eyewearSortOrder,
+      taxonomyIds: eyewearIds,
+      searchText: "eyewear goggles sunglasses glasses",
+    });
+  }
+
+  for (const node of availableToAdd) {
+    if (node.is_group) continue;
+    if (isEyewearCategory(node.category)) continue;
+    options.push({
+      key: node.id,
+      label: node.category,
+      tier: node.tier,
+      sort_order: node.sort_order,
+      taxonomyIds: [node.id],
+      searchText: node.category,
+    });
+  }
+
+  const endemic = options.filter((o) => o.tier === "ENDEMIC").sort((a, b) => a.sort_order - b.sort_order);
+  const nonEndemic = options.filter((o) => o.tier === "NON_ENDEMIC").sort((a, b) => a.sort_order - b.sort_order);
+  const endemicFiltered = endemic.filter((o) => optionMatchesQuery(o, categoryQuery));
+  const nonEndemicFiltered = nonEndemic.filter((o) => optionMatchesQuery(o, categoryQuery));
+  const firstFilteredId =
+    endemicFiltered[0]?.key ?? nonEndemicFiltered[0]?.key ?? null;
+
+  const selectedNodes: { key: string; label: string; taxonomyIds: string[] }[] = [];
+  if (eyewearSelected && eyewearIds.length > 0) {
+    selectedNodes.push({
+      key: "__eyewear__",
+      label: EYEWEAR_CATEGORY_LABEL,
+      taxonomyIds: eyewearIds,
+    });
+  }
+  for (const id of value) {
+    if (eyewearIds.includes(id)) continue;
     const node = availableTaxonomy.find((t) => t.id === id);
-    return node ? { id: node.id, category: node.category } : { id, category: "—" };
-  });
+    selectedNodes.push({
+      key: id,
+      label: node?.category ?? "—",
+      taxonomyIds: [id],
+    });
+  }
 
   return (
     <div className="space-y-2">
-      <label className="block text-xs font-medium text-gray-700 mb-1">
+      <label className="mb-1 block text-xs font-medium text-[#B9B2A6]">
         Categories
       </label>
-      <p className="text-xs text-gray-500 mb-2">
+      <p className="mb-2 text-xs text-[#9E978B]">
         Select all categories that apply (e.g. Apparel and Wetsuits). These also define exclusivity—recommendations in these categories will be blocked.
       </p>
 
       {error && (
-        <div className="text-xs text-red-600 bg-red-50 p-2 rounded">{error}</div>
+        <div className="rounded border border-[#8C3A3A]/50 bg-[#3A1E1E] p-2 text-xs text-[#FFD2D2]">{error}</div>
       )}
 
       {value.length > 0 && (
         <div className="flex flex-wrap gap-2 mb-2">
           {selectedNodes.map((node) => (
             <span
-              key={node.id}
-              className="inline-flex items-center gap-1 px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded"
+              key={node.key}
+              className="inline-flex items-center gap-1 rounded border border-[#2E7040]/60 bg-[#1B2F21] px-2 py-1 text-xs text-[#DBEEE0]"
             >
-              {node.category}
+              {node.label}
               <button
                 type="button"
-                onClick={() => removeCategory(node.id)}
+                onClick={() => removeCategory(node.taxonomyIds)}
                 disabled={loading}
-                className="hover:text-blue-900 disabled:opacity-50"
+                className="text-[#CEE4D4] hover:text-[#F2FFF5] disabled:opacity-50"
               >
                 <X className="h-3 w-3" />
               </button>
@@ -202,58 +276,59 @@ export function ContractCategoriesEditor({
               }
               if (e.key === "Enter" && firstFilteredId) {
                 e.preventDefault();
-                addCategoryById(firstFilteredId);
+                const option = [...endemicFiltered, ...nonEndemicFiltered].find((o) => o.key === firstFilteredId);
+                if (option) addCategoryByIds(option.taxonomyIds);
               }
             }}
             disabled={loading}
             placeholder="Type to search categories…"
             autoComplete="off"
-            className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            className="w-full rounded-md border border-white/20 bg-[#101513] px-3 py-2 text-sm text-[#ECE7DF] placeholder:text-[#8E877A] disabled:opacity-50 focus:border-[#2E7040] focus:outline-none focus:ring-2 focus:ring-[#2E7040]"
           />
           {categoryListOpen && (
             <div
               id="contract-category-suggestions"
               role="listbox"
-              className="absolute z-50 mt-1 w-full max-h-60 overflow-auto rounded-md border border-gray-200 bg-white py-1 text-sm shadow-lg"
+              className="absolute z-50 mt-1 max-h-60 w-full overflow-auto rounded-md border border-white/10 bg-[#1A211D] py-1 text-sm shadow-lg"
             >
               {endemicFiltered.length === 0 && nonEndemicFiltered.length === 0 ? (
-                <div className="px-3 py-2 text-gray-500">No matching categories</div>
+                <div className="px-3 py-2 text-[#9E978B]">No matching categories</div>
               ) : (
                 <>
                   {endemicFiltered.length > 0 && (
                     <div className="pt-1 pb-0.5">
-                      <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+                      <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#9E978B]">
                         Endemic
                       </div>
                       {endemicFiltered.map((t) => (
                         <button
-                          key={t.id}
+                          key={t.key}
                           type="button"
                           role="option"
                           onMouseDown={(ev) => ev.preventDefault()}
-                          onClick={() => addCategoryById(t.id)}
-                          className="flex w-full px-3 py-2 text-left text-gray-900 hover:bg-gray-100"
+                          onClick={() => addCategoryByIds(t.taxonomyIds)}
+                          className="flex w-full px-3 py-2 text-left text-[#ECE7DF] hover:bg-white/5"
                         >
-                          {t.category}
+                          {t.label}
                         </button>
                       ))}
                     </div>
                   )}
                   {nonEndemicFiltered.length > 0 && (
                     <div className="pt-1 pb-0.5">
-                      <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+                      <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#9E978B]">
                         Non-Endemic
                       </div>
                       {nonEndemicFiltered.map((t) => (
                         <button
-                          key={t.id}
+                          key={t.key}
                           type="button"
                           role="option"
                           onMouseDown={(ev) => ev.preventDefault()}
-                          onClick={() => addCategoryById(t.id)}
-                          className="flex w-full px-3 py-2 text-left text-gray-900 hover:bg-gray-100"
+                          onClick={() => addCategoryByIds(t.taxonomyIds)}
+                          className="flex w-full px-3 py-2 text-left text-[#ECE7DF] hover:bg-white/5"
                         >
-                          {t.category}
+                          {t.label}
                         </button>
                       ))}
                     </div>
@@ -266,11 +341,11 @@ export function ContractCategoriesEditor({
       )}
 
       {availableToAdd.length === 0 && athleteSport && value.length > 0 && (
-        <p className="text-xs text-gray-500">All categories for this sport are selected.</p>
+        <p className="text-xs text-[#9E978B]">All categories for this sport are selected.</p>
       )}
 
       {!athleteSport && (
-        <p className="text-xs text-gray-500">Set athlete sport to select categories.</p>
+        <p className="text-xs text-[#9E978B]">Set athlete sport to select categories.</p>
       )}
     </div>
   );

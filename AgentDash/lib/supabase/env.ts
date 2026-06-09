@@ -1,11 +1,14 @@
 /**
- * Supabase client env. Uses NEXT_PUBLIC_* when set; fallbacks when Next.js (e.g. Turbopack) doesn't load .env.local.
+ * Supabase client env. Public keys must be supplied via NEXT_PUBLIC_* variables.
  */
-const FALLBACK_URL = "https://yegjchfodmvvcnrmemcn.supabase.co";
-const FALLBACK_ANON_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InllZ2pjaGZvZG12dmNucm1lbWNuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzAwNjgzNzUsImV4cCI6MjA4NTY0NDM3NX0.k5O7s-Z-NztjDJc01BI637ERDIP5FwQc2mH8NTVnZK0";
+function requireEnv(value: string | undefined, name: string) {
+  if (!value) throw new Error(`Missing required environment variable: ${name}`);
+  return value;
+}
 
-export const supabaseUrl =
-  (typeof process !== "undefined" && process.env.NEXT_PUBLIC_SUPABASE_URL) || FALLBACK_URL;
-export const supabaseAnonKey =
-  (typeof process !== "undefined" && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) || FALLBACK_ANON_KEY;
+// Use direct property access so Next.js can inline NEXT_PUBLIC_* values in client bundles.
+export const supabaseUrl = requireEnv(process.env.NEXT_PUBLIC_SUPABASE_URL, "NEXT_PUBLIC_SUPABASE_URL");
+export const supabaseAnonKey = requireEnv(
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+  "NEXT_PUBLIC_SUPABASE_ANON_KEY"
+);

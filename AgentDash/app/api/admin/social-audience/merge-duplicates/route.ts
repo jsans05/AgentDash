@@ -1,6 +1,7 @@
 import { requireRole } from "@/lib/auth";
 import { createServiceRoleClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
+import { ilikeContains } from "@/lib/supabase/ilike";
 
 type AthleteRow = {
   athlete_id: string;
@@ -105,7 +106,7 @@ function toNumberOrNull(v: any): number | null {
   return n;
 }
 
-const SOCIAL_FIELDS: (keyof any)[] = [
+const SOCIAL_FIELDS: string[] = [
   "total_followers",
   "avg_er_20p",
   "total_lifetime_posts",
@@ -221,8 +222,8 @@ export async function POST(req: Request) {
     const { data: groupCandidates } = await supabase
       .from("athletes")
       .select("athlete_id, first_name, last_name, created_at, sport, current_agent_id")
-      .ilike("first_name", `%${first}%`)
-      .ilike("last_name", `%${last}%`)
+      .ilike("first_name", ilikeContains(first))
+      .ilike("last_name", ilikeContains(last))
       .limit(50);
 
     const group = (groupCandidates ?? []).filter((r) => {

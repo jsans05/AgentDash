@@ -1,4 +1,5 @@
 import { requireRole } from "@/lib/auth";
+import { internalServerError } from "@/lib/api/http-errors";
 import { createServerClient } from "@/lib/supabase/server";
 import { TAXONOMY_NON_ENDEMIC_GLOBAL_SPORT } from "@/lib/taxonomy-constants";
 import { NextResponse } from "next/server";
@@ -24,15 +25,13 @@ export async function GET(req: Request) {
       .eq("tier", "ENDEMIC")
       .neq("sport", TAXONOMY_NON_ENDEMIC_GLOBAL_SPORT);
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
+    if (error) return internalServerError(error, "admin-taxonomy:get:sports");
     const set = new Set((data ?? []).map((r) => r.sport).filter(Boolean));
     return NextResponse.json([...set].sort((a, b) => a.localeCompare(b)));
   }
 
   const baseSelect =
-    "id, sport, tier, category, sort_order, is_active, created_at" as const;
+    "id, sport, tier, category, sort_order, is_active, created_at, parent_id, is_group" as const;
 
   if (sport === TAXONOMY_NON_ENDEMIC_GLOBAL_SPORT) {
     const { data: globalRows, error: globalErr } = await supabase
@@ -41,9 +40,7 @@ export async function GET(req: Request) {
       .eq("sport", TAXONOMY_NON_ENDEMIC_GLOBAL_SPORT)
       .order("sort_order", { ascending: true });
 
-    if (globalErr) {
-      return NextResponse.json({ error: globalErr.message }, { status: 500 });
-    }
+    if (globalErr) return internalServerError(globalErr, "admin-taxonomy:get:global");
 
     if (globalRows?.length) {
       return NextResponse.json(globalRows);
@@ -57,9 +54,7 @@ export async function GET(req: Request) {
         .eq("sport", refSport)
         .eq("tier", "NON_ENDEMIC")
         .order("sort_order", { ascending: true });
-      if (legErr) {
-        return NextResponse.json({ error: legErr.message }, { status: 500 });
-      }
+      if (legErr) return internalServerError(legErr, "admin-taxonomy:get:legacy-sport");
       if (legacy?.length) {
         return NextResponse.json(legacy, {
           headers: { "X-Taxonomy-Global-Legacy": "1" },
@@ -75,9 +70,7 @@ export async function GET(req: Request) {
       .limit(1)
       .maybeSingle();
 
-    if (sportErr) {
-      return NextResponse.json({ error: sportErr.message }, { status: 500 });
-    }
+    if (sportErr) return internalServerError(sportErr, "admin-taxonomy:get:any-sport");
 
     if (anySport?.sport) {
       const { data: legacy, error: legErr } = await supabase
@@ -86,9 +79,7 @@ export async function GET(req: Request) {
         .eq("sport", anySport.sport)
         .eq("tier", "NON_ENDEMIC")
         .order("sort_order", { ascending: true });
-      if (legErr) {
-        return NextResponse.json({ error: legErr.message }, { status: 500 });
-      }
+      if (legErr) return internalServerError(legErr, "admin-taxonomy:get:legacy-fallback");
       if (legacy?.length) {
         return NextResponse.json(legacy, {
           headers: { "X-Taxonomy-Global-Legacy": "1" },
@@ -109,9 +100,7 @@ export async function GET(req: Request) {
 
   const { data, error } = await query;
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
+  if (error) return internalServerError(error, "admin-taxonomy:get:list");
   return NextResponse.json(data ?? []);
 }
 
@@ -121,8 +110,10 @@ export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}));
   const tier = body.tier === "ENDEMIC" || body.tier === "NON_ENDEMIC" ? body.tier : null;
   const category = body.category?.trim();
-  const sort_order = typeof body.sort_order === "number" ? body.sort_order : 0;
   const is_active = body.is_active !== false;
+  const is_group = Boolean(body.is_group);
+  const parent_id =
+    typeof body.parent_id === "string" && body.parent_id.trim() ? body.parent_id.trim() : null;
 
   if (!tier || !category) {
     return NextResponse.json(
@@ -145,14 +136,54 @@ export async function POST(req: Request) {
   }
 
   const supabase = await createServerClient();
+
+  if (parent_id) {
+    const { data: parentRow, error: parentErr } = await supabase
+      .from("sponsorship_taxonomies")
+      .select("id, sport, tier, is_group")
+      .eq("id", parent_id)
+      .single();
+    if (parentErr || !parentRow) {
+      return NextResponse.json({ error: "Parent group not found" }, { status: 400 });
+    }
+    if (!parentRow.is_group) {
+      return NextResponse.json({ error: "parent_id must reference a group row" }, { status: 400 });
+    }
+    if (parentRow.sport !== sport || parentRow.tier !== tier) {
+      return NextResponse.json(
+        { error: "Child must share sport and tier with its parent group" },
+        { status: 400 }
+      );
+    }
+  }
+
+  if (is_group && parent_id) {
+    return NextResponse.json({ error: "Groups cannot be nested inside another group" }, { status: 400 });
+  }
+
+  let sort_order: number;
+  if (typeof body.sort_order === "number") {
+    sort_order = body.sort_order;
+  } else {
+    let maxQuery = supabase
+      .from("sponsorship_taxonomies")
+      .select("sort_order")
+      .eq("sport", sport)
+      .eq("tier", tier)
+      .order("sort_order", { ascending: false })
+      .limit(1);
+    if (parent_id) maxQuery = maxQuery.eq("parent_id", parent_id);
+    else maxQuery = maxQuery.is("parent_id", null);
+    const { data: maxRow } = await maxQuery.maybeSingle();
+    sort_order = (maxRow?.sort_order ?? -1) + 1;
+  }
+
   const { data, error } = await supabase
     .from("sponsorship_taxonomies")
-    .insert({ sport, tier, category, sort_order, is_active })
+    .insert({ sport, tier, category, sort_order, is_active, is_group, parent_id })
     .select()
     .single();
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
+  if (error) return internalServerError(error, "admin-taxonomy:post");
   return NextResponse.json(data);
 }

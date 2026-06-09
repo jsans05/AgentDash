@@ -1,20 +1,25 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
+import { GripVertical } from "lucide-react";
 import { TAXONOMY_NON_ENDEMIC_GLOBAL_SPORT } from "@/lib/taxonomy-constants";
+import {
+  buildTaxonomyTree,
+  flattenTreeForReorder,
+  type TaxonomyFlatNode,
+} from "@/lib/taxonomy-tree";
 
-type TaxonomyRow = {
+type TaxonomyRow = TaxonomyFlatNode & {
   id: string;
   sport: string;
-  tier: string;
-  category: string;
-  sort_order: number;
   is_active: boolean;
   created_at: string;
 };
 
 type AdminTab = "global" | "endemic";
+
+type AddMode = "category" | "group" | null;
 
 export function TaxonomyClient() {
   const router = useRouter();
@@ -30,17 +35,16 @@ export function TaxonomyClient() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<{
     category: string;
-    sort_order: number;
     is_active: boolean;
-  }>({ category: "", sort_order: 0, is_active: true });
+    parent_id: string | null;
+  }>({ category: "", is_active: true, parent_id: null });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [globalLegacyFallback, setGlobalLegacyFallback] = useState(false);
-  const [showAdd, setShowAdd] = useState(false);
-  const [newRow, setNewRow] = useState<{ category: string; sort_order: number }>({
-    category: "",
-    sort_order: 0,
-  });
+  const [addMode, setAddMode] = useState<AddMode>(null);
+  const [addParentId, setAddParentId] = useState<string | null>(null);
+  const [newCategory, setNewCategory] = useState("");
+  const [draggingId, setDraggingId] = useState<string | null>(null);
 
   const loadEndemicSports = useCallback(async () => {
     const res = await fetch("/api/admin/taxonomy?sports_only=1", { credentials: "include" });
@@ -112,24 +116,62 @@ export function TaxonomyClient() {
     loadRows();
   }, [loadRows]);
 
+  const groups = useMemo(() => rows.filter((r) => r.is_group), [rows]);
+
+  const flatOrderedIds = useMemo(() => {
+    const tree = buildTaxonomyTree(rows);
+    return flattenTreeForReorder(tree).map((n) => n.id);
+  }, [rows]);
+
+  const depthById = useMemo(() => {
+    const map = new Map<string, number>();
+    function walk(nodes: ReturnType<typeof buildTaxonomyTree>, depth: number) {
+      for (const n of nodes) {
+        map.set(n.id, depth);
+        walk(n.children, depth + 1);
+      }
+    }
+    walk(buildTaxonomyTree(rows), 0);
+    return map;
+  }, [rows]);
+
   function startEdit(row: TaxonomyRow) {
     setEditingId(row.id);
-    setEditForm({ category: row.category, sort_order: row.sort_order, is_active: row.is_active });
+    setEditForm({
+      category: row.category,
+      is_active: row.is_active,
+      parent_id: row.parent_id ?? null,
+    });
   }
 
   function cancelEdit() {
     setEditingId(null);
   }
 
+  function openAdd(mode: AddMode, parentId: string | null = null) {
+    setAddMode(mode);
+    setAddParentId(parentId);
+    setNewCategory("");
+    setEditingId(null);
+  }
+
   async function saveEdit() {
     if (!editingId) return;
+    const row = rows.find((r) => r.id === editingId);
     setSaving(true);
     setError(null);
     try {
+      const body: Record<string, unknown> = {
+        category: editForm.category,
+        is_active: editForm.is_active,
+      };
+      if (row && !row.is_group) {
+        body.parent_id = editForm.parent_id;
+      }
       const res = await fetch(`/api/admin/taxonomy/${editingId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(editForm),
+        body: JSON.stringify(body),
         credentials: "include",
       });
       const data = await res.json();
@@ -145,7 +187,7 @@ export function TaxonomyClient() {
   }
 
   async function remove(id: string) {
-    if (!confirm("Delete this taxonomy row?")) return;
+    if (!confirm("Delete this taxonomy row? Children will become top-level items.")) return;
     setSaving(true);
     setError(null);
     try {
@@ -163,8 +205,8 @@ export function TaxonomyClient() {
   }
 
   async function addRow() {
-    if (!newRow.category.trim()) {
-      setError("Category is required");
+    if (!newCategory.trim()) {
+      setError("Name is required");
       return;
     }
     if (adminTab === "endemic" && !endemicSportPick) {
@@ -174,14 +216,21 @@ export function TaxonomyClient() {
     setSaving(true);
     setError(null);
     try {
+      const isGroup = addMode === "group";
       const body =
         adminTab === "global"
-          ? { tier: "NON_ENDEMIC", category: newRow.category.trim(), sort_order: newRow.sort_order }
+          ? {
+              tier: "NON_ENDEMIC",
+              category: newCategory.trim(),
+              is_group: isGroup,
+              parent_id: addParentId,
+            }
           : {
               tier: "ENDEMIC",
               sport: endemicSportPick,
-              category: newRow.category.trim(),
-              sort_order: newRow.sort_order,
+              category: newCategory.trim(),
+              is_group: isGroup,
+              parent_id: addParentId,
             };
       const res = await fetch("/api/admin/taxonomy", {
         method: "POST",
@@ -191,8 +240,9 @@ export function TaxonomyClient() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to add");
-      setShowAdd(false);
-      setNewRow({ category: "", sort_order: 0 });
+      setAddMode(null);
+      setAddParentId(null);
+      setNewCategory("");
       await loadRows();
       await loadEndemicSports();
       router.refresh();
@@ -202,6 +252,49 @@ export function TaxonomyClient() {
       setSaving(false);
     }
   }
+
+  async function persistReorder(orderedIds: string[]) {
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/admin/taxonomy/reorder", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ordered_ids: orderedIds }),
+        credentials: "include",
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to reorder");
+      await loadRows();
+      router.refresh();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to reorder");
+      await loadRows();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function handleDrop(targetId: string) {
+    if (!draggingId || draggingId === targetId) {
+      setDraggingId(null);
+      return;
+    }
+    const order = [...flatOrderedIds];
+    const from = order.indexOf(draggingId);
+    const to = order.indexOf(targetId);
+    if (from < 0 || to < 0) {
+      setDraggingId(null);
+      return;
+    }
+    order.splice(from, 1);
+    order.splice(to, 0, draggingId);
+    setDraggingId(null);
+    void persistReorder(order);
+  }
+
+  const listTitle =
+    adminTab === "global" ? "Non-endemic (all sports)" : `Endemic — ${endemicSportPick || "—"}`;
 
   return (
     <div className="space-y-6">
@@ -215,7 +308,7 @@ export function TaxonomyClient() {
           onClick={() => {
             setAdminTab("endemic");
             setEditingId(null);
-            setShowAdd(false);
+            setAddMode(null);
           }}
           className={`px-4 py-2 rounded-md text-sm font-medium ${
             adminTab === "endemic"
@@ -230,7 +323,7 @@ export function TaxonomyClient() {
           onClick={() => {
             setAdminTab("global");
             setEditingId(null);
-            setShowAdd(false);
+            setAddMode(null);
           }}
           className={`px-4 py-2 rounded-md text-sm font-medium ${
             adminTab === "global"
@@ -244,18 +337,13 @@ export function TaxonomyClient() {
 
       <p className="text-sm text-[#B9B2A6]">
         {adminTab === "global"
-          ? "These categories apply to every sport (one shared list). Contracts and imports merge them with each sport’s endemic list."
-          : "Endemic categories are specific to the selected sport. Use the preview below to see the full merged taxonomy used by the app."}
+          ? "These categories apply to every sport. Drag rows to set order. Use groups as folder headers on the athlete page (parent checkbox selects all children)."
+          : "Endemic categories for the selected sport. Add a group (e.g. Factory team), then add child categories under it."}
       </p>
 
       {adminTab === "global" && globalLegacyFallback && (
         <div className="rounded-md border border-[#87652E]/60 bg-[#3A2E1A] p-3 text-sm text-[#F3D8A2]">
-          The database has not been consolidated yet: there are no rows under{" "}
-          <code className="rounded bg-[#5A4522] px-1">{TAXONOMY_NON_ENDEMIC_GLOBAL_SPORT}</code>. Showing
-          legacy per-sport non-endemic rows (same categories you had before migration). Edits apply to those
-          rows until you run the migration{" "}
-          <code className="rounded bg-[#5A4522] px-1">20260330120000_global_non_endemic_taxonomy.sql</code>{" "}
-          on Supabase. New rows you add here still go into the global bucket.
+          Legacy non-endemic rows are shown until the global migration runs on Supabase.
         </div>
       )}
 
@@ -304,13 +392,20 @@ export function TaxonomyClient() {
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-4">
+      <div className="flex flex-wrap items-center gap-3">
         <button
           type="button"
-          onClick={() => setShowAdd(true)}
+          onClick={() => openAdd("category")}
           className="rounded-md bg-[#2E7040] px-4 py-2 text-sm text-white hover:bg-[#285F36]"
         >
-          Add row
+          Add category
+        </button>
+        <button
+          type="button"
+          onClick={() => openAdd("group")}
+          className="rounded-md border border-[#2E7040]/50 bg-[#1B2F21] px-4 py-2 text-sm text-[#DBEEE0] hover:bg-[#223828]"
+        >
+          Add group
         </button>
         <button
           type="button"
@@ -322,37 +417,35 @@ export function TaxonomyClient() {
         >
           Refresh
         </button>
+        <span className="text-xs text-[#9E978B]">Drag the handle to reorder.</span>
       </div>
 
-      {showAdd && (
+      {addMode && (
         <div className="space-y-3 rounded-lg border border-white/15 bg-[#151A17] p-4">
           <h3 className="text-sm font-medium text-[#F4F1EB]">
-            New {adminTab === "global" ? "global non-endemic" : "endemic"} row
+            New {addMode === "group" ? "group" : "category"}
+            {addParentId
+              ? ` under ${rows.find((r) => r.id === addParentId)?.category ?? "group"}`
+              : ""}
             {adminTab === "endemic" && endemicSportPick ? ` — ${endemicSportPick}` : ""}
           </h3>
-          <div className="flex flex-wrap gap-3 items-end">
+          <div className="flex flex-wrap items-end gap-3">
             <div>
-              <label className="mb-1 block text-xs text-[#B9B2A6]">Category</label>
+              <label className="mb-1 block text-xs text-[#B9B2A6]">Name</label>
               <input
                 type="text"
-                value={newRow.category}
-                onChange={(e) => setNewRow((p) => ({ ...p, category: e.target.value }))}
-                placeholder="Category name"
-                className="w-56 rounded-md border border-white/20 bg-[#101513] px-3 py-2 text-sm text-[#ECE7DF]"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs text-[#B9B2A6]">Sort order</label>
-              <input
-                type="number"
-                value={newRow.sort_order}
-                onChange={(e) => setNewRow((p) => ({ ...p, sort_order: Number(e.target.value) || 0 }))}
-                className="w-20 rounded-md border border-white/20 bg-[#101513] px-3 py-2 text-sm text-[#ECE7DF]"
+                value={newCategory}
+                onChange={(e) => setNewCategory(e.target.value)}
+                placeholder={addMode === "group" ? "e.g. Factory team" : "e.g. Suspension"}
+                className="w-64 rounded-md border border-white/20 bg-[#101513] px-3 py-2 text-sm text-[#ECE7DF]"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void addRow();
+                }}
               />
             </div>
             <button
               type="button"
-              onClick={addRow}
+              onClick={() => void addRow()}
               disabled={saving}
               className="rounded-md bg-[#2E7040] px-4 py-2 text-sm text-white hover:bg-[#285F36] disabled:opacity-50"
             >
@@ -360,7 +453,10 @@ export function TaxonomyClient() {
             </button>
             <button
               type="button"
-              onClick={() => setShowAdd(false)}
+              onClick={() => {
+                setAddMode(null);
+                setAddParentId(null);
+              }}
               className="rounded-md border border-white/20 px-4 py-2 text-sm text-[#D7D0C4] hover:bg-white/5"
             >
               Cancel
@@ -373,31 +469,38 @@ export function TaxonomyClient() {
         {loading ? (
           <p className="text-sm text-[#B9B2A6]">Loading…</p>
         ) : adminTab === "endemic" && !endemicSportPick ? (
-          <p className="text-sm text-[#B9B2A6]">
-            No endemic sports found. Add a global non-endemic list (migration), then add endemic rows for a sport.
-          </p>
+          <p className="text-sm text-[#B9B2A6]">No endemic sports found. Add endemic rows for a sport first.</p>
         ) : rows.length === 0 ? (
-          <p className="text-sm text-[#B9B2A6]">No rows for this view. Use &quot;Add row&quot;.</p>
+          <p className="text-sm text-[#B9B2A6]">No rows for this view. Add a group or category to get started.</p>
         ) : (
           <div className="overflow-hidden rounded-lg border border-white/10">
-            <h2 className="bg-[#1A211D] px-4 py-2 font-medium text-[#F4F1EB]">
-              {adminTab === "global" ? "Non-endemic (all sports)" : `Endemic — ${endemicSportPick}`}
-            </h2>
+            <h2 className="bg-[#1A211D] px-4 py-2 font-medium text-[#F4F1EB]">{listTitle}</h2>
             <div className="divide-y divide-white/10 bg-[#151A17]">
-              {rows.map((r) => (
-                <RowBlock
-                  key={r.id}
-                  row={r}
-                  isEditing={editingId === r.id}
-                  editForm={editForm}
-                  setEditForm={setEditForm}
-                  onStartEdit={() => startEdit(r)}
-                  onCancel={cancelEdit}
-                  onSave={saveEdit}
-                  onDelete={() => remove(r.id)}
-                  saving={saving}
-                />
-              ))}
+              {flatOrderedIds.map((id) => {
+                const row = rows.find((r) => r.id === id);
+                if (!row) return null;
+                return (
+                  <RowBlock
+                    key={row.id}
+                    row={row}
+                    depth={depthById.get(row.id) ?? 0}
+                    groups={groups}
+                    isEditing={editingId === row.id}
+                    editForm={editForm}
+                    setEditForm={setEditForm}
+                    onStartEdit={() => startEdit(row)}
+                    onCancel={cancelEdit}
+                    onSave={() => void saveEdit()}
+                    onDelete={() => void remove(row.id)}
+                    onAddChild={row.is_group ? () => openAdd("category", row.id) : undefined}
+                    saving={saving}
+                    draggingId={draggingId}
+                    onDragStart={() => setDraggingId(row.id)}
+                    onDragEnd={() => setDraggingId(null)}
+                    onDrop={() => handleDrop(row.id)}
+                  />
+                );
+              })}
             </div>
           </div>
         )}
@@ -408,6 +511,8 @@ export function TaxonomyClient() {
 
 function RowBlock({
   row,
+  depth,
+  groups,
   isEditing,
   editForm,
   setEditForm,
@@ -415,20 +520,58 @@ function RowBlock({
   onCancel,
   onSave,
   onDelete,
+  onAddChild,
   saving,
+  draggingId,
+  onDragStart,
+  onDragEnd,
+  onDrop,
 }: {
   row: TaxonomyRow;
+  depth: number;
+  groups: TaxonomyRow[];
   isEditing: boolean;
-  editForm: { category: string; sort_order: number; is_active: boolean };
-  setEditForm: (v: { category: string; sort_order: number; is_active: boolean }) => void;
+  editForm: { category: string; is_active: boolean; parent_id: string | null };
+  setEditForm: (v: { category: string; is_active: boolean; parent_id: string | null }) => void;
   onStartEdit: () => void;
   onCancel: () => void;
   onSave: () => void;
   onDelete: () => void;
+  onAddChild?: () => void;
   saving: boolean;
+  draggingId: string | null;
+  onDragStart: () => void;
+  onDragEnd: () => void;
+  onDrop: () => void;
 }) {
+  const isDragging = draggingId === row.id;
+
   return (
-    <div className="px-4 py-2 flex items-center gap-4 flex-wrap">
+    <div
+      className={`flex flex-wrap items-center gap-3 px-3 py-2.5 ${isDragging ? "opacity-50 bg-white/[0.03]" : ""}`}
+      style={{ paddingLeft: 12 + depth * 20 }}
+      onDragOver={(e) => {
+        e.preventDefault();
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        onDrop();
+      }}
+    >
+      <button
+        type="button"
+        draggable
+        onDragStart={(e) => {
+          e.dataTransfer.effectAllowed = "move";
+          onDragStart();
+        }}
+        onDragEnd={onDragEnd}
+        className="cursor-grab text-[#6B655C] hover:text-[#B9B2A6] active:cursor-grabbing"
+        aria-label="Drag to reorder"
+      >
+        <GripVertical className="h-4 w-4" />
+      </button>
+
       {isEditing ? (
         <>
           <input
@@ -437,12 +580,27 @@ function RowBlock({
             onChange={(e) => setEditForm({ ...editForm, category: e.target.value })}
             className="min-w-[200px] flex-1 rounded border border-white/20 bg-[#101513] px-2 py-1 text-sm text-[#ECE7DF]"
           />
-          <input
-            type="number"
-            value={editForm.sort_order}
-            onChange={(e) => setEditForm({ ...editForm, sort_order: Number(e.target.value) || 0 })}
-            className="w-16 rounded border border-white/20 bg-[#101513] px-2 py-1 text-sm text-[#ECE7DF]"
-          />
+          {!row.is_group && (
+            <select
+              value={editForm.parent_id ?? ""}
+              onChange={(e) =>
+                setEditForm({
+                  ...editForm,
+                  parent_id: e.target.value ? e.target.value : null,
+                })
+              }
+              className="rounded border border-white/20 bg-[#101513] px-2 py-1 text-xs text-[#ECE7DF]"
+            >
+              <option value="">No group (top level)</option>
+              {groups
+                .filter((g) => g.id !== row.id)
+                .map((g) => (
+                  <option key={g.id} value={g.id}>
+                    Under: {g.category}
+                  </option>
+                ))}
+            </select>
+          )}
           <label className="flex items-center gap-1 text-sm text-[#D7D0C4]">
             <input
               type="checkbox"
@@ -469,8 +627,14 @@ function RowBlock({
         </>
       ) : (
         <>
-          <span className="flex-1 text-sm text-[#ECE7DF]">{row.category}</span>
-          <span className="w-10 text-xs text-[#B9B2A6]">#{row.sort_order}</span>
+          <span className={`flex-1 text-sm ${row.is_group ? "font-medium text-[#F4F1EB]" : "text-[#ECE7DF]"}`}>
+            {row.category}
+          </span>
+          {row.is_group && (
+            <span className="rounded border border-[#4A6B8C]/50 bg-[#1A2633] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[#A8C8E8]">
+              Group
+            </span>
+          )}
           <span
             className={`rounded px-1.5 py-0.5 text-xs ${
               row.is_active
@@ -480,6 +644,15 @@ function RowBlock({
           >
             {row.is_active ? "Active" : "Inactive"}
           </span>
+          {onAddChild && (
+            <button
+              type="button"
+              onClick={onAddChild}
+              className="text-xs text-[#CEE4D4] hover:text-[#E8F6ED]"
+            >
+              + Child
+            </button>
+          )}
           <button type="button" onClick={onStartEdit} className="text-xs text-[#CEE4D4] hover:text-[#E8F6ED]">
             Edit
           </button>

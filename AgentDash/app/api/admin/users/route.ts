@@ -1,6 +1,19 @@
 import { requireRole } from "@/lib/auth";
+import { apiErrorResponse, internalServerError } from "@/lib/api/http-errors";
+import { enforceContentLengthLimit } from "@/lib/api/request-limits";
 import { createServiceRoleClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
+import { z } from "zod";
+
+const createUserSchema = z
+  .object({
+    email: z.string().trim().email().max(320),
+    password: z.string().min(8).max(128),
+    first_name: z.string().trim().max(80).optional().default(""),
+    last_name: z.string().trim().max(80).optional().default(""),
+    role: z.enum(["admin", "sales", "agent"]).optional().default("agent"),
+  })
+  .strict();
 
 export async function GET(req: Request) {
   await requireRole("admin");
@@ -44,16 +57,18 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   await requireRole("admin");
+  const contentLengthError = enforceContentLengthLimit(req);
+  if (contentLengthError) return contentLengthError;
 
-  const body = await req.json();
-  const { email, password, first_name, last_name, role } = body;
-
-  if (!email || !password?.trim()) {
+  const rawBody = await req.json().catch(() => null);
+  const parsedBody = createUserSchema.safeParse(rawBody);
+  if (!parsedBody.success) {
     return NextResponse.json(
-      { error: "Email and password are required" },
+      { error: "Invalid request body", issues: parsedBody.error.flatten() },
       { status: 400 }
     );
   }
+  const { email, password, first_name, last_name, role } = parsedBody.data;
 
   const supabase = await createServiceRoleClient();
 
@@ -65,10 +80,14 @@ export async function POST(req: Request) {
   });
 
   if (authError) {
-    return NextResponse.json({ error: authError.message }, { status: 400 });
+    return apiErrorResponse({
+      status: 400,
+      publicMessage: "Failed to create auth user",
+      cause: authError,
+      context: "admin-users:post:create-auth-user",
+    });
   }
-
-  const profileRole = role === "admin" || role === "sales" || role === "agent" ? role : "agent";
+  const profileRole = role;
 
   const { error: profileError } = await supabase.from("profiles").insert({
     user_id: user.user.id,
@@ -79,7 +98,7 @@ export async function POST(req: Request) {
   });
 
   if (profileError) {
-    return NextResponse.json({ error: profileError.message }, { status: 500 });
+    return internalServerError(profileError, "admin-users:post:create-profile");
   }
 
   return NextResponse.json({

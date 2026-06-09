@@ -7,17 +7,21 @@ export type Profile = {
   created_at: string;
 };
 
+export type AthleteGender = "female" | "male" | "non_binary";
+
 export type Athlete = {
   athlete_id: string;
   current_agent_id: string | null;
   first_name: string;
   last_name: string;
+  gender: AthleteGender | null;
   sport: string | null;
   city: string | null;
   state: string | null;
   country: string | null;
   creatoriq_publisher_id: string | null;
   accolades: string[];
+  about: string | null;
   notes: string | null;
   created_at: string;
   updated_at: string;
@@ -97,6 +101,9 @@ export type CrmContact = {
   archived: boolean;
   outreach_mode: "email" | "linkedin" | "other";
 
+  apollo_person_id: string | null;
+  apollo_reveal_status: "pending" | "revealed" | null;
+
   created_at: string;
   updated_at: string;
 };
@@ -120,11 +127,24 @@ export type CrmOutreachLog = {
   created_at: string;
 };
 
+export type CrmPipelineStage =
+  | "target"
+  | "research"
+  | "drafting"
+  | "outreach"
+  | "bounced"
+  | "follow_up"
+  | "ghost"
+  | "in_progress"
+  | "closed";
+
 export type CrmCompanyPipeline = {
   id: string;
   company_id: string;
   created_by_user_id: string;
   status: "in_progress" | "promoted_to_crm";
+  pipeline_stage: CrmPipelineStage;
+  /** @deprecated Legacy mirror — use pipeline_stage */
   funnel_stage: "idea" | "research" | "contacted" | "negotiating" | "paused" | "won" | "lost";
   priority: 1 | 2 | 3;
   next_follow_up_at: string | null;
@@ -138,7 +158,31 @@ export type CrmCompanyPipeline = {
     source_contact_id?: string | null;
   }>;
   notes: string | null;
+  outreach_email_subject: string | null;
+  outreach_email: string | null;
   sent_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AiEmailTemplate = {
+  id: string;
+  mode: "one_to_one" | "general_high_level" | "general_athlete_led" | "multi_athlete";
+  subject_template: string;
+  body_template: string;
+  is_active: boolean;
+  created_by_user_id: string | null;
+  updated_by_user_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AiEmailToneSample = {
+  sample_id: string;
+  owner_user_id: string;
+  sample_index: 1 | 2 | 3;
+  sample_title: string | null;
+  sample_content: string;
   created_at: string;
   updated_at: string;
 };
@@ -167,12 +211,22 @@ export type AthleteSocialData = {
   updated_at: string;
 };
 
+export type AudienceCategoryEnum =
+  | "Brands"
+  | "Cities"
+  | "Combined_Age"
+  | "Countries"
+  | "Ethnicity"
+  | "Gender"
+  | "Interests"
+  | "States";
+
 export type AthleteAudienceData = {
   id: string;
   athlete_id: string;
   talent_id: string | null;
   name_raw: string | null;
-  audience_category: "Brands" | "Cities" | "Combined_Age" | "Countries" | "Ethnicity" | "Gender" | "Interests" | "States";
+  audience_category: AudienceCategoryEnum;
   audience_name: string;
   ig_audience_percent: number;
   ig_audience_count: number;
@@ -196,6 +250,7 @@ export type AIConversation = {
   project_id: string;
   owner_user_id: string;
   title: string | null;
+  pending_turn?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 };
@@ -207,5 +262,26 @@ export type AIMessage = {
   owner_user_id: string;
   role: "user" | "assistant" | "system";
   content: string;
+  metadata?: Record<string, unknown> | null;
+  created_at: string;
+};
+
+export type AIUserMemory = {
+  memory_id: string;
+  owner_user_id: string;
+  scope: "global" | "project";
+  project_id: string | null;
+  memory_text: string;
+  priority: 1 | 2 | 3 | 4 | 5;
+  is_active: boolean;
+  source: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type UserFeedback = {
+  feedback_id: string;
+  user_id: string;
+  feedback_text: string;
   created_at: string;
 };

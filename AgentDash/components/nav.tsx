@@ -60,28 +60,34 @@ export function Nav() {
   const role = normalizeAppRole(profile?.role);
   const displayEmail = profile?.email?.trim() || user.email || "—";
   const showAdminLinks = role === "admin";
+  const showInsightsLink = role === "admin" || role === "sales";
   const roleBadgeClass = role
     ? roleColors[role] ?? "border border-white/20 bg-white/10 text-[#E6E0D5]"
     : "border border-white/20 bg-white/10 text-[#B9B2A6]";
 
   const navLinks = [
     { href: "/roster", label: "Roster" },
+    ...(showInsightsLink ? [{ href: "/insights", label: "Insights" }] : []),
     { href: "/contracts", label: "Contracts" },
     { href: "/crm", label: "Pipeline" },
     { href: "/crm/drafts", label: "Drafts" },
+    { href: "/email-templates", label: "Email Templates" },
     { href: "/crm/companies", label: "CRM Pipeline" },
     { href: "/ai", label: "Mystery Machine" },
   ];
 
   const adminLinks = [
     { href: "/admin/users", label: "Users" },
+    { href: "/admin/feedback", label: "Feedback" },
     { href: "/admin/import", label: "Import" },
     { href: "/admin/taxonomy", label: "Taxonomy" },
   ];
 
   const isActive = (href: string) => {
     if (href === "/crm") return pathname === "/crm" || pathname.startsWith("/crm/contacts");
+    if (href === "/insights") return pathname === "/insights";
     if (href === "/admin/users") return pathname === "/admin/users";
+    if (href === "/admin/feedback") return pathname === "/admin/feedback";
     if (href === "/admin/import") return pathname === "/admin/import";
     if (href === "/admin/taxonomy") return pathname === "/admin/taxonomy";
     return pathname === href || pathname.startsWith(`${href}/`);

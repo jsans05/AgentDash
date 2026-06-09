@@ -2,14 +2,19 @@ import { createServerClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
-import { fmtFollowers, getAthleteAudienceProfile } from "@/lib/athlete-data";
+import { getAthleteAudienceProfile } from "@/lib/athlete-data";
 import { AthleteProfileClient } from "./client";
 import { AthleteAgentsEditor } from "./agents-editor";
 import { OutreachTab } from "./outreach";
 import { CoveredCategoriesSwitches } from "./CoveredCategoriesSwitches";
 import { SportEditor } from "./sport-editor";
+import { GenderEditor } from "./gender-editor";
+import type { AthleteGender } from "@/lib/athletes/gender";
+import { DeleteAthletePanel } from "./delete-athlete";
 import { AudiencePercentExpandable } from "@/components/athlete/AudiencePercentExpandable";
+import { AudienceViewMoreSection } from "@/components/athlete/AudienceViewMoreSection";
 import { GenderPie } from "@/components/athlete/GenderPie";
+import { SocialPlatformMetrics } from "@/components/athlete/SocialPlatformMetrics";
 
 export default async function AthleteProfilePage({
   params,
@@ -187,15 +192,20 @@ export default async function AthleteProfilePage({
                     initialSport={athlete.sport ?? null}
                     canEdit={canEdit}
                   />
+                  <GenderEditor
+                    athleteId={id}
+                    initialGender={(athlete.gender as AthleteGender | null) ?? null}
+                    canEdit={canEdit}
+                  />
                 </dl>
               </section>
 
-              {/* Accolades */}
+              {/* About & Accolades */}
               <AthleteProfileClient
                 athleteId={id}
                 athleteSport={athlete.sport ?? null}
                 initialAccolades={athlete.accolades || []}
-                initialNotes={athlete.notes ?? ""}
+                initialAbout={athlete.about ?? ""}
                 canEdit={canEdit}
                 contracts={[]}
                 sectionMode="accolades"
@@ -203,36 +213,7 @@ export default async function AthleteProfilePage({
 
               <section>
                 <h2 className="mb-3 text-lg font-medium text-[#F4F1EB]">Social & Audience</h2>
-                <dl className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2">
-                  <div>
-                    <dt className="text-sm font-medium text-[#B9B2A6]">Total Followers</dt>
-                    <dd className="mt-1 text-sm text-[#ECE7DF]">{fmtFollowers(audienceProfile.social?.total_followers ?? null)}</dd>
-                  </div>
-                  {audienceProfile.social?.ig_followers != null && (
-                    <div>
-                      <dt className="text-sm font-medium text-[#B9B2A6]">Instagram Followers</dt>
-                      <dd className="mt-1 text-sm text-[#ECE7DF]">{fmtFollowers(audienceProfile.social.ig_followers)}</dd>
-                    </div>
-                  )}
-                  {audienceProfile.social?.tt_followers != null && (
-                    <div>
-                      <dt className="text-sm font-medium text-[#B9B2A6]">TikTok Followers</dt>
-                      <dd className="mt-1 text-sm text-[#ECE7DF]">{fmtFollowers(audienceProfile.social.tt_followers)}</dd>
-                    </div>
-                  )}
-                  {audienceProfile.social?.fb_followers != null && (
-                    <div>
-                      <dt className="text-sm font-medium text-[#B9B2A6]">Facebook Followers</dt>
-                      <dd className="mt-1 text-sm text-[#ECE7DF]">{fmtFollowers(audienceProfile.social.fb_followers)}</dd>
-                    </div>
-                  )}
-                  {audienceProfile.social?.x_followers != null && (
-                    <div>
-                      <dt className="text-sm font-medium text-[#B9B2A6]">X Followers</dt>
-                      <dd className="mt-1 text-sm text-[#ECE7DF]">{fmtFollowers(audienceProfile.social.x_followers)}</dd>
-                    </div>
-                  )}
-                </dl>
+                <SocialPlatformMetrics social={audienceProfile.social} />
                 <div className="mt-4 grid grid-cols-1 gap-x-4 gap-y-6 sm:grid-cols-2">
                   <div>
                     <h3 className="text-sm font-medium text-[#D7D0C4]">Gender</h3>
@@ -309,6 +290,11 @@ export default async function AthleteProfilePage({
                     />
                   </div>
                 </div>
+                <AudienceViewMoreSection
+                  states={audienceProfile.states}
+                  cities={audienceProfile.cities}
+                  ethnicity={audienceProfile.ethnicity}
+                />
               </section>
 
               {/* Prospecting: categories marked as covered (AI won't search these) */}
@@ -329,6 +315,17 @@ export default async function AthleteProfilePage({
                 showArchived={showArchived}
                 sectionMode="notes-contracts"
               />
+
+              {profile.role === "admin" && (
+                <DeleteAthletePanel
+                  athleteId={id}
+                  athleteName={
+                    [athlete.first_name, athlete.last_name].filter(Boolean).join(" ").trim() ||
+                    "Athlete"
+                  }
+                  contractCount={contracts?.length ?? 0}
+                />
+              )}
             </>
           ) : (
             <OutreachTab

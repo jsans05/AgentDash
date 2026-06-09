@@ -23,7 +23,7 @@ export async function GET(req: Request) {
   const supabase = await createServerClient();
   const { data, error } = await supabase
     .from("sponsorship_taxonomies")
-    .select("id, sport, tier, category, sort_order")
+    .select("id, sport, tier, category, sort_order, parent_id, is_group")
     .eq("is_active", true)
     .order("sport", { ascending: true })
     .order("tier", { ascending: true })

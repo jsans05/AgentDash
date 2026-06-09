@@ -36,16 +36,19 @@ function loadEnv() {
 const env = loadEnv();
 const url = env.NEXT_PUBLIC_SUPABASE_URL || env.SUPABASE_URL;
 const serviceKey = env.SUPABASE_SERVICE_ROLE_KEY;
+const ADMIN_EMAIL = env.ADMIN_BOOTSTRAP_EMAIL;
+const ADMIN_PASSWORD = env.ADMIN_BOOTSTRAP_PASSWORD;
 
 if (!url || !serviceKey) {
   console.error("Need NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.local");
   process.exit(1);
 }
+if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
+  console.error("Need ADMIN_BOOTSTRAP_EMAIL and ADMIN_BOOTSTRAP_PASSWORD in .env.local");
+  process.exit(1);
+}
 
 const supabase = createClient(url, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } });
-
-const ADMIN_EMAIL = "admin@agentdash.local";
-const ADMIN_PASSWORD = "AgentDashAdmin2025!";
 
 async function main() {
   console.log("Creating admin user...");
@@ -103,10 +106,9 @@ async function main() {
 
 function printLogin() {
   console.log("--- LOG IN ---");
-  console.log("Email:    ", ADMIN_EMAIL);
-  console.log("Password: ", ADMIN_PASSWORD);
+  console.log("Bootstrap credentials are configured via environment variables.");
   console.log("---");
-  console.log("Change the password after first login.");
+  console.log("Rotate the admin password after first login.");
 }
 
 main();

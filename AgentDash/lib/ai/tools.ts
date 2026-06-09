@@ -1,4 +1,10 @@
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
+import { isApolloEnabled } from "@/lib/apollo/config";
+import {
+  resolveCompanyWebsiteForTargetList,
+  websiteWasResolvedForTargetList,
+} from "@/lib/crm/resolve-company-website-for-target-list";
+import { findContactsForCompany } from "@/lib/apollo/find-company-contacts";
 import type { Profile } from "@/lib/supabase/types";
 import { fetchTaxonomyNodesForSport, getTaxonomyBySport, normalizeCategoryForMatch } from "@/lib/taxonomy";
 import { buildAthleteIntelligencePayload } from "@/lib/ai/retrieval";
@@ -9,6 +15,7 @@ import {
   fmtPct,
   getAthleteAudienceProfile,
   normalizeIgAudiencePercentToFraction,
+  resolveAudiencePercentFraction,
 } from "@/lib/athlete-data";
 import {
   renderGeneralOutreachEmailMarkdown,
@@ -22,8 +29,21 @@ import {
 } from "@/lib/ai/email-templates";
 import { buildDraftFromTemplate, bulletizeProofPoints, normalizeSportForPitch } from "@/lib/ai/email-generation";
 import { getActiveEmailTemplate } from "@/lib/ai/email-template-store";
+import { curatePitchInterests } from "@/lib/ai/pitch-interest-curation";
+import { composePitchEmail, composeMultiAthletePitchEmails } from "@/lib/ai/pitch-composer";
+import { fetchPitchToneSamples } from "@/lib/ai/pitch-tone-samples";
+import { stripSponsorGapCopy } from "@/lib/ai/email-copy-guard";
+import type { PitchType } from "@/lib/ai/pitch-spec";
+import { computeRosterAudienceSummary, formatRosterAudienceCountDisplay } from "@/lib/ai/roster-audience";
 import { APPROVED_INTEREST_CATEGORIES } from "@/lib/ai/interest-taxonomy";
 import { ilikeContains, normalizeOrIlikeFragment } from "@/lib/supabase/ilike";
+import { fetchAthleteTargetListRows } from "@/lib/crm/athlete-target-list";
+import { isEffectivelyUncategorizedCompanyCategory } from "@/lib/crm/company-category";
+import { discoverAthleteProspects } from "@/lib/ai/athlete-prospect-discovery";
+import { mergeAthleteIntoPotentialAthletes, parseOptionalMatchScore } from "@/lib/crm/potential-athletes";
+import { searchCompanies } from "@/lib/enrichment";
+import { formatAthleteGender, normalizeAthleteGender } from "@/lib/athletes/gender";
+import { upsertContactOutreachDraft } from "@/lib/crm/target-list-outreach";
 
 /** Hardcoded roster sport values for "find athletes for [company]" STEP 2 (must match prompt in chat route). */
 export const FIND_ATHLETES_FOR_COMPANY_SPORTS = [
@@ -126,6 +146,7 @@ type RosterAthleteRow = {
   athlete_id: string;
   first_name: string | null;
   last_name: string | null;
+  gender: string | null;
   sport: string | null;
   city: string | null;
   state: string | null;
@@ -136,11 +157,11 @@ type RosterAthleteRow = {
 async function fetchRosterAthletesWithFilters(
   supabase: Awaited<ReturnType<typeof createServerClient>>,
   idFilter: string[] | null,
-  filters: { country: string; city: string; state: string; sport: string },
+  filters: { country: string; city: string; state: string; sport: string; gender: string | null },
   limit: number
 ): Promise<RosterAthleteRow[]> {
   const selectCols =
-    "athlete_id, first_name, last_name, sport, city, state, country, current_agent_id";
+    "athlete_id, first_name, last_name, gender, sport, city, state, country, current_agent_id";
 
   const applyLocationSportFilters = (q: any) => {
     let x = q;
@@ -148,6 +169,7 @@ async function fetchRosterAthletesWithFilters(
     if (filters.city) x = x.ilike("city", ilikeContains(filters.city));
     if (filters.state) x = x.ilike("state", ilikeContains(filters.state));
     if (filters.sport) x = x.ilike("sport", ilikeContains(filters.sport));
+    if (filters.gender) x = x.eq("gender", filters.gender);
     return x;
   };
 
@@ -187,13 +209,7 @@ async function fetchRosterAthletesWithFilters(
   return unique.slice(0, limit);
 }
 
-/** Display helper for Flow 7 roster audience counts (matches chat route spec). */
-export function formatRosterAudienceCountDisplay(count: number): string {
-  const n = Math.max(0, Math.floor(Number(count) || 0));
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)} million`;
-  if (n >= 1_000) return n.toLocaleString();
-  return String(n);
-}
+export { formatRosterAudienceCountDisplay } from "@/lib/ai/roster-audience";
 
 async function agentCanAccessAthlete(
   supabase: Awaited<ReturnType<typeof createServerClient>>,
@@ -391,36 +407,150 @@ export async function createAITools(profile: Profile) {
     const effectiveLimit = Math.max(1, Math.min(limit ?? 10, 50));
     const { data } = await supabase
       .from("athlete_audience_data")
-      .select("audience_name, ig_audience_percent, ig_audience_count")
+      .select("audience_name, ig_audience_percent, ig_audience_count, current_ig_following")
       .eq("athlete_id", athlete_id)
       .eq("audience_category", category)
-      .order("ig_audience_percent", { ascending: false })
-      .limit(effectiveLimit);
-    return (data ?? []).map((row: any) => ({
-      audience_name: row.audience_name,
-      ig_audience_percent: audiencePercentPoints(Number(row.ig_audience_percent ?? 0)),
-      ig_audience_count: Number(row.ig_audience_count ?? 0),
-    }));
+      .limit(Math.max(effectiveLimit, 50));
+    const mapped = (data ?? []).map((row: any) => {
+      const count = Number(row.ig_audience_count ?? 0);
+      const fraction = resolveAudiencePercentFraction(
+        Number(row.ig_audience_percent ?? 0),
+        count,
+        row.current_ig_following != null ? Number(row.current_ig_following) : null
+      );
+      return {
+        audience_name: row.audience_name,
+        ig_audience_percent: audiencePercentPoints(fraction),
+        ig_audience_count: count,
+        _fraction: fraction,
+      };
+    });
+    mapped.sort((a, b) => b._fraction - a._fraction || b.ig_audience_count - a.ig_audience_count);
+    return mapped.slice(0, effectiveLimit).map(({ _fraction, ...rest }) => rest);
   };
 
-  const getOrCreateCompanyByName = async (nameInput: string): Promise<string> => {
-    const name = String(nameInput ?? "").trim();
+  const getOrCreateCompanyWithMeta = async (input: {
+    name: string;
+    website?: string;
+    category?: string;
+  }): Promise<string> => {
+    const name = String(input.name ?? "").trim();
     if (!name) throw new Error("company name required");
+    const website = String(input.website ?? "").trim() || null;
+    const category = String(input.category ?? "").trim() || null;
 
     const { data: existing } = await supabaseCompanies
       .from("companies")
-      .select("company_id")
+      .select("company_id, website, product_category")
       .eq("name", name)
       .maybeSingle();
-    if (existing?.company_id) return existing.company_id;
 
-    const { data: created, error: createError } = await supabaseCompanies
-      .from("companies")
-      .insert({ name, industry: null })
-      .select("company_id")
-      .single();
-    if (createError) throw createError;
-    return created.company_id;
+    let companyId: string;
+    if (existing?.company_id) {
+      companyId = String(existing.company_id);
+      const patch: Record<string, string> = {};
+      if (website && !existing.website) patch.website = website;
+      if (category && isEffectivelyUncategorizedCompanyCategory(existing.product_category)) {
+        patch.product_category = category;
+      }
+      if (Object.keys(patch).length > 0) {
+        await supabaseCompanies.from("companies").update(patch).eq("company_id", companyId);
+      }
+    } else {
+      const { data: created, error: createError } = await supabaseCompanies
+        .from("companies")
+        .insert({
+          name,
+          industry: null,
+          website,
+          product_category: category || DEFAULT_COMPANY_CATEGORY,
+        })
+        .select("company_id")
+        .single();
+      if (createError) throw createError;
+      companyId = String(created.company_id);
+    }
+
+    await resolveCompanyWebsiteForTargetList(
+      supabase,
+      companyId,
+      {
+        companyName: name,
+        productCategory: category,
+        websiteHint: website,
+      },
+      { userId: profile.user_id }
+    );
+
+    return companyId;
+  };
+
+  const resolveAthleteIdForPipelineTools = async (params: {
+    athlete_id?: string;
+    athlete_name?: string;
+  }): Promise<
+    | { ok: false; error: string }
+    | { ok: true; athleteId: string; athleteFullName: string; athleteSport: string | null }
+  > => {
+    let athleteId = String(params?.athlete_id ?? "").trim();
+    if (athleteId && looksLikeHumanAthleteIdPlaceholder(athleteId)) athleteId = "";
+    const providedName = String(params?.athlete_name ?? "").trim();
+
+    const fetchAthleteRow = async (id: string) =>
+      supabase.from("athletes").select("athlete_id, first_name, last_name, sport").eq("athlete_id", id).maybeSingle();
+
+    let athleteRow: {
+      athlete_id?: string;
+      first_name?: string | null;
+      last_name?: string | null;
+      sport?: string | null;
+    } | null = null;
+
+    if (athleteId) {
+      const { data } = await fetchAthleteRow(athleteId);
+      athleteRow = data ?? null;
+    }
+
+    if (!athleteRow && providedName) {
+      const parts = providedName.split(/\s+/).filter(Boolean);
+      const first = parts.length > 1 ? parts[0] : "";
+      const last = parts.length > 1 ? parts[parts.length - 1] : parts[0] ?? "";
+      let q = supabase.from("athletes").select("athlete_id, first_name, last_name, sport").limit(5);
+      if (first) q = q.ilike("first_name", `%${first}%`);
+      if (last) q = q.ilike("last_name", `%${last}%`);
+      const { data } = await q;
+      const candidates = Array.isArray(data) ? data : [];
+      const exact = candidates.find((a: any) => {
+        const full = [a.first_name, a.last_name].filter(Boolean).join(" ").trim().toLowerCase();
+        return full === providedName.toLowerCase();
+      });
+      athleteRow = exact ?? candidates[0] ?? null;
+    }
+
+    if (!athleteRow?.athlete_id) {
+      return {
+        ok: false as const,
+        error:
+          "Could not resolve athlete. Pass athlete_id (UUID) or athlete_name matching exactly one athlete in the roster.",
+      };
+    }
+    athleteId = String(athleteRow.athlete_id);
+
+    if (!(await agentCanAccessAthlete(supabase, profile, athleteId))) {
+      return { ok: false as const, error: "You do not have access to that athlete." };
+    }
+
+    const athleteFullName = [athleteRow.first_name, athleteRow.last_name]
+      .map((s) => String(s ?? "").trim())
+      .filter(Boolean)
+      .join(" ");
+
+    return {
+      ok: true as const,
+      athleteId,
+      athleteFullName,
+      athleteSport: athleteRow.sport ?? null,
+    };
   };
 
   return {
@@ -431,111 +561,210 @@ export async function createAITools(profile: Profile) {
     },
 
     getRosterAudienceSummary: async (params: { interest_names: string[] }) => {
-      const interestInput = Array.isArray(params.interest_names)
+      const interest_names = Array.isArray(params.interest_names)
         ? params.interest_names.map((s) => String(s ?? "").trim()).filter(Boolean)
         : [];
+      return computeRosterAudienceSummary(supabase, profile, interest_names);
+    },
 
-      const rosterIds = await getRosterAthleteIdsForProfile(supabase, profile);
-      const roster_total_athletes = rosterIds.length;
-      const roster_total_followers = await rosterTotalFollowers(supabase, rosterIds);
+    curatePitchInterests: async (params: {
+      pitch_type: PitchType;
+      company_name: string;
+      target_industry_or_category?: string | null;
+      athlete_id?: string | null;
+      max_suggestions?: number;
+    }) => {
+      const pitch_type = params.pitch_type;
+      const company_name = String(params.company_name ?? "").trim();
+      if (!company_name) return { error: "company_name is required" };
+      if (!pitch_type) return { error: "pitch_type is required" };
+      const athlete_id = params.athlete_id?.trim() || null;
+      if (
+        (pitch_type === "single_athlete" ||
+          pitch_type === "multi_athlete_per_contact" ||
+          pitch_type === "multi_athlete_combined") &&
+        athlete_id &&
+        !(await agentCanAccessAthlete(supabase, profile, athlete_id))
+      ) {
+        return { error: "Cannot access this athlete" };
+      }
+      return curatePitchInterests({
+        supabase,
+        profile,
+        pitch_type,
+        company_name,
+        target_industry_or_category: params.target_industry_or_category,
+        athlete_id,
+        max_suggestions: params.max_suggestions,
+      });
+    },
 
-      const emptyBreakdown = [] as { interest_name: string; total_ig_audience_count: number; athlete_count: number }[];
-
-      if (!interestInput.length) {
-        return {
-          roster_total_athletes,
-          roster_total_followers,
-          total_audience_count: 0,
-          matched_athlete_count: 0,
-          interest_breakdown: emptyBreakdown,
-          total_audience_display: formatRosterAudienceCountDisplay(0),
-          roster_followers_display: formatRosterAudienceCountDisplay(roster_total_followers),
-        };
+    composePitchEmail: async (params: {
+      pitch_type: PitchType;
+      company_name: string;
+      interest_names: string[];
+      recipient_name?: string;
+      target_industry_or_category?: string | null;
+      athlete_id?: string | null;
+      athlete_ids?: string[];
+      past_partnerships?: string | null;
+      company_description?: string | null;
+      personal_notes?: string | null;
+      open_category_reason?: string | null;
+      cta?: string;
+      sender_display_name?: string;
+      revision_hint?: string | null;
+    }) => {
+      const company_name = String(params.company_name ?? "").trim();
+      if (!company_name) return { error: "company_name is required" };
+      const pitch_type = params.pitch_type;
+      if (!pitch_type) return { error: "pitch_type is required" };
+      const interest_names = Array.isArray(params.interest_names)
+        ? params.interest_names.map((s) => String(s ?? "").trim()).filter(Boolean)
+        : [];
+      if (!interest_names.length) {
+        return { error: "interest_names is required (use curatePitchInterests suggestions or user selections)" };
       }
 
-      if (!rosterIds.length) {
-        return {
-          roster_total_athletes: 0,
-          roster_total_followers: 0,
-          total_audience_count: 0,
-          matched_athlete_count: 0,
-          interest_breakdown: emptyBreakdown,
-          total_audience_display: formatRosterAudienceCountDisplay(0),
-          roster_followers_display: formatRosterAudienceCountDisplay(0),
-        };
-      }
+      const toneSamples = await fetchPitchToneSamples(supabase, profile.user_id);
 
-      const distinctOnRoster = await fetchDistinctInterestNamesOnRoster(supabase, rosterIds);
-      const resolvedInterestNames = resolveInterestNamesForRoster(interestInput, distinctOnRoster);
-      if (!resolvedInterestNames.length) {
-        return {
-          roster_total_athletes,
-          roster_total_followers,
-          total_audience_count: 0,
-          matched_athlete_count: 0,
-          interest_breakdown: emptyBreakdown,
-          total_audience_display: formatRosterAudienceCountDisplay(0),
-          roster_followers_display: formatRosterAudienceCountDisplay(roster_total_followers),
-        };
-      }
+      const athlete_ids = Array.isArray(params.athlete_ids)
+        ? params.athlete_ids.map((id) => String(id ?? "").trim()).filter(Boolean)
+        : [];
 
-      const audienceRows: Array<{
-        athlete_id: string;
-        audience_name: string;
-        ig_audience_count: number | null;
-        ig_audience_percent: number | null;
-      }> = [];
-
-      for (const chunk of chunkArray(rosterIds, 200)) {
-        const { data, error: audErr } = await supabase
-          .from("athlete_audience_data")
-          .select("athlete_id, audience_name, ig_audience_count, ig_audience_percent")
-          .eq("audience_category", "Interests")
-          .in("audience_name", resolvedInterestNames)
-          .in("athlete_id", chunk);
-        if (audErr) throw audErr;
-        for (const row of data ?? []) {
-          audienceRows.push(row as (typeof audienceRows)[number]);
+      if (
+        (pitch_type === "multi_athlete_per_contact" || pitch_type === "multi_athlete_combined") &&
+        athlete_ids.length > 0
+      ) {
+        for (const aid of athlete_ids) {
+          if (!(await agentCanAccessAthlete(supabase, profile, aid))) {
+            return { error: `Cannot access athlete ${aid}` };
+          }
+        }
+        if (pitch_type === "multi_athlete_per_contact") {
+          const emails = await composeMultiAthletePitchEmails({
+            supabase,
+            profile,
+            company_name,
+            interest_names,
+            athlete_ids,
+            recipient_name: params.recipient_name,
+            target_industry_or_category: params.target_industry_or_category,
+            past_partnerships: params.past_partnerships,
+            company_description: params.company_description,
+            personal_notes: params.personal_notes,
+            open_category_reason: params.open_category_reason,
+            cta: params.cta,
+            sender_display_name: params.sender_display_name,
+            toneSamples,
+            revisionHint: params.revision_hint,
+          });
+          return {
+            emails: emails.map((e) => ({
+              subject: e.subject,
+              body: e.body,
+              body_markdown: e.body_markdown,
+              pitch_type: e.pitch_type,
+              polished: e.polished ?? false,
+              fallback_used: e.fallback_used ?? false,
+            })),
+          };
         }
       }
 
-      const athleteIdsNeedingFollowers = [...new Set(audienceRows.map((r) => String(r.athlete_id ?? "")).filter(Boolean))];
-      const igFollowersByAthlete = await fetchIgFollowersByAthleteId(supabase, athleteIdsNeedingFollowers);
-
-      let total_audience_count = 0;
-      const matchedAthletes = new Set<string>();
-      const sumByInterest = new Map<string, number>();
-      const athletesByInterest = new Map<string, Set<string>>();
-
-      for (const row of audienceRows) {
-        const aid = String(row.athlete_id ?? "");
-        const name = String(row.audience_name ?? "");
-        if (!aid || !name) continue;
-        const igBase = igFollowersByAthlete.get(aid) ?? 0;
-        const cnt = effectiveIgInterestCount(row.ig_audience_count, row.ig_audience_percent, igBase);
-        total_audience_count += cnt;
-        matchedAthletes.add(aid);
-        sumByInterest.set(name, (sumByInterest.get(name) ?? 0) + cnt);
-        const set = athletesByInterest.get(name) ?? new Set<string>();
-        set.add(aid);
-        athletesByInterest.set(name, set);
+      const athlete_id = params.athlete_id?.trim() || athlete_ids[0] || null;
+      if (athlete_id && !(await agentCanAccessAthlete(supabase, profile, athlete_id))) {
+        return { error: "Cannot access this athlete" };
       }
 
-      const interest_breakdown = resolvedInterestNames.map((interest_name) => ({
-        interest_name,
-        total_ig_audience_count: sumByInterest.get(interest_name) ?? 0,
-        athlete_count: athletesByInterest.get(interest_name)?.size ?? 0,
-      }));
-      interest_breakdown.sort((a, b) => b.total_ig_audience_count - a.total_ig_audience_count);
+      const composed = await composePitchEmail({
+        supabase,
+        profile,
+        pitch_type,
+        company_name,
+        interest_names,
+        recipient_name: params.recipient_name,
+        target_industry_or_category: params.target_industry_or_category,
+        athlete_id,
+        athlete_ids: pitch_type === "multi_athlete_combined" ? athlete_ids : undefined,
+        past_partnerships: params.past_partnerships,
+        company_description: [params.company_description, params.personal_notes].filter(Boolean).join(" ").trim() || null,
+        open_category_reason: params.open_category_reason,
+        cta: params.cta,
+        sender_display_name: params.sender_display_name,
+        toneSamples,
+        revisionHint: params.revision_hint,
+      });
 
       return {
-        roster_total_athletes,
-        roster_total_followers,
-        total_audience_count,
-        matched_athlete_count: matchedAthletes.size,
-        interest_breakdown,
-        total_audience_display: formatRosterAudienceCountDisplay(total_audience_count),
-        roster_followers_display: formatRosterAudienceCountDisplay(roster_total_followers),
+        subject: composed.subject,
+        body: composed.body,
+        body_markdown: composed.body_markdown,
+        pitch_type: composed.pitch_type,
+        used_interests: composed.used_interests,
+        word_count: composed.word_count,
+        max_words: composed.max_words,
+        within_word_limit: composed.within_word_limit,
+        curation_rationale: composed.curation_rationale,
+        polished: composed.polished ?? false,
+        fallback_used: composed.fallback_used ?? false,
+      };
+    },
+
+    mergePitchEmails: async (params: {
+      company_name: string;
+      athlete_ids: string[];
+      interest_names: string[];
+      target_industry_or_category?: string | null;
+      past_partnerships?: string | null;
+      recipient_name?: string;
+      cta?: string;
+      sender_display_name?: string;
+      revision_hint?: string | null;
+    }) => {
+      const company_name = String(params.company_name ?? "").trim();
+      if (!company_name) return { error: "company_name is required" };
+      const athlete_ids = Array.isArray(params.athlete_ids)
+        ? params.athlete_ids.map((id) => String(id ?? "").trim()).filter(Boolean)
+        : [];
+      if (athlete_ids.length < 2) {
+        return { error: "mergePitchEmails requires at least two athlete_ids" };
+      }
+      const interest_names = Array.isArray(params.interest_names)
+        ? params.interest_names.map((s) => String(s ?? "").trim()).filter(Boolean)
+        : [];
+      if (!interest_names.length) {
+        return { error: "interest_names is required (from thread selections or curatePitchInterests)" };
+      }
+      for (const aid of athlete_ids) {
+        if (!(await agentCanAccessAthlete(supabase, profile, aid))) {
+          return { error: `Cannot access athlete ${aid}` };
+        }
+      }
+      const toneSamples = await fetchPitchToneSamples(supabase, profile.user_id);
+      const composed = await composePitchEmail({
+        supabase,
+        profile,
+        pitch_type: "multi_athlete_combined",
+        company_name,
+        interest_names,
+        athlete_ids,
+        recipient_name: params.recipient_name,
+        target_industry_or_category: params.target_industry_or_category,
+        past_partnerships: params.past_partnerships,
+        cta: params.cta,
+        sender_display_name: params.sender_display_name,
+        toneSamples,
+        revisionHint: params.revision_hint,
+      });
+      return {
+        subject: composed.subject,
+        body: composed.body,
+        body_markdown: composed.body_markdown,
+        pitch_type: composed.pitch_type,
+        used_interests: composed.used_interests,
+        polished: composed.polished ?? false,
+        fallback_used: composed.fallback_used ?? false,
       };
     },
 
@@ -812,7 +1041,7 @@ export async function createAITools(profile: Profile) {
     },
 
     listAthletesScoped: async (params?: { sport?: string }) => {
-      let query = supabase.from("athletes").select("athlete_id, first_name, last_name, sport, country, creatoriq_publisher_id");
+      let query = supabase.from("athletes").select("athlete_id, first_name, last_name, gender, sport, country, creatoriq_publisher_id");
       if (profile.role === "agent") {
         const ids = await getAgentAccessibleAthleteIds(supabase, profile);
         if (!ids.length) return [];
@@ -834,25 +1063,28 @@ export async function createAITools(profile: Profile) {
       city?: string;
       state?: string;
       sport?: string;
+      gender?: string;
       agent_name?: string;
       limit?: number;
     }) => {
       const limit = Math.min(Math.max(Number(params.limit) || 150, 1), 400);
+      const genderFilter = normalizeAthleteGender(params.gender ?? "");
       const filters = {
         country: safeIlikeFragment(params.country ?? ""),
         city: safeIlikeFragment(params.city ?? ""),
         state: safeIlikeFragment(params.state ?? ""),
         sport: safeIlikeFragment(params.sport ?? ""),
+        gender: genderFilter,
       };
       const agentName = safeIlikeFragment(params.agent_name ?? "");
 
       const hasFilter = Boolean(
-        filters.country || filters.city || filters.state || filters.sport || agentName
+        filters.country || filters.city || filters.state || filters.sport || filters.gender || agentName
       );
       if (!hasFilter) {
         return {
           error:
-            "Provide at least one filter: country, city, state, sport, or agent_name. For sport-only lists without other criteria, use listAthletesScoped.",
+            "Provide at least one filter: country, city, state, sport, gender, or agent_name. For sport-only lists without other criteria, use listAthletesScoped.",
         };
       }
 
@@ -920,6 +1152,8 @@ export async function createAITools(profile: Profile) {
           return {
             athlete_id: r.athlete_id,
             name: [r.first_name, r.last_name].filter(Boolean).join(" ").trim(),
+            gender: r.gender,
+            gender_display: formatAthleteGender(r.gender as any),
             sport: r.sport,
             city: r.city,
             state: r.state,
@@ -1057,25 +1291,32 @@ export async function createAITools(profile: Profile) {
     pushCompanyToCrmPipeline: async (params: {
       company_name: string;
       category?: string;
+      website?: string;
       notes?: string;
       support_email?: string;
       contact_emails?: string[];
       /** Optional — when set, the athlete is merged into the card's potential_athletes so it shows up on the target list view. Accepts UUID or full name. */
       athlete_id?: string;
       athlete_name?: string;
+      /** Optional athlete–company fit score for target-list sorting (higher = better match). */
+      match_score?: number;
     }) => {
       const company_name = String(params.company_name ?? "").trim();
       if (!company_name) return { error: "company_name is required" };
 
-      const company_id = await getOrCreateCompanyByName(company_name);
       const desiredCategory = String(params.category ?? "").trim() || DEFAULT_COMPANY_CATEGORY;
+      const company_id = await getOrCreateCompanyWithMeta({
+        name: company_name,
+        website: params.website,
+        category: desiredCategory,
+      });
       const { data: companyRow, error: companyReadError } = await supabase
         .from("companies")
         .select("product_category")
         .eq("company_id", company_id)
         .maybeSingle();
       if (companyReadError) return { error: companyReadError.message };
-      if (!String(companyRow?.product_category ?? "").trim()) {
+      if (isEffectivelyUncategorizedCompanyCategory(companyRow?.product_category)) {
         const { error: categoryErr } = await supabaseCompanies
           .from("companies")
           .update({ product_category: desiredCategory })
@@ -1087,7 +1328,12 @@ export async function createAITools(profile: Profile) {
       const notes = params.notes != null ? String(params.notes) : null;
 
       // Resolve optional athlete so the card appears on /athlete/:id/target-list. Accepts UUID or name.
-      let athleteEntry: { athlete_id: string; name: string; sport: string | null } | null = null;
+      let athleteEntry: {
+        athlete_id: string;
+        name: string;
+        sport: string | null;
+        match_score?: number | null;
+      } | null = null;
       const rawAthleteId = String(params.athlete_id ?? "").trim();
       const rawAthleteName = String(params.athlete_name ?? "").trim();
       if (rawAthleteId && !looksLikeHumanAthleteIdPlaceholder(rawAthleteId)) {
@@ -1131,6 +1377,11 @@ export async function createAITools(profile: Profile) {
         }
       }
 
+      const matchScore = parseOptionalMatchScore(params.match_score);
+      if (athleteEntry && matchScore != null) {
+        athleteEntry = { ...athleteEntry, match_score: matchScore };
+      }
+
       const { data: existing } = await supabase
         .from("crm_companies_pipeline")
         .select("id, contact_emails, potential_athletes")
@@ -1140,18 +1391,22 @@ export async function createAITools(profile: Profile) {
 
       if (existing) {
         const mergedEmails = normalizeEmails([...(existing.contact_emails ?? []), ...contact_emails]);
-        const existingAthletes = Array.isArray(existing.potential_athletes) ? [...existing.potential_athletes] : [];
-        const alreadyLinked = athleteEntry
-          ? existingAthletes.some((p: any) => String(p?.athlete_id ?? "") === athleteEntry!.athlete_id)
-          : false;
-        const nextAthletes = athleteEntry && !alreadyLinked ? [...existingAthletes, athleteEntry] : existingAthletes;
+        let alreadyLinked = false;
+        let nextAthletes = Array.isArray(existing.potential_athletes) ? [...existing.potential_athletes] : [];
+        if (athleteEntry) {
+          const merged = mergeAthleteIntoPotentialAthletes(existing.potential_athletes, athleteEntry);
+          alreadyLinked = merged.alreadyLinked;
+          nextAthletes = merged.next;
+        }
         const updatePatch: Record<string, unknown> = {
           support_email,
           notes,
           contact_emails: mergedEmails,
           status: "in_progress",
         };
-        if (athleteEntry && !alreadyLinked) updatePatch.potential_athletes = nextAthletes;
+        if (athleteEntry && (!alreadyLinked || matchScore != null)) {
+          updatePatch.potential_athletes = nextAthletes;
+        }
         const { data: updated, error: updateError } = await supabase
           .from("crm_companies_pipeline")
           .update(updatePatch)
@@ -1159,9 +1414,17 @@ export async function createAITools(profile: Profile) {
           .select("id, company_id, status, support_email, contact_emails, notes, potential_athletes")
           .single();
         if (updateError) return { error: updateError.message };
+        const { data: websiteRow } = await supabaseCompanies
+          .from("companies")
+          .select("website")
+          .eq("company_id", company_id)
+          .maybeSingle();
+        const website = websiteRow?.website ? String(websiteRow.website).trim() : null;
         return {
           created: false,
           company_name,
+          website,
+          website_missing: !website,
           record: updated,
           athlete_linked: Boolean(athleteEntry && !alreadyLinked),
           athlete: athleteEntry ?? null,
@@ -1182,9 +1445,17 @@ export async function createAITools(profile: Profile) {
         .select("id, company_id, status, support_email, contact_emails, notes, potential_athletes")
         .single();
       if (createError) return { error: createError.message };
+      const { data: websiteRow } = await supabaseCompanies
+        .from("companies")
+        .select("website")
+        .eq("company_id", company_id)
+        .maybeSingle();
+      const website = websiteRow?.website ? String(websiteRow.website).trim() : null;
       return {
         created: true,
         company_name,
+        website,
+        website_missing: !website,
         record: created,
         athlete_linked: Boolean(athleteEntry),
         athlete: athleteEntry ?? null,
@@ -1202,7 +1473,7 @@ export async function createAITools(profile: Profile) {
     }) => {
       const company_name = String(params.company_name ?? "").trim();
       const email_subject = String(params.email_subject ?? "").trim();
-      const email_body = String(params.email_body ?? "");
+      const email_body = stripSponsorGapCopy(String(params.email_body ?? ""));
       if (!company_name) return { ok: false as const, error: "company_name is required" };
       if (!email_subject) return { ok: false as const, error: "email_subject is required" };
       if (!email_body.trim()) return { ok: false as const, error: "email_body is required" };
@@ -1818,7 +2089,7 @@ export async function createAITools(profile: Profile) {
       // 1. Get athlete basic info
       const { data: athlete } = await supabase
         .from("athletes")
-        .select("athlete_id, first_name, last_name, sport, accolades, notes")
+        .select("athlete_id, first_name, last_name, sport, gender, accolades, notes")
         .eq("athlete_id", athlete_id)
         .single();
       if (!athlete) return null;
@@ -1923,6 +2194,7 @@ export async function createAITools(profile: Profile) {
           athlete_id,
           name: [athlete.first_name, athlete.last_name].filter(Boolean).join(" "),
           sport: athlete.sport,
+          gender: athlete.gender ?? null,
           accolades: athlete.accolades ?? [],
           notes: athlete.notes ?? null,
         },
@@ -1950,6 +2222,87 @@ export async function createAITools(profile: Profile) {
         known_company_targets: knownTargets.slice(0, 20),
         open_categories: prioritized.orderedCategories,
       };
+    },
+
+    generateAthleteProspectList: async (params: {
+      athlete_id?: string;
+      athlete_name?: string;
+      category_hint?: string;
+      categories?: string[];
+      min_per_category?: number;
+      revenue_range_min?: number;
+      revenue_range_max?: number;
+      organization_locations?: string[];
+      user_request?: string;
+    }) => {
+      const resolved = await resolveAthleteIdForPipelineTools(params);
+      if (!resolved.ok) return { ok: false as const, error: resolved.error };
+      if (!(await agentCanAccessAthlete(supabase, profile, resolved.athleteId))) {
+        return { ok: false as const, error: "Unauthorized athlete access" };
+      }
+
+      const discovery = await discoverAthleteProspects(supabase, {
+        athleteId: resolved.athleteId,
+        categoryHint: params.category_hint,
+        categoriesOverride: Array.isArray(params.categories) ? params.categories : undefined,
+        minPerCategory: params.min_per_category,
+        revenueRangeMin: params.revenue_range_min,
+        revenueRangeMax: params.revenue_range_max,
+        organizationLocations: params.organization_locations,
+        userRequestText: params.user_request,
+      });
+      if (!discovery) return { ok: false as const, error: "Athlete not found" };
+
+      return {
+        ok: true as const,
+        athlete: {
+          athlete_id: resolved.athleteId,
+          name: discovery.athleteName,
+          sport: discovery.sport,
+        },
+        markdown: discovery.markdown,
+        rows: discovery.rows.map((r) => ({
+          company_name: r.company_name,
+          category: r.category,
+          website: r.website,
+          match_score: r.match_score,
+        })),
+        categories_searched: Object.keys(discovery.groupedCandidates),
+        prioritized_categories: discovery.prioritizedCategories,
+        blocked_companies: discovery.blockedCompanies,
+      };
+    },
+
+    apolloSearchCompanies: async (params: {
+      query?: string;
+      keyword_tags?: string[];
+      revenue_range_min?: number;
+      revenue_range_max?: number;
+      organization_locations?: string[];
+      organization_num_employees_ranges?: string[];
+      per_page?: number;
+      page?: number;
+    }) => {
+      const keywordTags = Array.isArray(params.keyword_tags)
+        ? params.keyword_tags.map((t) => String(t ?? "").trim()).filter(Boolean)
+        : [];
+      const query = String(params.query ?? "").trim();
+      const tags = keywordTags.length > 0 ? keywordTags : query ? [query] : [];
+      if (tags.length === 0) return { error: "query or keyword_tags is required" };
+
+      try {
+        const results = await searchCompanies(tags[0], {
+          keyword_tags: tags,
+          revenue_range_min: params.revenue_range_min,
+          revenue_range_max: params.revenue_range_max,
+          organization_locations: params.organization_locations,
+          organization_num_employees_ranges: params.organization_num_employees_ranges,
+          per_page: params.per_page ?? 15,
+        });
+        return results;
+      } catch (e: unknown) {
+        return { error: e instanceof Error ? e.message : "Apollo company search failed" };
+      }
     },
 
     getAthleteCoveredCategories: async (params: { athlete_id: string }) => {
@@ -2163,6 +2516,9 @@ export async function createAITools(profile: Profile) {
       athlete_sport: string;
       audience_insights: string[];
       open_category_reason: string;
+      athlete_id?: string;
+      target_industry_or_category?: string | null;
+      interest_names?: string[];
       accolades?: string[];
       past_partnerships?: string;
       company_description?: string;
@@ -2172,6 +2528,48 @@ export async function createAITools(profile: Profile) {
       if (!validated.ok) {
         return { error: validated.error };
       }
+
+      const athlete_id = params.athlete_id?.trim() || null;
+      const interest_names =
+        Array.isArray(params.interest_names) && params.interest_names.length
+          ? params.interest_names.map((s) => String(s ?? "").trim()).filter(Boolean)
+          : [];
+
+      if (athlete_id) {
+        const curation = await curatePitchInterests({
+          supabase,
+          profile,
+          pitch_type: "single_athlete",
+          company_name: validated.data.brand_name,
+          target_industry_or_category: params.target_industry_or_category,
+          athlete_id,
+        });
+        const interests = interest_names.length
+          ? interest_names
+          : curation.suggested_interests.map((s) => s.interest_name);
+        if (interests.length) {
+          const composed = await composePitchEmail({
+            supabase,
+            profile,
+            pitch_type: "single_athlete",
+            company_name: validated.data.brand_name,
+            interest_names: interests,
+            recipient_name: validated.data.recipient_name,
+            athlete_id,
+            target_industry_or_category: params.target_industry_or_category,
+            past_partnerships: params.past_partnerships,
+            company_description: params.company_description,
+            open_category_reason: validated.data.open_category_reason,
+            cta: validated.data.cta,
+          });
+          return {
+            subject: composed.subject,
+            body_markdown: composed.body_markdown,
+            used_interests: composed.used_interests,
+          };
+        }
+      }
+
       const template = await getActiveEmailTemplate(supabase as any, "one_to_one");
       const vars = {
         recipient_name: validated.data.recipient_name || "[Recipient Name]",
@@ -2187,7 +2585,7 @@ export async function createAITools(profile: Profile) {
           ],
           3
         ),
-        fit_rationale: validated.data.open_category_reason,
+        fit_rationale: "",
         past_partnership_line: String(params.past_partnerships ?? "").trim()
           ? `I recently noticed ${String(params.past_partnerships ?? "").trim()}`
           : "",
@@ -2231,15 +2629,85 @@ export async function createAITools(profile: Profile) {
       lead_athletes?: Array<{
         athlete_name: string;
         athlete_sport?: string;
+        athlete_id?: string;
       }>;
       proof_points: string[];
       cta?: string;
       high_level?: boolean;
+      target_industry_or_category?: string | null;
+      interest_names?: string[];
+      past_partnerships?: string | null;
+      company_description?: string | null;
     }) => {
       const validated = validateGeneralOutreachEmailInput(params);
       if (!validated.ok) {
         return { error: validated.error };
       }
+
+      const pitch_type = validated.data.high_level ? "roster_aggregate" : "roster_athlete_led";
+      const curation = await curatePitchInterests({
+        supabase,
+        profile,
+        pitch_type,
+        company_name: validated.data.company_name,
+        target_industry_or_category: params.target_industry_or_category,
+        athlete_id: params.lead_athletes?.[0]?.athlete_id,
+      });
+      const interest_names =
+        Array.isArray(params.interest_names) && params.interest_names.length
+          ? params.interest_names.map((s) => String(s ?? "").trim()).filter(Boolean)
+          : curation.suggested_interests.map((s) => s.interest_name);
+
+      if (interest_names.length) {
+        const spotlight = await Promise.all(
+          (params.lead_athletes ?? []).slice(0, 3).map(async (row) => {
+            const aid = row.athlete_id?.trim();
+            if (aid) {
+              const { data } = await supabase
+                .from("athletes")
+                .select("athlete_id, first_name, last_name, sport, accolades")
+                .eq("athlete_id", aid)
+                .maybeSingle();
+              if (data) {
+                return {
+                  athlete_id: aid,
+                  athlete_name: `${data.first_name ?? ""} ${data.last_name ?? ""}`.trim() || row.athlete_name,
+                  athlete_sport: String(data.sport ?? row.athlete_sport ?? ""),
+                  accolades: Array.isArray(data.accolades)
+                    ? data.accolades.map((a: unknown) => String(a ?? "").trim())
+                    : [],
+                };
+              }
+            }
+            return {
+              athlete_id: aid ?? row.athlete_name,
+              athlete_name: row.athlete_name,
+              athlete_sport: String(row.athlete_sport ?? ""),
+            };
+          })
+        );
+
+        const composed = await composePitchEmail({
+          supabase,
+          profile,
+          pitch_type,
+          company_name: validated.data.company_name,
+          interest_names,
+          recipient_name: validated.data.recipient_name,
+          target_industry_or_category: params.target_industry_or_category,
+          spotlight_athletes: spotlight.length ? spotlight : undefined,
+          athlete_id: params.lead_athletes?.[0]?.athlete_id,
+          past_partnerships: params.past_partnerships,
+          company_description: params.company_description,
+          cta: validated.data.cta,
+        });
+        return {
+          subject: composed.subject,
+          body_markdown: composed.body_markdown,
+          used_interests: composed.used_interests,
+        };
+      }
+
       const mode = validated.data.high_level ? "general_high_level" : "general_athlete_led";
       const template = await getActiveEmailTemplate(supabase as any, mode);
       const leadAthletes = validated.data.lead_athletes.map((row) => row.athlete_name).join(", ");
@@ -2271,7 +2739,8 @@ export async function createAITools(profile: Profile) {
      * Bulk import: create/merge CRM pipeline cards for a batch of companies and attach them all
      * to one athlete's target list (potential_athletes). Intended for parsed Excel/screenshot uploads.
      * Per-row fields mirror the target-list Excel columns so agents can dump a spreadsheet and have
-     * the Mystery Machine do the CRM plumbing.
+     * the Mystery Machine do the CRM plumbing. Optional outreach_email_subject / outreach_email map
+     * to the Email Subject and Outreach Email columns (filled on pipeline only when previously blank).
      */
     bulkImportCompaniesToCrmForAthlete: async (params: {
       athlete_id?: string;
@@ -2284,6 +2753,9 @@ export async function createAITools(profile: Profile) {
         company_description?: string;
         past_partnerships?: string;
         personal_notes?: string;
+        outreach_email_subject?: string;
+        outreach_email?: string;
+        match_score?: number;
         contacts?: Array<{
           first_name: string;
           last_name: string;
@@ -2302,66 +2774,17 @@ export async function createAITools(profile: Profile) {
         return { ok: false as const, error: "Too many rows (max 300 per call)" };
       }
 
-      // Resolve athlete. Prefer explicit athlete_id (already UUID-resolved by the chat route),
-      // otherwise run the same name resolver used elsewhere so agents can say "assign to Bryce".
-      let athleteId = String(params?.athlete_id ?? "").trim();
-      if (athleteId && looksLikeHumanAthleteIdPlaceholder(athleteId)) athleteId = "";
-      const providedName = String(params?.athlete_name ?? "").trim();
-
-      const fetchAthleteRow = async (id: string) =>
-        supabase
-          .from("athletes")
-          .select("athlete_id, first_name, last_name, sport")
-          .eq("athlete_id", id)
-          .maybeSingle();
-
-      let athleteRow: { athlete_id?: string; first_name?: string | null; last_name?: string | null; sport?: string | null } | null = null;
-
-      if (athleteId) {
-        const { data } = await fetchAthleteRow(athleteId);
-        athleteRow = data ?? null;
+      const resolvedAthlete = await resolveAthleteIdForPipelineTools(params);
+      if (!resolvedAthlete.ok) {
+        return { ok: false as const, error: resolvedAthlete.error };
       }
-
-      if (!athleteRow && providedName) {
-        const parts = providedName.split(/\s+/).filter(Boolean);
-        const first = parts.length > 1 ? parts[0] : "";
-        const last = parts.length > 1 ? parts[parts.length - 1] : parts[0] ?? "";
-        let q = supabase
-          .from("athletes")
-          .select("athlete_id, first_name, last_name, sport")
-          .limit(5);
-        if (first) q = q.ilike("first_name", `%${first}%`);
-        if (last) q = q.ilike("last_name", `%${last}%`);
-        const { data } = await q;
-        const candidates = Array.isArray(data) ? data : [];
-        const exact = candidates.find((a: any) => {
-          const full = [a.first_name, a.last_name].filter(Boolean).join(" ").trim().toLowerCase();
-          return full === providedName.toLowerCase();
-        });
-        athleteRow = exact ?? candidates[0] ?? null;
-      }
-
-      if (!athleteRow?.athlete_id) {
-        return {
-          ok: false as const,
-          error:
-            "Could not resolve athlete. Pass athlete_id (UUID) or athlete_name matching exactly one athlete in the roster.",
-        };
-      }
-      athleteId = String(athleteRow.athlete_id);
-
-      if (!(await agentCanAccessAthlete(supabase, profile, athleteId))) {
-        return { ok: false as const, error: "You do not have access to that athlete." };
-      }
-
-      const athleteFullName = [athleteRow.first_name, athleteRow.last_name]
-        .map((s) => String(s ?? "").trim())
-        .filter(Boolean)
-        .join(" ");
+      const athleteId = resolvedAthlete.athleteId;
+      const athleteFullName = resolvedAthlete.athleteFullName;
       const athleteEntry = {
         athlete_id: athleteId,
         name: athleteFullName,
-        sport: athleteRow.sport ?? null,
+        sport: resolvedAthlete.athleteSport,
+        match_score: null as number | null,
       };
 
       const results: Array<{
@@ -2371,10 +2794,12 @@ export async function createAITools(profile: Profile) {
         pipeline_created: boolean;
         athlete_linked: boolean;
         company_fields_updated: string[];
+        website_resolved?: boolean;
         contacts_created: number;
         contacts_existing: number;
         error?: string;
       }> = [];
+      let websitesResolved = 0;
 
       for (const raw of rows) {
         const company_name = String(raw?.company_name ?? "").trim();
@@ -2430,8 +2855,10 @@ export async function createAITools(profile: Profile) {
           const companyPatch: Record<string, string | null> = {};
           if (raw.website?.trim() && !pickedCo.website) companyPatch.website = raw.website.trim();
           if (raw.hq_phone?.trim() && !pickedCo.hq_phone) companyPatch.hq_phone = raw.hq_phone.trim();
-          const rowCategory = raw.category?.trim() || DEFAULT_COMPANY_CATEGORY;
-          if (!pickedCo.product_category) companyPatch.product_category = rowCategory;
+          const explicitCategory = raw.category?.trim() || null;
+          if (isEffectivelyUncategorizedCompanyCategory(pickedCo.product_category)) {
+            companyPatch.product_category = explicitCategory || DEFAULT_COMPANY_CATEGORY;
+          }
 
           if (Object.keys(companyPatch).length > 0) {
             const { error: companyUpErr } = await supabaseCompanies
@@ -2441,10 +2868,26 @@ export async function createAITools(profile: Profile) {
             if (companyUpErr) throw new Error(companyUpErr.message);
           }
 
+          const websiteResult = await resolveCompanyWebsiteForTargetList(
+            supabase,
+            companyId,
+            {
+              companyName: company_name,
+              productCategory:
+                explicitCategory || pickedCo?.product_category || DEFAULT_COMPANY_CATEGORY,
+              websiteHint: raw.website?.trim() || null,
+            },
+            { userId: profile.user_id }
+          );
+          const websiteResolved = websiteWasResolvedForTargetList(websiteResult);
+          if (websiteResolved) websitesResolved += 1;
+
           // Pipeline card is scoped per user (unique (company_id, created_by_user_id)).
           const { data: existingPipe } = await supabase
             .from("crm_companies_pipeline")
-            .select("id, potential_athletes, company_description, past_partnerships, personal_notes")
+            .select(
+              "id, potential_athletes, company_description, past_partnerships, personal_notes, outreach_email_subject, outreach_email"
+            )
             .eq("company_id", companyId)
             .eq("created_by_user_id", profile.user_id)
             .maybeSingle();
@@ -2453,14 +2896,24 @@ export async function createAITools(profile: Profile) {
           let pipelineCreated = false;
           let alreadyLinked = false;
 
+          const rowMatchScore = parseOptionalMatchScore(raw.match_score);
+          const athleteEntryForRow = {
+            ...athleteEntry,
+            ...(rowMatchScore != null ? { match_score: rowMatchScore } : {}),
+          };
+
           if (existingPipe?.id) {
             pipelineId = String(existingPipe.id);
-            const list = Array.isArray(existingPipe.potential_athletes) ? [...existingPipe.potential_athletes] : [];
-            alreadyLinked = list.some((p: any) => String(p?.athlete_id ?? "") === athleteId);
-            const nextAthletes = alreadyLinked ? list : [...list, athleteEntry];
+            const merged = mergeAthleteIntoPotentialAthletes(
+              existingPipe.potential_athletes,
+              athleteEntryForRow
+            );
+            alreadyLinked = merged.alreadyLinked;
 
             const pipelinePatch: Record<string, unknown> = {};
-            if (!alreadyLinked) pipelinePatch.potential_athletes = nextAthletes;
+            if (!alreadyLinked || rowMatchScore != null) {
+              pipelinePatch.potential_athletes = merged.next;
+            }
             if (raw.company_description?.trim() && !existingPipe.company_description) {
               pipelinePatch.company_description = raw.company_description.trim();
             }
@@ -2469,6 +2922,12 @@ export async function createAITools(profile: Profile) {
             }
             if (raw.personal_notes?.trim() && !existingPipe.personal_notes) {
               pipelinePatch.personal_notes = raw.personal_notes.trim();
+            }
+            if (raw.outreach_email_subject?.trim() && !existingPipe.outreach_email_subject) {
+              pipelinePatch.outreach_email_subject = raw.outreach_email_subject.trim();
+            }
+            if (raw.outreach_email?.trim() && !existingPipe.outreach_email) {
+              pipelinePatch.outreach_email = raw.outreach_email.trim();
             }
             if (Object.keys(pipelinePatch).length > 0) {
               const { error: upErr } = await supabase
@@ -2484,10 +2943,12 @@ export async function createAITools(profile: Profile) {
                 company_id: companyId,
                 created_by_user_id: profile.user_id,
                 status: "in_progress",
-                potential_athletes: [athleteEntry],
+                potential_athletes: [athleteEntryForRow],
                 company_description: raw.company_description?.trim() || null,
                 past_partnerships: raw.past_partnerships?.trim() || null,
                 personal_notes: raw.personal_notes?.trim() || null,
+                outreach_email_subject: raw.outreach_email_subject?.trim() || null,
+                outreach_email: raw.outreach_email?.trim() || null,
               })
               .select("id")
               .single();
@@ -2572,6 +3033,7 @@ export async function createAITools(profile: Profile) {
             pipeline_created: pipelineCreated,
             athlete_linked: !alreadyLinked,
             company_fields_updated: Object.keys(companyPatch),
+            website_resolved: websiteResolved,
             contacts_created: contactsCreated,
             contacts_existing: contactsExisting,
           });
@@ -2593,6 +3055,7 @@ export async function createAITools(profile: Profile) {
         pipeline_cards_created: results.filter((r) => r.pipeline_created).length,
         pipeline_cards_updated: results.filter((r) => !r.pipeline_created && !r.error).length,
         athletes_linked: results.filter((r) => r.athlete_linked).length,
+        websites_resolved: websitesResolved,
         contacts_created: results.reduce((s, r) => s + r.contacts_created, 0),
         contacts_existing: results.reduce((s, r) => s + r.contacts_existing, 0),
         errors: results.filter((r) => r.error).map((r) => ({ company: r.company_name, error: r.error })),
@@ -2600,10 +3063,354 @@ export async function createAITools(profile: Profile) {
 
       return {
         ok: true as const,
-        athlete: { athlete_id: athleteId, name: athleteFullName, sport: athleteRow.sport ?? null },
+        athlete: { athlete_id: athleteId, name: athleteFullName, sport: resolvedAthlete.athleteSport },
         summary,
         results,
       };
+    },
+
+    getAthleteTargetList: async (params: {
+      athlete_id?: string;
+      athlete_name?: string;
+      uncategorized_only?: boolean;
+      include_contacts?: boolean;
+    }) => {
+      const resolved = await resolveAthleteIdForPipelineTools(params);
+      if (!resolved.ok) return { ok: false as const, error: resolved.error };
+
+      let rows;
+      try {
+        rows = await fetchAthleteTargetListRows(supabase, profile.user_id, resolved.athleteId);
+      } catch (e: any) {
+        return { ok: false as const, error: e?.message ?? "Failed to load target list" };
+      }
+
+      if (params.uncategorized_only) {
+        rows = rows.filter((r) => isEffectivelyUncategorizedCompanyCategory(r.category));
+      }
+
+      const includeContacts = Boolean(params.include_contacts);
+      const slim = rows.map((r) => ({
+        pipeline_id: r.pipeline_id,
+        company_id: r.company_id,
+        company_name: r.company_name,
+        category: r.category,
+        match_score: r.match_score,
+        website: r.website,
+        hq_phone: r.hq_phone,
+        outreach_email_subject: r.outreach_email_subject,
+        outreach_email: r.outreach_email,
+        ...(includeContacts ? { contacts: r.contacts } : { contact_count: r.contacts.length }),
+      }));
+
+      return {
+        ok: true as const,
+        athlete: {
+          athlete_id: resolved.athleteId,
+          name: resolved.athleteFullName,
+          sport: resolved.athleteSport,
+        },
+        row_count: slim.length,
+        rows: slim,
+      };
+    },
+
+    updateTargetListCompanyCategories: async (params: {
+      athlete_id?: string;
+      athlete_name?: string;
+      updates: Array<{ pipeline_id: string; product_category: string }>;
+    }) => {
+      const resolved = await resolveAthleteIdForPipelineTools(params);
+      if (!resolved.ok) return { ok: false as const, error: resolved.error };
+
+      const updates = Array.isArray(params.updates) ? params.updates : [];
+      if (updates.length === 0) return { ok: false as const, error: "updates array is required" };
+      if (updates.length > 80) return { ok: false as const, error: "Too many updates (max 80 per call)" };
+
+      let rows;
+      try {
+        rows = await fetchAthleteTargetListRows(supabase, profile.user_id, resolved.athleteId);
+      } catch (e: any) {
+        return { ok: false as const, error: e?.message ?? "Failed to verify target list" };
+      }
+      const allowed = new Set(rows.map((r) => r.pipeline_id));
+
+      const results: Array<{ pipeline_id: string; ok: boolean; error?: string; company_id?: string }> = [];
+
+      for (const u of updates) {
+        const pid = String(u.pipeline_id ?? "").trim();
+        const cat = String(u.product_category ?? "").trim();
+        if (!pid || !cat) {
+          results.push({
+            pipeline_id: pid || "(missing)",
+            ok: false,
+            error: "pipeline_id and non-empty product_category are required",
+          });
+          continue;
+        }
+        if (!allowed.has(pid)) {
+          results.push({
+            pipeline_id: pid,
+            ok: false,
+            error: "Pipeline row not on this athlete's target list or not owned by you",
+          });
+          continue;
+        }
+        const row = rows.find((r) => r.pipeline_id === pid);
+        if (!row) {
+          results.push({ pipeline_id: pid, ok: false, error: "Row not found" });
+          continue;
+        }
+        const { error: upErr } = await supabaseCompanies
+          .from("companies")
+          .update({ product_category: cat })
+          .eq("company_id", row.company_id);
+        if (upErr) {
+          results.push({ pipeline_id: pid, ok: false, error: upErr.message, company_id: row.company_id });
+          continue;
+        }
+        results.push({ pipeline_id: pid, ok: true, company_id: row.company_id });
+      }
+
+      return {
+        ok: true as const,
+        athlete_id: resolved.athleteId,
+        updated: results.filter((r) => r.ok).length,
+        failed: results.filter((r) => !r.ok).length,
+        results,
+      };
+    },
+
+    removeAthleteFromTargetListCards: async (params: {
+      athlete_id?: string;
+      athlete_name?: string;
+      pipeline_ids: string[];
+    }) => {
+      const resolved = await resolveAthleteIdForPipelineTools(params);
+      if (!resolved.ok) return { ok: false as const, error: resolved.error };
+
+      const ids = Array.isArray(params.pipeline_ids)
+        ? params.pipeline_ids.map((x) => String(x ?? "").trim()).filter(Boolean)
+        : [];
+      if (ids.length === 0) return { ok: false as const, error: "pipeline_ids is required" };
+      if (ids.length > 80) return { ok: false as const, error: "Too many ids (max 80 per call)" };
+
+      const results: Array<{ pipeline_id: string; ok: boolean; error?: string }> = [];
+
+      for (const pid of ids) {
+        const { data: pipe, error: readErr } = await supabase
+          .from("crm_companies_pipeline")
+          .select("id, potential_athletes, created_by_user_id")
+          .eq("id", pid)
+          .maybeSingle();
+        if (readErr || !pipe) {
+          results.push({ pipeline_id: pid, ok: false, error: readErr?.message || "Pipeline row not found" });
+          continue;
+        }
+        if (String(pipe.created_by_user_id) !== profile.user_id) {
+          results.push({ pipeline_id: pid, ok: false, error: "Not your pipeline card" });
+          continue;
+        }
+        const list = Array.isArray(pipe.potential_athletes) ? [...pipe.potential_athletes] : [];
+        const had = list.some((p: any) => String(p?.athlete_id ?? "") === resolved.athleteId);
+        const nextAthletes = list.filter((p: any) => String(p?.athlete_id ?? "") !== resolved.athleteId);
+        if (!had) {
+          results.push({ pipeline_id: pid, ok: false, error: "Athlete was not linked on this card" });
+          continue;
+        }
+        const { error: upErr } = await supabase
+          .from("crm_companies_pipeline")
+          .update({ potential_athletes: nextAthletes })
+          .eq("id", pid)
+          .eq("created_by_user_id", profile.user_id);
+        if (upErr) {
+          results.push({ pipeline_id: pid, ok: false, error: upErr.message });
+          continue;
+        }
+        results.push({ pipeline_id: pid, ok: true });
+      }
+
+      return {
+        ok: true as const,
+        athlete_id: resolved.athleteId,
+        removed: results.filter((r) => r.ok).length,
+        failed: results.filter((r) => !r.ok).length,
+        results,
+      };
+    },
+
+    updateTargetListOutreach: async (params: {
+      athlete_id?: string;
+      athlete_name?: string;
+      updates: Array<{
+        pipeline_id: string;
+        outreach_email_subject: string;
+        outreach_email: string;
+        contact_id?: string;
+      }>;
+    }) => {
+      const resolved = await resolveAthleteIdForPipelineTools(params);
+      if (!resolved.ok) return { ok: false as const, error: resolved.error };
+
+      const updates = Array.isArray(params.updates) ? params.updates : [];
+      if (updates.length === 0) return { ok: false as const, error: "updates array is required" };
+      if (updates.length > 80) return { ok: false as const, error: "Too many updates (max 80 per call)" };
+
+      let rows;
+      try {
+        rows = await fetchAthleteTargetListRows(supabase, profile.user_id, resolved.athleteId);
+      } catch (e: any) {
+        return { ok: false as const, error: e?.message ?? "Failed to verify target list" };
+      }
+      const rowByPipeline = new Map(rows.map((r) => [r.pipeline_id, r]));
+
+      const results: Array<{
+        pipeline_id: string;
+        ok: boolean;
+        saved_to?: "pipeline" | "contact";
+        contact_id?: string;
+        error?: string;
+      }> = [];
+
+      for (const u of updates) {
+        const pid = String(u.pipeline_id ?? "").trim();
+        const subject = String(u.outreach_email_subject ?? "").trim();
+        const body = stripSponsorGapCopy(String(u.outreach_email ?? ""));
+        const contactId = u.contact_id != null ? String(u.contact_id).trim() : "";
+
+        if (!pid || !subject || !body.trim()) {
+          results.push({
+            pipeline_id: pid || "(missing)",
+            ok: false,
+            error: "pipeline_id, outreach_email_subject, and outreach_email are required",
+          });
+          continue;
+        }
+
+        const row = rowByPipeline.get(pid);
+        if (!row) {
+          results.push({
+            pipeline_id: pid,
+            ok: false,
+            error: "Pipeline row not on this athlete's target list or not owned by you",
+          });
+          continue;
+        }
+
+        if (contactId) {
+          const contact = row.contacts.find((c) => c.contact_id === contactId);
+          if (!contact) {
+            results.push({
+              pipeline_id: pid,
+              ok: false,
+              contact_id: contactId,
+              error: "contact_id not found on this target list row",
+            });
+            continue;
+          }
+
+          const email_drafts = upsertContactOutreachDraft(
+            contact.email_drafts,
+            resolved.athleteId,
+            subject,
+            body
+          );
+          const { data: updatedRows, error: upCErr } = await supabase
+            .from("crm_contacts")
+            .update({ email_drafts })
+            .eq("contact_id", contactId)
+            .eq("created_by_user_id", profile.user_id)
+            .select("contact_id");
+          if (upCErr || !updatedRows?.length) {
+            results.push({
+              pipeline_id: pid,
+              ok: false,
+              contact_id: contactId,
+              error: upCErr?.message ?? "Failed to update contact outreach draft",
+            });
+            continue;
+          }
+          results.push({
+            pipeline_id: pid,
+            ok: true,
+            saved_to: "contact",
+            contact_id: contactId,
+          });
+          continue;
+        }
+
+        const { error: upErr } = await supabase
+          .from("crm_companies_pipeline")
+          .update({
+            outreach_email_subject: subject,
+            outreach_email: body,
+          })
+          .eq("id", pid)
+          .eq("created_by_user_id", profile.user_id);
+        if (upErr) {
+          results.push({ pipeline_id: pid, ok: false, error: upErr.message });
+          continue;
+        }
+        results.push({ pipeline_id: pid, ok: true, saved_to: "pipeline" });
+      }
+
+      return {
+        ok: true as const,
+        athlete: {
+          athlete_id: resolved.athleteId,
+          name: resolved.athleteFullName,
+          sport: resolved.athleteSport,
+        },
+        updated: results.filter((r) => r.ok).length,
+        failed: results.filter((r) => !r.ok).length,
+        results,
+      };
+    },
+
+    apolloFindContactsForCompany: async (params: { company_id?: string; company_name?: string }) => {
+      if (!isApolloEnabled()) {
+        return { ok: false as const, error: "Apollo API is not configured on this server." };
+      }
+
+      let companyId = params.company_id ? String(params.company_id).trim() : "";
+      if (!companyId && params.company_name) {
+        const name = String(params.company_name).trim();
+        const { data: row } = await supabaseCompanies
+          .from("companies")
+          .select("company_id")
+          .ilike("name", name)
+          .limit(1)
+          .maybeSingle();
+        companyId = row?.company_id ?? "";
+      }
+      if (!companyId) {
+        return { ok: false as const, error: "company_id or company_name required" };
+      }
+
+      try {
+        const result = await findContactsForCompany(supabaseCompanies, {
+          userId: profile.user_id,
+          companyId,
+        });
+        return {
+          ok: true as const,
+          company_id: companyId,
+          company_name: result.organization.company_name,
+          found: result.found,
+          created: result.created,
+          updated: result.updated,
+          contacts: result.contacts.map((c) => ({
+            contact_id: c.contact_id,
+            first_name: c.first_name,
+            last_name: c.last_name,
+            role: c.role,
+            apollo_reveal_status: c.apollo_reveal_status,
+          })),
+          note: "Contacts are pending until the user clicks Reveal in the Target List or pipeline (uses Apollo credits). Do not auto-reveal.",
+        };
+      } catch (e: any) {
+        return { ok: false as const, error: e?.message ?? "Apollo find contacts failed" };
+      }
     },
   };
 }

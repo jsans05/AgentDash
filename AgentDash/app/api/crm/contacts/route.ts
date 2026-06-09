@@ -1,9 +1,16 @@
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
+import { internalServerError } from "@/lib/api/http-errors";
+import { enforceContentLengthLimit } from "@/lib/api/request-limits";
 import { NextResponse } from "next/server";
+import { ilikeContains } from "@/lib/supabase/ilike";
 
-function escapeForIlike(q: string): string {
-  return q.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+function normalizeText(value: unknown): string {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function hasText(value: unknown): boolean {
+  return String(value ?? "").trim().length > 0;
 }
 
 async function getOrCreateCompanyByName(
@@ -37,6 +44,7 @@ async function getOrCreateCompanyByName(
 export async function GET(req: Request) {
   const profile = await requireProfile();
   const supabase = await createServerClient();
+  const excludedCompanyIds = new Set<string>();
 
   const url = new URL(req.url);
   const q = url.searchParams.get("q")?.trim() || "";
@@ -73,16 +81,16 @@ export async function GET(req: Request) {
       pipelineQuery = pipelineQuery.eq("created_by_user_id", profile.user_id);
     }
     const { data: inProgressRows } = await pipelineQuery;
-    const inProgressCompanyIds = (inProgressRows ?? []).map((r: any) => r.company_id).filter(Boolean);
-    if (inProgressCompanyIds.length > 0) {
-      const inList = `(${inProgressCompanyIds.map((id: string) => `"${id}"`).join(",")})`;
-      query = query.not("company_id", "in", inList);
+    const inProgressCompanyIds = (inProgressRows ?? [])
+      .map((r: any) => String(r?.company_id ?? "").trim())
+      .filter((id) => /^[0-9a-f-]{36}$/i.test(id));
+    for (const id of inProgressCompanyIds) {
+      excludedCompanyIds.add(id);
     }
   }
 
   if (q) {
-    const escaped = escapeForIlike(q);
-    const pattern = `%${escaped}%`;
+    const pattern = ilikeContains(q);
 
     // Match on person fields first.
     const { data: personMatches } = await supabase
@@ -114,12 +122,18 @@ export async function GET(req: Request) {
   }
 
   const { data, error } = await query;
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) return internalServerError(error, "crm-contacts:get");
 
-  return NextResponse.json({ contacts: data ?? [] });
+  const contacts = excludedCompanyIds.size
+    ? (data ?? []).filter((row: any) => !excludedCompanyIds.has(String(row?.company_id ?? "")))
+    : (data ?? []);
+  return NextResponse.json({ contacts });
 }
 
 export async function POST(req: Request) {
+  const contentLengthError = enforceContentLengthLimit(req);
+  if (contentLengthError) return contentLengthError;
+
   const profile = await requireProfile();
   const supabase = await createServerClient();
   const supabaseAdmin = await createServiceRoleClient();
@@ -159,7 +173,7 @@ export async function POST(req: Request) {
       .select("category")
       .eq("id", taxonomy_id)
       .maybeSingle();
-    if (taxonomyError) return NextResponse.json({ error: taxonomyError.message }, { status: 500 });
+    if (taxonomyError) return internalServerError(taxonomyError, "crm-contacts:post:taxonomy");
     category = taxonomyRow?.category ?? null;
   }
 
@@ -180,8 +194,63 @@ export async function POST(req: Request) {
     outreach_mode,
   };
 
+  const normalizedFirst = normalizeText(first_name);
+  const normalizedLast = normalizeText(last_name);
+  const normalizedEmail = normalizeText(email);
+
+  const { data: existingRows, error: existingError } = await supabase
+    .from("crm_contacts")
+    .select(
+      "contact_id, first_name, last_name, role, email, phone, linkedin_url, zoominfo_url, taxonomy_id, category, product_description, notes, outreach_mode"
+    )
+    .eq("company_id", company_id)
+    .eq("created_by_user_id", profile.user_id)
+    .eq("archived", false)
+    .limit(200);
+  if (existingError) return internalServerError(existingError, "crm-contacts:post:existing-lookup");
+
+  const duplicate = (existingRows ?? []).find((row: any) => {
+    const emailMatch =
+      !!normalizedEmail &&
+      !!normalizeText(row?.email) &&
+      normalizeText(row?.email) === normalizedEmail;
+    const nameMatch =
+      normalizeText(row?.first_name) === normalizedFirst &&
+      normalizeText(row?.last_name) === normalizedLast;
+    return emailMatch || nameMatch;
+  });
+
+  if (duplicate) {
+    const dedupePatch: Record<string, unknown> = {};
+    if (hasText(role) && !hasText(duplicate.role)) dedupePatch.role = role;
+    if (hasText(email) && !hasText(duplicate.email)) dedupePatch.email = email;
+    if (hasText(phone) && !hasText(duplicate.phone)) dedupePatch.phone = phone;
+    if (hasText(linkedin_url) && !hasText(duplicate.linkedin_url)) dedupePatch.linkedin_url = linkedin_url;
+    if (hasText(zoominfo_url) && !hasText(duplicate.zoominfo_url)) dedupePatch.zoominfo_url = zoominfo_url;
+    if (taxonomy_id && !duplicate.taxonomy_id) dedupePatch.taxonomy_id = taxonomy_id;
+    if (category && !hasText(duplicate.category)) dedupePatch.category = category;
+    if (hasText(product_description) && !hasText(duplicate.product_description)) {
+      dedupePatch.product_description = product_description;
+    }
+    if (hasText(notes) && !hasText(duplicate.notes)) dedupePatch.notes = notes;
+    if (outreach_mode && !hasText(duplicate.outreach_mode)) dedupePatch.outreach_mode = outreach_mode;
+
+    if (Object.keys(dedupePatch).length > 0) {
+      const { data: updated, error: updateError } = await supabase
+        .from("crm_contacts")
+        .update(dedupePatch)
+        .eq("contact_id", duplicate.contact_id)
+        .select("*")
+        .single();
+      if (updateError) return internalServerError(updateError, "crm-contacts:post:dedupe-update");
+      return NextResponse.json({ contact: updated, deduped: true });
+    }
+
+    return NextResponse.json({ contact: duplicate, deduped: true });
+  }
+
   const { data, error } = await supabase.from("crm_contacts").insert(insertPayload).select("*").single();
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) return internalServerError(error, "crm-contacts:post:insert");
 
   return NextResponse.json({ contact: data });
 }

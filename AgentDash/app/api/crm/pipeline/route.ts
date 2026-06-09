@@ -5,6 +5,7 @@ import {
   fetchPipelineCardsForUser,
   PIPELINE_CARD_SELECT,
 } from "@/lib/features/crm-pipeline/service";
+import { resolveCompanyWebsiteForTargetList } from "@/lib/crm/resolve-company-website-for-target-list";
 import { NextResponse } from "next/server";
 
 async function getOrCreateCompanyByNameCaseInsensitive(
@@ -62,6 +63,16 @@ export async function POST(req: Request) {
     const c = await getOrCreateCompanyByNameCaseInsensitive(supabaseAdmin, company_name);
     company_id = c.company_id;
     resolvedName = c.name;
+    try {
+      await resolveCompanyWebsiteForTargetList(
+        supabaseAdmin,
+        company_id,
+        { companyName: resolvedName },
+        { userId: profile.user_id }
+      );
+    } catch {
+      // Non-fatal: pipeline card creation continues.
+    }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Failed to resolve company";
     return NextResponse.json({ error: msg }, { status: 500 });

@@ -13,6 +13,7 @@
  */
 import { createClient } from "@supabase/supabase-js";
 import { readFileSync } from "fs";
+import { randomBytes } from "crypto";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import Papa from "papaparse";
@@ -56,7 +57,7 @@ function rowsToObjects(rows) {
 }
 
 function generatePassword() {
-  return `Agent${Math.random().toString(36).slice(2, 10)}!`;
+  return `Agent-${randomBytes(12).toString("base64url")}!`;
 }
 
 async function main() {
@@ -89,7 +90,8 @@ async function main() {
     rows = parsed.data;
   } else if (fileLower.endsWith(".xlsx") || fileLower.endsWith(".xls")) {
     const buffer = readFileSync(filePath);
-    const sheetRows = await readXlsxFile(buffer);
+    const workbook = await readXlsxFile(buffer);
+    const sheetRows = workbook[0]?.data ?? [];
     rows = rowsToObjects(sheetRows);
   } else {
     console.error("File must be .csv or .xlsx");
@@ -102,19 +104,20 @@ async function main() {
   const skipped = [];
   const errors = [];
 
-  for (const row of rows) {
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+    const row = rows[rowIndex];
     const firstName = String(row["First Name"] || row["first_name"] || row["First Name"] || "").trim();
     const lastName = String(row["Last Name"] || row["last_name"] || row["Last Name"] || "").trim();
     const email = String(row["Email"] || row["email"] || "").trim().toLowerCase();
     const password = String(row["Password"] || row["password"] || "").trim() || generatePassword();
 
     if (!firstName || !lastName || !email) {
-      skipped.push({ row, reason: "Missing first name, last name, or email" });
+      skipped.push({ rowNumber: rowIndex + 1, reason: "Missing first name, last name, or email" });
       continue;
     }
 
     if (!email.includes("@")) {
-      skipped.push({ row, reason: `Invalid email: ${email}` });
+      skipped.push({ rowNumber: rowIndex + 1, reason: "Invalid email" });
       continue;
     }
 
@@ -126,7 +129,7 @@ async function main() {
       let userId;
       if (existingUser) {
         userId = existingUser.id;
-        console.log(`✓ User exists: ${email}`);
+        console.log(`✓ User exists for row ${rowIndex + 1}`);
       } else {
         const { data: user, error: authError } = await supabase.auth.admin.createUser({
           email,
@@ -135,12 +138,12 @@ async function main() {
         });
 
         if (authError) {
-          errors.push({ email, error: authError.message });
+          errors.push({ rowNumber: rowIndex + 1, error: authError.message });
           continue;
         }
 
         userId = user.user.id;
-        console.log(`✓ Created user: ${email} (password: ${password})`);
+        console.log(`✓ Created user for row ${rowIndex + 1}`);
       }
 
       // Upsert profile
@@ -156,12 +159,12 @@ async function main() {
       );
 
       if (profileError) {
-        errors.push({ email, error: `Profile: ${profileError.message}` });
+        errors.push({ rowNumber: rowIndex + 1, error: `Profile: ${profileError.message}` });
       } else {
-        created.push({ email, firstName, lastName, password: existingUser ? "(existing)" : password });
+        created.push({ rowNumber: rowIndex + 1 });
       }
     } catch (error) {
-      errors.push({ email, error: error.message });
+      errors.push({ rowNumber: rowIndex + 1, error: error.message });
     }
   }
 
@@ -173,23 +176,23 @@ async function main() {
   console.log(`Errors: ${errors.length}`);
 
   if (created.length > 0) {
-    console.log("\nCreated agents:");
-    created.forEach(({ email, firstName, lastName, password }) => {
-      console.log(`  ${firstName} ${lastName} (${email}) - Password: ${password}`);
+    console.log("\nCreated rows:");
+    created.forEach(({ rowNumber }) => {
+      console.log(`  Row ${rowNumber}`);
     });
   }
 
   if (skipped.length > 0) {
     console.log("\nSkipped:");
-    skipped.forEach(({ row, reason }) => {
-      console.log(`  ${JSON.stringify(row)} - ${reason}`);
+    skipped.forEach(({ rowNumber, reason }) => {
+      console.log(`  Row ${rowNumber}: ${reason}`);
     });
   }
 
   if (errors.length > 0) {
     console.log("\nErrors:");
-    errors.forEach(({ email, error }) => {
-      console.log(`  ${email}: ${error}`);
+    errors.forEach(({ rowNumber, error }) => {
+      console.log(`  Row ${rowNumber}: ${error}`);
     });
   }
 

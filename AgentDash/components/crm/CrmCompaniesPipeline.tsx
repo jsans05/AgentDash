@@ -3,11 +3,12 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { CrmPipelinePeopleEditor } from "@/components/crm/CrmPipelinePeopleEditor";
+import { STAGES, type PipelineStage } from "@/lib/crm/pipeline-stages";
 
 type PipelineRow = {
   id: string;
   status: "in_progress" | "promoted_to_crm";
-  funnel_stage: "idea" | "research" | "contacted" | "negotiating" | "paused" | "won" | "lost";
+  pipeline_stage?: PipelineStage | null;
   priority: 1 | 2 | 3;
   next_follow_up_at: string | null;
   archived: boolean;
@@ -126,17 +127,15 @@ export function CrmCompaniesPipeline({ rows }: { rows: PipelineRow[] }) {
                   <td className="px-4 py-3 text-sm font-medium text-[#F4F1EB]">{companyLabel(row)}</td>
                   <td className="min-w-[140px] px-4 py-3 text-sm text-[#D7D0C4]">
                     <select
-                      defaultValue={row.funnel_stage ?? "idea"}
+                      defaultValue={row.pipeline_stage ?? "target"}
                       className="w-full rounded-md border border-white/15 bg-[#101513] p-2 text-xs text-[#ECE7DF]"
-                      onBlur={(e) => updateRow(row.id, { funnel_stage: e.target.value })}
+                      onBlur={(e) => updateRow(row.id, { pipeline_stage: e.target.value })}
                     >
-                      <option value="idea">Idea</option>
-                      <option value="research">Research</option>
-                      <option value="contacted">Contacted</option>
-                      <option value="negotiating">Negotiating</option>
-                      <option value="paused">Paused</option>
-                      <option value="won">Won</option>
-                      <option value="lost">Lost</option>
+                      {STAGES.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.label}
+                        </option>
+                      ))}
                     </select>
                   </td>
                   <td className="min-w-[120px] px-4 py-3 text-sm text-[#D7D0C4]">

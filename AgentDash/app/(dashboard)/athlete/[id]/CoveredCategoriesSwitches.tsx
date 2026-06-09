@@ -1,14 +1,104 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, type ReactNode } from "react";
+import { TaxonomyCheckboxTree } from "@/components/taxonomy/TaxonomyCheckboxTree";
+import {
+  buildTaxonomyTree,
+  collectLeafIds,
+  type TaxonomyFlatNode,
+} from "@/lib/taxonomy-tree";
 
-type TaxonomyNode = { id: string; category: string; tier: string; sort_order: number };
+type TaxonomyNode = TaxonomyFlatNode & { id: string };
 
 type Props = {
   athleteId: string;
   sport: string | null;
   canEdit: boolean;
 };
+
+const EYEWEAR_CATEGORY_LABEL = "Eyewear";
+const EYEWEAR_KEYWORDS = ["eyewear", "eye wear", "goggle", "goggles", "sunglass", "sunglasses", "glasses"];
+
+function normalizeCategory(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\b(and|the)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isEyewearCategory(category: string): boolean {
+  const normalized = normalizeCategory(category);
+  return EYEWEAR_KEYWORDS.some((keyword) => normalized.includes(keyword));
+}
+
+function prospectingVisibilityKey(athleteId: string): string {
+  return `athlete-prospecting-categories-expanded:${athleteId}`;
+}
+
+function ProspectingSectionShell({
+  athleteId,
+  coveredCount,
+  children,
+}: {
+  athleteId: string;
+  coveredCount?: number;
+  children: ReactNode;
+}) {
+  const [expanded, setExpanded] = useState(true);
+
+  useEffect(() => {
+    try {
+      if (localStorage.getItem(prospectingVisibilityKey(athleteId)) === "0") {
+        setExpanded(false);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [athleteId]);
+
+  function toggleExpanded() {
+    setExpanded((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(prospectingVisibilityKey(athleteId), next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }
+
+  const collapsedHint =
+    coveredCount === undefined
+      ? null
+      : coveredCount === 0
+        ? "None covered"
+        : `${coveredCount} covered`;
+
+  return (
+    <section>
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <h2 className="text-lg font-medium text-[#F4F1EB]">Prospecting categories</h2>
+        <button
+          type="button"
+          onClick={toggleExpanded}
+          aria-expanded={expanded}
+          className="shrink-0 rounded-md border border-white/20 px-3 py-1.5 text-sm text-[#D7D0C4] hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2E7040]/50"
+        >
+          {expanded ? "Hide" : "Show"}
+        </button>
+        {!expanded && collapsedHint && (
+          <span className="text-sm text-[#9E978B]">({collapsedHint})</span>
+        )}
+      </div>
+      {expanded && children}
+    </section>
+  );
+}
 
 export function CoveredCategoriesSwitches({ athleteId, sport, canEdit }: Props) {
   const [nodes, setNodes] = useState<TaxonomyNode[]>([]);
@@ -26,7 +116,9 @@ export function CoveredCategoriesSwitches({ athleteId, sport, canEdit }: Props) 
     let cancelled = false;
     setLoading(true);
     Promise.all([
-      fetch(`/api/taxonomy/nodes?sport=${encodeURIComponent(sport)}`, { credentials: "include" }).then((r) => r.json()),
+      fetch(`/api/taxonomy/nodes?sport=${encodeURIComponent(sport)}`, { credentials: "include" }).then((r) =>
+        r.json()
+      ),
       fetch(`/api/athletes/${athleteId}/covered-categories`, { credentials: "include" }).then((r) => r.json()),
     ])
       .then(([taxonomyData, coveredData]) => {
@@ -48,15 +140,28 @@ export function CoveredCategoriesSwitches({ athleteId, sport, canEdit }: Props) 
     };
   }, [athleteId, sport]);
 
-  async function toggle(taxonomyId: string) {
-    if (!canEdit || saving) return;
-    const prevIds = coveredIds;
-    const next = new Set(coveredIds);
-    if (next.has(taxonomyId)) {
-      next.delete(taxonomyId);
-    } else {
-      next.add(taxonomyId);
+  useEffect(() => {
+    function handleContractCategorySelected(event: Event) {
+      const customEvent = event as CustomEvent<{ taxonomyIds?: unknown }>;
+      const taxonomyIds = Array.isArray(customEvent.detail?.taxonomyIds)
+        ? customEvent.detail.taxonomyIds.filter((id): id is string => typeof id === "string" && id.length > 0)
+        : [];
+
+      if (taxonomyIds.length === 0) return;
+      setCoveredIds((prev) => {
+        const next = new Set(prev);
+        for (const id of taxonomyIds) next.add(id);
+        return next;
+      });
     }
+
+    window.addEventListener("athlete-covered-categories:contract-selected", handleContractCategorySelected);
+    return () => {
+      window.removeEventListener("athlete-covered-categories:contract-selected", handleContractCategorySelected);
+    };
+  }, []);
+
+  async function persistCoveredIds(next: Set<string>, prevIds: Set<string>) {
     setCoveredIds(next);
     setSaving(true);
     setError(null);
@@ -76,9 +181,7 @@ export function CoveredCategoriesSwitches({ athleteId, sport, canEdit }: Props) 
       }
     } catch (err) {
       setCoveredIds(prevIds);
-      if (err instanceof Error && err.name === "AbortError") {
-        return;
-      }
+      if (err instanceof Error && err.name === "AbortError") return;
       const msg = err instanceof Error ? err.message : "Request failed";
       setError(msg);
       console.error("Failed to update covered categories", err);
@@ -87,87 +190,110 @@ export function CoveredCategoriesSwitches({ athleteId, sport, canEdit }: Props) 
     }
   }
 
+  async function toggle(leafIds: string[]) {
+    if (!canEdit || saving || leafIds.length === 0) return;
+    const prevIds = new Set(coveredIds);
+    const next = new Set(coveredIds);
+    const allSelected = leafIds.every((id) => next.has(id));
+    if (allSelected) {
+      for (const id of leafIds) next.delete(id);
+    } else {
+      for (const id of leafIds) next.add(id);
+    }
+    await persistCoveredIds(next, prevIds);
+  }
+
+  const displayNodes = useMemo(() => {
+    const eyewearNodes = nodes.filter((n) => !n.is_group && isEyewearCategory(n.category));
+    const nonEyewear = nodes.filter((n) => !isEyewearCategory(n.category) || n.is_group);
+
+    if (eyewearNodes.length === 0) return nonEyewear;
+
+    const tier = eyewearNodes.some((n) => n.tier === "ENDEMIC") ? "ENDEMIC" : "NON_ENDEMIC";
+    const virtualEyewear: TaxonomyNode = {
+      id: "__eyewear__",
+      category: EYEWEAR_CATEGORY_LABEL,
+      tier,
+      sort_order: Math.min(...eyewearNodes.map((n) => n.sort_order)),
+      is_group: true,
+      parent_id: null,
+    };
+
+    const eyewearAsChildren = eyewearNodes.map((n) => ({ ...n, parent_id: virtualEyewear.id }));
+    return [...nonEyewear, virtualEyewear, ...eyewearAsChildren];
+  }, [nodes]);
+
+  const endemicTree = buildTaxonomyTree(displayNodes, "ENDEMIC");
+  const nonEndemicTree = buildTaxonomyTree(displayNodes, "NON_ENDEMIC");
+  const hasEndemic = endemicTree.some((n) => collectLeafIds(n).length > 0);
+  const hasNonEndemic = nonEndemicTree.some((n) => collectLeafIds(n).length > 0);
+
+  const coveredCount = sport && !loading ? coveredIds.size : undefined;
+
   if (!sport) {
     return (
-      <section>
-        <h2 className="mb-3 text-lg font-medium text-[#F4F1EB]">Prospecting categories</h2>
-        <p className="text-sm text-[#B9B2A6]">Set the athlete&apos;s sport to manage which categories are marked as covered.</p>
-      </section>
+      <ProspectingSectionShell athleteId={athleteId} coveredCount={0}>
+        <p className="text-sm text-[#B9B2A6]">
+          Set the athlete&apos;s sport to manage which categories are marked as covered.
+        </p>
+      </ProspectingSectionShell>
     );
   }
 
   if (loading) {
     return (
-      <section>
-        <h2 className="mb-3 text-lg font-medium text-[#F4F1EB]">Prospecting categories</h2>
+      <ProspectingSectionShell athleteId={athleteId}>
         <p className="text-sm text-[#B9B2A6]">Loading categories…</p>
-      </section>
+      </ProspectingSectionShell>
     );
   }
 
   if (nodes.length === 0) {
     return (
-      <section>
-        <h2 className="mb-3 text-lg font-medium text-[#F4F1EB]">Prospecting categories</h2>
+      <ProspectingSectionShell athleteId={athleteId} coveredCount={0}>
         <p className="text-sm text-[#B9B2A6]">No taxonomy categories for this sport.</p>
-      </section>
+      </ProspectingSectionShell>
     );
   }
 
-  const byTier = { ENDEMIC: nodes.filter((n) => n.tier === "ENDEMIC"), NON_ENDEMIC: nodes.filter((n) => n.tier === "NON_ENDEMIC") };
-
   return (
-    <section>
-      <h2 className="mb-2 text-lg font-medium text-[#F4F1EB]">Prospecting categories</h2>
-      <p className="mb-3 text-sm text-[#B9B2A6]">
-        Turn <strong>on</strong> for categories that are already covered (e.g. exclusive or not pursuing). Mystery Machine will not search in those categories.
+    <ProspectingSectionShell athleteId={athleteId} coveredCount={coveredCount}>
+      <p className="mb-4 text-sm text-[#B9B2A6]">
+        Turn <strong className="font-medium text-[#D7D0C4]">on</strong> for categories that are already covered (e.g.
+        exclusive or not pursuing). Mystery Machine will not search in those categories.
       </p>
       {error && (
         <p className="mb-3 text-sm text-[#F1A2A2]" role="alert">
           {error}
         </p>
       )}
-      <div className="space-y-4">
-        {byTier.ENDEMIC.length > 0 && (
-          <div>
-            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#B9B2A6]">Endemic</h3>
-            <div className="flex flex-wrap gap-x-4 gap-y-2">
-              {byTier.ENDEMIC.map((n) => (
-                <label key={n.id} className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={coveredIds.has(n.id)}
-                    onChange={() => toggle(n.id)}
-                    disabled={!canEdit || saving}
-                    className="rounded border-white/20 bg-[#101513] text-[#2E7040] focus:ring-[#2E7040]"
-                  />
-                  <span className="text-sm text-[#D7D0C4]">{n.category}</span>
-                </label>
-              ))}
-            </div>
+      <div className="rounded-lg border border-white/10 bg-[#151A17] divide-y divide-white/10">
+        {hasEndemic && (
+          <div className="p-4">
+            <h3 className="mb-3 text-xs font-semibold uppercase tracking-wide text-[#9E978B]">Endemic</h3>
+            <TaxonomyCheckboxTree
+              nodes={displayNodes}
+              tier="ENDEMIC"
+              selected={coveredIds}
+              onToggle={toggle}
+              disabled={!canEdit || saving}
+            />
           </div>
         )}
-        {byTier.NON_ENDEMIC.length > 0 && (
-          <div>
-            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#B9B2A6]">Non-endemic</h3>
-            <div className="flex flex-wrap gap-x-4 gap-y-2">
-              {byTier.NON_ENDEMIC.map((n) => (
-                <label key={n.id} className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={coveredIds.has(n.id)}
-                    onChange={() => toggle(n.id)}
-                    disabled={!canEdit || saving}
-                    className="rounded border-white/20 bg-[#101513] text-[#2E7040] focus:ring-[#2E7040]"
-                  />
-                  <span className="text-sm text-[#D7D0C4]">{n.category}</span>
-                </label>
-              ))}
-            </div>
+        {hasNonEndemic && (
+          <div className="p-4">
+            <h3 className="mb-3 text-xs font-semibold uppercase tracking-wide text-[#9E978B]">Non-endemic</h3>
+            <TaxonomyCheckboxTree
+              nodes={displayNodes}
+              tier="NON_ENDEMIC"
+              selected={coveredIds}
+              onToggle={toggle}
+              disabled={!canEdit || saving}
+            />
           </div>
         )}
       </div>
       {saving && <p className="mt-2 text-xs text-[#9E978B]">Saving…</p>}
-    </section>
+    </ProspectingSectionShell>
   );
 }

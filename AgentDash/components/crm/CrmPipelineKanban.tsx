@@ -18,18 +18,24 @@ import {
   GENERAL_ATHLETE_NAME,
   type PipelineSortKey,
 } from "@/lib/crm/pipeline-card-filter-sort";
+import { postAiChat, type PostAiChatResult } from "@/lib/ai/chat-fetch";
+import type { InteractionResponsePayload } from "@/lib/ai/user-question";
+import type { ChatSseEvent } from "@/lib/ai/chat-sse";
 import { normalizePipelineContacts, type PipelineContactSlot } from "@/lib/crm/pipeline-contacts";
+import { CompanyContactsTable } from "@/components/crm/CompanyContactsTable";
+import { PartnershipNotesDisplay } from "@/components/crm/PartnershipNotesDisplay";
 import { CompanyCategorySelect } from "@/components/crm/CompanyCategorySelect";
+import { CrmBrandIdeaQuickAdd } from "@/components/crm/CrmBrandIdeaQuickAdd";
+import { safeHttpUrl } from "@/lib/security/url";
+import { normalizeOrIlikeFragment } from "@/lib/supabase/ilike";
+import {
+  formatNoPartnershipsMessage,
+  formatPartnershipResearchClientError,
+} from "@/lib/ai/partnership-research";
+import { STAGES, STAGE_LABEL, type PipelineStage } from "@/lib/crm/pipeline-stages";
 
-export type PipelineStage =
-  | "target"
-  | "research"
-  | "drafting"
-  | "outreach"
-  | "follow_up"
-  | "ghost"
-  | "in_progress"
-  | "closed";
+export type { PipelineStage } from "@/lib/crm/pipeline-stages";
+export { STAGE_LABEL } from "@/lib/crm/pipeline-stages";
 
 /** Saved email drafts on a pipeline card (legacy entries may omit subject / athlete_id). */
 export type PipelineDraftMessage = {
@@ -38,6 +44,7 @@ export type PipelineDraftMessage = {
   body: string;
   created_at: string;
   athlete_id?: string | null;
+  sent_at?: string | null;
 };
 
 export type PipelineCard = {
@@ -79,32 +86,12 @@ export type PipelineCard = {
   }> | null;
 };
 
-const STAGES: { id: PipelineStage; label: string; columnClass?: string }[] = [
-  { id: "target", label: "Target" },
-  { id: "research", label: "Research" },
-  { id: "drafting", label: "Drafting" },
-  { id: "outreach", label: "Outreach" },
-  { id: "follow_up", label: "Follow-Up", columnClass: "border-l-4 border-amber-300" },
-  { id: "ghost", label: "Ghost", columnClass: "border-l-4 border-red-300/80" },
-  { id: "in_progress", label: "In Progress" },
-  { id: "closed", label: "Closed", columnClass: "border-l-4 border-green-400" },
-];
-
-export const STAGE_LABEL: Record<PipelineStage, string> = Object.fromEntries(STAGES.map((s) => [s.id, s.label])) as Record<
-  PipelineStage,
-  string
->;
-
 const NEXT_STAGE: Partial<Record<PipelineStage, PipelineStage>> = {
   target: "research",
   research: "drafting",
   drafting: "outreach",
   outreach: "in_progress",
 };
-
-function escapeForIlike(q: string): string {
-  return q.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
-}
 
 export function timeAgo(date: string): string {
   const seconds = Math.floor((Date.now() - new Date(date).getTime()) / 1000);
@@ -146,6 +133,7 @@ function defaultTabForStage(stage: PipelineStage): "overview" | "research" | "dr
     case "drafting":
       return "drafting";
     case "outreach":
+    case "bounced":
     case "follow_up":
     case "ghost":
     case "in_progress":
@@ -167,6 +155,8 @@ function stageBadgeClass(stage: PipelineStage): string {
       return "bg-[#1E2243] text-[#B5B0F0] border-[#493DC7]/40";
     case "outreach":
       return "bg-[#281E3D] text-[#C5B0F0] border-[#6E4DC6]/40";
+    case "bounced":
+      return "bg-[#3A2418] text-[#F0B88A] border-[#C46A2E]/50";
     case "follow_up":
       return "bg-[#322712] text-[#E7C586] border-[#A67F1D]/40";
     case "ghost":
@@ -263,8 +253,13 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
   const [filterCategory, setFilterCategory] = useState("");
   const [filterAthleteId, setFilterAthleteId] = useState("");
   const [sortKey, setSortKey] = useState<PipelineSortKey>("updated");
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [bulkMoving, setBulkMoving] = useState(false);
+  const [pendingOutreachBulk, setPendingOutreachBulk] = useState<string[] | null>(null);
 
   const openCard = useMemo(() => cards.find((c) => c.id === openId) ?? null, [cards, openId]);
+  const selectedCount = selectedIds.size;
 
   const bootstrap = useCallback(async () => {
     setLoading(true);
@@ -356,7 +351,86 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
     return m;
   }, [filteredCards, sortKey]);
 
+  const exitSelectionMode = () => {
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+  };
+
+  const toggleCardSelected = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const selectAllVisible = () => {
+    setSelectedIds(new Set(filteredCards.map((c) => c.id)));
+  };
+
+  const dragPayloadForCard = (cardId: string): string => {
+    if (selectionMode && selectedIds.has(cardId) && selectedIds.size > 1) {
+      return [...selectedIds].join(",");
+    }
+    return cardId;
+  };
+
+  const idsFromDragPayload = (payload: string): string[] => {
+    const ids = payload.split(",").map((s) => s.trim()).filter(Boolean);
+    return ids.length > 0 ? ids : [];
+  };
+
+  const applyBulkStageUpdates = (updates: PipelineCard[]) => {
+    if (updates.length === 0) return;
+    const byId = new Map(updates.map((c) => [c.id, c]));
+    setCards((c) => c.map((x) => (byId.has(x.id) ? byId.get(x.id)! : x)));
+  };
+
+  const bulkMoveToStage = async (ids: string[], newStage: PipelineStage) => {
+    const unique = [...new Set(ids)];
+    const toMove = unique
+      .map((id) => cards.find((c) => c.id === id))
+      .filter((c): c is PipelineCard => !!c && c.pipeline_stage !== newStage);
+    if (toMove.length === 0) return;
+
+    if (newStage === "outreach") {
+      setPendingOutreachBulk(toMove.map((c) => c.id));
+      return;
+    }
+
+    const prev = cards;
+    const idSet = new Set(toMove.map((c) => c.id));
+    setBulkMoving(true);
+    setCards((c) => c.map((x) => (idSet.has(x.id) ? { ...x, pipeline_stage: newStage } : x)));
+    try {
+      const results = await Promise.allSettled(
+        toMove.map((c) => patchCard(c.id, { pipeline_stage: newStage }))
+      );
+      const ok: PipelineCard[] = [];
+      for (const r of results) {
+        if (r.status === "fulfilled") ok.push(r.value);
+      }
+      applyBulkStageUpdates(ok);
+      if (ok.length < toMove.length) {
+        setCards(prev);
+        alert(`Moved ${ok.length} of ${toMove.length} companies. Some updates failed.`);
+      } else {
+        setSelectedIds(new Set());
+      }
+    } catch {
+      setCards(prev);
+      alert("Bulk move failed. Please try again.");
+    } finally {
+      setBulkMoving(false);
+    }
+  };
+
   const moveToStage = async (card: PipelineCard, newStage: PipelineStage, optimistic: boolean) => {
+    if (selectionMode && selectedIds.has(card.id) && selectedIds.size > 1) {
+      void bulkMoveToStage([...selectedIds], newStage);
+      return;
+    }
     if (newStage === "outreach") {
       setPendingOutreach({ id: card.id, stage: newStage });
       return;
@@ -374,20 +448,65 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
   };
 
   const confirmOutreach = async () => {
-    if (!pendingOutreach) return;
-    const card = cards.find((c) => c.id === pendingOutreach.id);
-    if (!card) {
-      setPendingOutreach(null);
-      return;
-    }
-    const prev = cards;
-    setCards((c) => c.map((x) => (x.id === card.id ? { ...x, pipeline_stage: "outreach" } : x)));
+    const bulkIds = pendingOutreachBulk;
+    const single = pendingOutreach;
     setPendingOutreach(null);
+    setPendingOutreachBulk(null);
+
+    const ids = bulkIds?.length ? bulkIds : single ? [single.id] : [];
+    const toMove = ids
+      .map((id) => cards.find((c) => c.id === id))
+      .filter((c): c is PipelineCard => !!c);
+    if (toMove.length === 0) return;
+
+    const prev = cards;
+    const idSet = new Set(toMove.map((c) => c.id));
+    setBulkMoving(true);
+    setCards((c) => c.map((x) => (idSet.has(x.id) ? { ...x, pipeline_stage: "outreach" } : x)));
     try {
-      const updated = await patchCard(card.id, { pipeline_stage: "outreach" });
-      setCards((c) => c.map((x) => (x.id === updated.id ? { ...updated } : x)));
+      // #region agent log
+      fetch("http://127.0.0.1:7310/ingest/3db61d27-132c-4ea5-8254-c4515c90a750", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a18aef" },
+        body: JSON.stringify({
+          sessionId: "a18aef",
+          runId: "post-fix",
+          hypothesisId: "P1-A",
+          location: "CrmPipelineKanban.tsx:confirmOutreachMove",
+          message: "outreach move without auto mark sent",
+          data: {
+            cardIds: toMove.map((c) => c.id),
+            unsentDraftCounts: toMove.map((c) =>
+              (c.draft_messages ?? []).filter((d) => !d.sent_at).length
+            ),
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+      const results = await Promise.allSettled(
+        toMove.map((c) =>
+          patchCard(c.id, {
+            pipeline_stage: "outreach",
+          })
+        )
+      );
+      const ok: PipelineCard[] = [];
+      for (const r of results) {
+        if (r.status === "fulfilled") ok.push(r.value);
+      }
+      applyBulkStageUpdates(ok);
+      if (ok.length < toMove.length) {
+        setCards(prev);
+        alert(`Marked ${ok.length} of ${toMove.length} as outreach. Some updates failed.`);
+      } else {
+        setSelectedIds(new Set());
+      }
     } catch {
       setCards(prev);
+      alert("Failed to mark outreach. Please try again.");
+    } finally {
+      setBulkMoving(false);
     }
   };
 
@@ -421,9 +540,14 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
 
   function handleDropOnStage(e: React.DragEvent, targetStage: PipelineStage) {
     setDragOverStage(null);
-    const id = e.dataTransfer.getData("text/plain");
-    if (!id) return;
-    const dragged = cards.find((c) => c.id === id);
+    const payload = e.dataTransfer.getData("text/plain");
+    const ids = idsFromDragPayload(payload);
+    if (ids.length === 0) return;
+    if (ids.length > 1) {
+      void bulkMoveToStage(ids, targetStage);
+      return;
+    }
+    const dragged = cards.find((c) => c.id === ids[0]);
     if (!dragged || dragged.pipeline_stage === targetStage) return;
     void moveToStage(dragged, targetStage, true);
   }
@@ -436,14 +560,23 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
 
   return (
     <div className="flex h-[calc(100vh-4rem)] min-h-0 flex-col bg-[#0F1311]">
-      {pendingOutreach && (
+      {(pendingOutreach || pendingOutreachBulk) && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
           <div className="w-full max-w-md space-y-3 rounded-lg border border-white/10 bg-[#151A17] p-4 shadow-xl">
             <p className="text-sm text-[#ECE7DF]">
-              Mark as Outreach? Today&apos;s date will be recorded as the outreach date for auto-follow-up tracking.
+              Mark {pendingOutreachBulk?.length ?? 1}{" "}
+              {(pendingOutreachBulk?.length ?? 1) === 1 ? "company" : "companies"} as Outreach? Today&apos;s date will
+              be recorded as the outreach date for auto-follow-up tracking.
             </p>
             <div className="flex justify-end gap-2">
-              <Button variant="outline" size="sm" onClick={() => setPendingOutreach(null)}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setPendingOutreach(null);
+                  setPendingOutreachBulk(null);
+                }}
+              >
                 Cancel
               </Button>
               <Button size="sm" onClick={() => void confirmOutreach()}>
@@ -453,6 +586,13 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
           </div>
         </div>
       )}
+
+      <div className="shrink-0 space-y-3 border-b border-white/10 bg-[#0F1311] px-4 py-3">
+        <div className="space-y-3 rounded-lg border border-white/10 bg-[#151A17] p-4 shadow-sm">
+          <h2 className="text-sm font-medium text-[#F4F1EB]">Quick Add Brand Idea</h2>
+          <CrmBrandIdeaQuickAdd onSuccess={() => void bootstrap()} />
+        </div>
+      </div>
 
       <div className="shrink-0 flex flex-wrap items-center gap-2 border-b border-white/10 bg-[#141916] px-4 py-2 text-sm">
         <span className="mr-1 text-[#B9B2A6]">Filter</span>
@@ -526,7 +666,67 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
           <option value="category">Product category</option>
           <option value="athlete">Potential athlete</option>
         </select>
+        <span className="hidden text-white/20 sm:inline">|</span>
+        <Button
+          type="button"
+          variant={selectionMode ? "default" : "outline"}
+          size="sm"
+          className="h-8 text-xs"
+          onClick={() => {
+            if (selectionMode) exitSelectionMode();
+            else setSelectionMode(true);
+          }}
+        >
+          {selectionMode ? "Done selecting" : "Select"}
+        </Button>
       </div>
+
+      {selectionMode && selectedCount > 0 && (
+        <div className="shrink-0 flex flex-wrap items-center gap-2 border-b border-[#2E7040]/40 bg-[#1A2A20] px-4 py-2 text-sm">
+          <span className="font-medium text-[#A7E0B6]">
+            {selectedCount} selected{bulkMoving ? " · moving…" : ""}
+          </span>
+          <select
+            aria-label="Move selected companies to stage"
+            className="rounded-md border border-white/15 bg-[#101513] px-2 py-1.5 text-sm text-[#ECE7DF]"
+            defaultValue=""
+            disabled={bulkMoving}
+            onChange={(e) => {
+              const stage = e.target.value as PipelineStage;
+              e.target.value = "";
+              if (!stage) return;
+              void bulkMoveToStage([...selectedIds], stage);
+            }}
+          >
+            <option value="">Move to…</option>
+            {STAGES.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-8 text-xs text-[#D7D0C4] hover:bg-white/5 hover:text-[#F4F1EB]"
+            disabled={bulkMoving}
+            onClick={selectAllVisible}
+          >
+            Select all visible ({filteredCards.length})
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-8 text-xs text-[#D7D0C4] hover:bg-white/5 hover:text-[#F4F1EB]"
+            disabled={bulkMoving}
+            onClick={() => setSelectedIds(new Set())}
+          >
+            Clear
+          </Button>
+        </div>
+      )}
 
       <div className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden bg-[#101513]">
         <div className="flex h-full min-w-max gap-3 p-4">
@@ -558,12 +758,18 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
                   handleDropOnStage(e, col.id);
                 }}
               >
-                {(byStage.get(col.id) ?? []).map((card) => (
+                {(byStage.get(col.id) ?? []).map((card) => {
+                  const isSelected = selectedIds.has(card.id);
+                  const isDragging =
+                    draggingCardId === card.id ||
+                    (draggingCardId != null && selectionMode && isSelected && selectedIds.size > 1);
+                  return (
                   <div
                     key={card.id}
                     className={cn(
                       "relative flex gap-2 rounded-lg border border-white/10 bg-[#222A26] p-3 text-left shadow-sm transition-shadow hover:bg-[#27322C] hover:shadow-md",
-                      draggingCardId === card.id && "opacity-50"
+                      isDragging && "opacity-50",
+                      selectionMode && isSelected && "ring-2 ring-[#2E7040]/80 border-[#2E7040]/50"
                     )}
                     onDragOver={(e) => {
                       if (!draggingCardId) return;
@@ -577,14 +783,24 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
                       handleDropOnStage(e, col.id);
                     }}
                   >
+                    {selectionMode && (
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${card.company_name}`}
+                        className="mt-0.5 shrink-0 accent-[#2E7040]"
+                        checked={isSelected}
+                        onChange={() => toggleCardSelected(card.id)}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    )}
                     <span
                       draggable
                       aria-grabbed={draggingCardId === card.id}
-                      title="Drag to move"
+                      title={selectionMode && isSelected && selectedCount > 1 ? "Drag to move all selected" : "Drag to move"}
                       className="shrink-0 cursor-grab select-none pt-0.5 leading-none text-[#9E978B] active:cursor-grabbing"
                       onDragStart={(e) => {
                         e.stopPropagation();
-                        e.dataTransfer.setData("text/plain", card.id);
+                        e.dataTransfer.setData("text/plain", dragPayloadForCard(card.id));
                         e.dataTransfer.effectAllowed = "move";
                         setDraggingCardId(card.id);
                       }}
@@ -597,14 +813,21 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
                       ⠿
                     </span>
                     <div
-                      className="flex-1 min-w-0 pr-6 cursor-pointer"
+                      className={cn(
+                        "flex-1 min-w-0 pr-6",
+                        selectionMode ? "cursor-pointer" : "cursor-pointer"
+                      )}
                       role="button"
                       tabIndex={0}
-                      onClick={() => setOpenId(card.id)}
+                      onClick={() => {
+                        if (selectionMode) toggleCardSelected(card.id);
+                        else setOpenId(card.id);
+                      }}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
-                          setOpenId(card.id);
+                          if (selectionMode) toggleCardSelected(card.id);
+                          else setOpenId(card.id);
                         }
                       }}
                     >
@@ -629,7 +852,11 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
                               className="w-full px-3 py-1.5 text-left text-[#E6E0D5] hover:bg-white/5"
                               onClick={() => {
                                 setMenuOpenId(null);
-                                void moveToStage(card, s.id, true);
+                                if (selectionMode && selectedIds.has(card.id) && selectedIds.size > 1) {
+                                  void bulkMoveToStage([...selectedIds], s.id);
+                                } else {
+                                  void moveToStage(card, s.id, true);
+                                }
                               }}
                             >
                               {s.label}
@@ -649,7 +876,8 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
                       )}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
               {col.id === "target" && (
                 <div className="shrink-0 border-t border-white/10 p-2">
@@ -861,8 +1089,11 @@ function CompanySlideOver({
         signal?: AbortSignal;
         mode?: "default" | "deep_research" | "web_search";
         attachments?: File[];
+        onStreamToken?: (text: string) => void;
+        onStreamEvent?: (event: ChatSseEvent) => void;
+        interactionResponse?: InteractionResponsePayload;
       }
-    ): Promise<string> => {
+    ): Promise<PostAiChatResult> => {
       const contacts: string[] = [];
       if (card.instagram_handle?.trim()) contacts.push(`Instagram: ${card.instagram_handle}`);
       if (card.website_url?.trim()) contacts.push(`Website: ${card.website_url}`);
@@ -1001,44 +1232,29 @@ function CompanySlideOver({
         .join("\n");
 
       const payload = messages.map((m) => ({ role: m.role, content: m.content }));
-      const bodyJson = {
-        messages: payload,
-        extra_system_context,
-        pipeline_drafting: true,
-        project_id: project.id,
-        conversation_id: conversationId,
-        project: {
-          id: project.id,
-          name: project.name,
-          instructions: project.instructions,
-          memory_notes: project.memoryNotes,
+      return postAiChat(
+        {
+          messages: payload,
+          extra_system_context,
+          pipeline_drafting: true,
+          project_id: project.id,
+          conversation_id: conversationId,
+          project: {
+            id: project.id,
+            name: project.name,
+            instructions: project.instructions,
+            memory_notes: project.memoryNotes,
+          },
+          mode: options?.mode ?? "default",
         },
-        mode: options?.mode ?? "default",
-      };
-      const attachments = options?.attachments ?? [];
-      let res: Response;
-      if (attachments.length > 0) {
-        const form = new FormData();
-        form.append("payload", JSON.stringify(bodyJson));
-        for (const f of attachments) form.append("files", f, f.name);
-        res = await fetch("/api/ai/chat", {
-          method: "POST",
-          body: form,
-          credentials: "include",
+        {
           signal: options?.signal,
-        });
-      } else {
-        res = await fetch("/api/ai/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(bodyJson),
-          credentials: "include",
-          signal: options?.signal,
-        });
-      }
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error ?? `Request failed (${res.status})`);
-      return String(data.message ?? "");
+          attachments: options?.attachments,
+          onStreamToken: options?.onStreamToken,
+          onStreamEvent: options?.onStreamEvent,
+          interactionResponse: options?.interactionResponse,
+        }
+      );
     },
     [card]
   );
@@ -1326,8 +1542,7 @@ function PotentialAthletesBlock({
       return;
     }
     const t = setTimeout(async () => {
-      const escaped = escapeForIlike(q.trim());
-      const pattern = `%${escaped}%`;
+      const pattern = `%${normalizeOrIlikeFragment(q)}%`;
       const { data } = await supabase
         .from("athletes")
         .select("athlete_id, first_name, last_name")
@@ -1538,6 +1753,128 @@ function ContactSlotsEditor({ card, savePatch }: { card: PipelineCard; savePatch
   );
 }
 
+function PastPartnershipsField({
+  card,
+  savePatch,
+}: {
+  card: PipelineCard;
+  savePatch: (b: Record<string, unknown>) => Promise<void>;
+}) {
+  const [researching, setResearching] = useState(false);
+  const [editingNotes, setEditingNotes] = useState(false);
+  const [localValue, setLocalValue] = useState(card.past_partnerships ?? "");
+  const [error, setError] = useState<string | null>(null);
+  const [searchEntryPointHtml, setSearchEntryPointHtml] = useState<string | null>(null);
+  const [webQueries, setWebQueries] = useState<string[]>([]);
+
+  useEffect(() => {
+    setLocalValue(card.past_partnerships ?? "");
+    setEditingNotes(false);
+  }, [card.past_partnerships, card.id, card.updated_at]);
+
+  async function research() {
+    setResearching(true);
+    setError(null);
+    setSearchEntryPointHtml(null);
+    setWebQueries([]);
+    try {
+      const res = await fetch(`/api/crm/pipeline/${card.id}/research-partnerships`, {
+        method: "POST",
+        credentials: "include",
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(formatPartnershipResearchClientError(data));
+      }
+      if (data.found === false) {
+        const sourceCount = Array.isArray(data.source_urls) ? data.source_urls.length : 0;
+        const evidenceCount = typeof data.evidence_count === "number" ? data.evidence_count : sourceCount;
+        setError(
+          formatNoPartnershipsMessage({
+            research_backend: String(data.research_backend ?? ""),
+            source_url_count: sourceCount,
+            evidence_count: evidenceCount,
+          })
+        );
+        return;
+      }
+      const next = String(data?.past_partnerships ?? "").trim();
+      if (next) {
+        setLocalValue(next);
+        await savePatch({ past_partnerships: next });
+      }
+      setSearchEntryPointHtml(typeof data?.search_entry_point_html === "string" ? data.search_entry_point_html : null);
+      setWebQueries(
+        Array.isArray(data?.web_search_queries)
+          ? data.web_search_queries.map((q: unknown) => String(q ?? "").trim()).filter(Boolean)
+          : []
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Research failed");
+    } finally {
+      setResearching(false);
+    }
+  }
+
+  return (
+    <label className="block">
+      <span className="text-xs font-medium text-[#B9B2A6] flex items-center justify-between gap-2">
+        <span>Past Partnerships</span>
+        <button
+          type="button"
+          onClick={() => void research()}
+          disabled={researching}
+          className="rounded-md border border-[#2E7040]/60 bg-[#1D2D22] px-2 py-0.5 text-[11px] text-[#CEE4D4] hover:bg-[#27352B] disabled:opacity-50"
+          title="Runs web search (last ~3 years) and Gemini; only cites URLs from search results"
+        >
+          {researching ? "Researching…" : "Research web (3 yrs)"}
+        </button>
+      </span>
+      {editingNotes ? (
+        <textarea
+          className="mt-1 w-full rounded-md border border-white/15 bg-[#101513] p-2 text-sm text-[#ECE7DF] placeholder:text-[#8E877A] min-h-[80px]"
+          placeholder="Note any known sponsorships or athlete partnerships…"
+          value={localValue}
+          autoFocus
+          onChange={(e) => setLocalValue(e.target.value)}
+          onBlur={(e) => {
+            const v = e.target.value;
+            if (v !== (card.past_partnerships ?? "")) void savePatch({ past_partnerships: v });
+            setEditingNotes(false);
+          }}
+        />
+      ) : (
+        <button
+          type="button"
+          className="mt-1 w-full rounded-md border border-white/10 bg-[#101513] p-2 text-left hover:bg-white/5 min-h-[80px]"
+          onClick={() => setEditingNotes(true)}
+          title="Click to edit"
+        >
+          {localValue.trim() ? (
+            <PartnershipNotesDisplay text={localValue} />
+          ) : (
+            <span className="text-sm text-[#8E877A]">Note any known sponsorships or athlete partnerships…</span>
+          )}
+        </button>
+      )}
+      {searchEntryPointHtml ? (
+        <details className="mt-2 rounded-md border border-white/10 bg-[#131915] p-2">
+          <summary className="cursor-pointer text-[11px] text-[#B9B2A6]">Google Search suggestions disclosure</summary>
+          {/* Required disclosure content returned by grounding metadata. */}
+          <div
+            className="prose prose-invert mt-2 max-w-none text-xs"
+            dangerouslySetInnerHTML={{ __html: searchEntryPointHtml }}
+          />
+        </details>
+      ) : null}
+      {webQueries.length > 0 ? (
+        <div className="mt-2 text-[11px] text-[#8E877A]">Search queries: {webQueries.join(" | ")}</div>
+      ) : null}
+      {error ? <span className="mt-1 block text-xs text-[#F1A2A2]">{error}</span> : null}
+    </label>
+  );
+}
+
 function ResearchTab({
   card,
   savePatch,
@@ -1550,7 +1887,6 @@ function ResearchTab({
   const field = (
     label: string,
     key:
-      | "past_partnerships"
       | "instagram_handle"
       | "website_url"
       | "support_email_v2"
@@ -1600,12 +1936,12 @@ function ResearchTab({
       <div className="flex justify-end">
         <SavedFlash show={savedFlash} />
       </div>
-      {field("Past Partnerships", "past_partnerships", "Note any known sponsorships or athlete partnerships...", true)}
+      <PastPartnershipsField card={card} savePatch={savePatch} />
       {field("Website", "website_url", "https://...")}
       {field("Instagram", "instagram_handle", "@brand")}
       {field("HQ Number", "hq_phone", "+1 (555) 555-5555")}
       {field("Support Email", "support_email_v2", "")}
-      <ContactSlotsEditor card={card} savePatch={savePatch} />
+      <CompanyContactsTable companyId={card.company_id} companyName={card.company_name} />
       <CompanyDescriptionField card={card} savePatch={savePatch} />
       {field("Personal Notes", "personal_notes", "Your personal notes on this company…", true)}
       <AgencySection card={card} savePatch={savePatch} />
@@ -1746,8 +2082,11 @@ function DraftingTab({
       signal?: AbortSignal;
       mode?: "default" | "deep_research" | "web_search";
       attachments?: File[];
+      onStreamToken?: (text: string) => void;
+      onStreamEvent?: (event: import("@/lib/ai/chat-sse").ChatSseEvent) => void;
+      interactionResponse?: InteractionResponsePayload;
     }
-  ) => Promise<string>;
+  ) => Promise<PostAiChatResult>;
   onAssistantReply: (content: string) => void;
   saveDraftFromChat: () => Promise<void>;
   savePatch: (b: Record<string, unknown>) => Promise<void>;
@@ -1890,6 +2229,11 @@ function DraftingTab({
                         {athleteLabel}
                       </Badge>
                     )}
+                    {d.sent_at && (
+                      <p className="text-[10px] text-[#7FA88A] mt-0.5">
+                        Sent {new Date(d.sent_at).toLocaleDateString()}
+                      </p>
+                    )}
                     <p className="text-[#B9B2A6] line-clamp-2 mt-1">{preview}</p>
                   </div>
                 </button>
@@ -1915,6 +2259,18 @@ function DraftingTab({
                         <Copy className="h-3.5 w-3.5 mr-1" />
                         Copy
                       </Button>
+                      {!d.sent_at && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            void savePatch({ mark_draft_sent: d.created_at })
+                          }
+                        >
+                          Mark sent
+                        </Button>
+                      )}
                       <Button
                         type="button"
                         variant="outline"
@@ -2090,6 +2446,12 @@ function ActivityTab({
       sub: `${new Date(card.outreach_at).toLocaleString()} · ${timeAgo(card.outreach_at)}`,
     });
   }
+  if (card.pipeline_stage === "bounced") {
+    timeline.push({
+      line: "Email bounced",
+      sub: "Invalid address or delivery failure — update contact and try a different email",
+    });
+  }
   if (card.pipeline_stage === "follow_up") {
     timeline.push({
       line: "In Follow-Up",
@@ -2207,6 +2569,19 @@ function ActivityTab({
           Re-engage
         </Button>
       )}
+
+      {card.pipeline_stage === "bounced" && (
+        <Button
+          variant="outline"
+          onClick={() =>
+            void savePatch({
+              pipeline_stage: "research",
+            })
+          }
+        >
+          Find new contact
+        </Button>
+      )}
     </div>
   );
 }
@@ -2245,8 +2620,7 @@ function DealTab({
       return;
     }
     const t = setTimeout(async () => {
-      const escaped = escapeForIlike(q.trim());
-      const pattern = `%${escaped}%`;
+      const pattern = `%${normalizeOrIlikeFragment(q)}%`;
       const { data } = await supabase
         .from("athletes")
         .select("athlete_id, first_name, last_name")
@@ -2263,6 +2637,7 @@ function DealTab({
 
   const value = card.closed_value;
   const link = card.closed_media_url ?? "";
+  const safeClosedMediaUrl = safeHttpUrl(link);
   const complete =
     value !== null &&
     value !== undefined &&
@@ -2339,9 +2714,13 @@ function DealTab({
       {complete && (
         <div className="rounded-lg border border-[#2E7040]/50 bg-[#1D2D22] p-3 text-sm text-[#CEE4D4]">
           {athleteName ?? "Athlete"} — ${Number(value).toLocaleString()} —{" "}
-          <a href={link} className="break-all underline hover:text-[#E8F6ED]" target="_blank" rel="noreferrer">
-            {link}
-          </a>
+          {safeClosedMediaUrl ? (
+            <a href={safeClosedMediaUrl} className="break-all underline hover:text-[#E8F6ED]" target="_blank" rel="noreferrer">
+              {link}
+            </a>
+          ) : (
+            <span className="break-all text-[#D7D0C4]">{link}</span>
+          )}
         </div>
       )}
     </div>

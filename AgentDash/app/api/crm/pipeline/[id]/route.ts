@@ -1,19 +1,35 @@
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
 import { normalizePipelineContacts } from "@/lib/crm/pipeline-contacts";
+import { setMatchScoreForAthlete } from "@/lib/crm/potential-athletes";
+import { resolveCompanyWebsiteForTargetList } from "@/lib/crm/resolve-company-website-for-target-list";
 import { fetchPipelineCardById } from "@/lib/features/crm-pipeline/service";
 import { NextResponse } from "next/server";
 
-const PIPELINE_STAGES = new Set([
-  "target",
-  "research",
-  "drafting",
-  "outreach",
-  "follow_up",
-  "ghost",
-  "in_progress",
-  "closed",
-]);
+function potentialAthletesAdded(
+  prev: unknown,
+  next: unknown
+): boolean {
+  const prevList = Array.isArray(prev) ? prev : [];
+  const nextList = Array.isArray(next) ? next : [];
+  const prevIds = new Set(
+    prevList.map((p) => String((p as { athlete_id?: string })?.athlete_id ?? "")).filter(Boolean)
+  );
+  return nextList.some((p) => {
+    const id = String((p as { athlete_id?: string })?.athlete_id ?? "");
+    return id && !prevIds.has(id);
+  });
+}
+
+import {
+  markDraftSent,
+  mergeDraftMessagesPreservingSentAt,
+} from "@/lib/crm/draft-messages";
+import {
+  normalizePipelineStage,
+  pipelineStageToFunnel,
+  PIPELINE_STAGES,
+} from "@/lib/crm/stage-map";
 
 const PATCH_KEYS = new Set([
   "pipeline_stage",
@@ -31,6 +47,8 @@ const PATCH_KEYS = new Set([
   "closed_athlete_id",
   "closed_media_url",
   "draft_messages",
+  "outreach_email_subject",
+  "outreach_email",
   "responded_at",
   "outreach_at",
 ]);
@@ -97,13 +115,54 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   }
 
   const updates: Record<string, unknown> = {};
+  const markDraftSentAt = Object.prototype.hasOwnProperty.call(body, "mark_draft_sent")
+    ? String((body as { mark_draft_sent?: unknown }).mark_draft_sent ?? "").trim()
+    : "";
+
+  if (
+    Object.prototype.hasOwnProperty.call(body, "athlete_match_score") &&
+    Object.prototype.hasOwnProperty.call(body, "athlete_id")
+  ) {
+    const athleteId = String((body as { athlete_id?: unknown }).athlete_id ?? "").trim();
+    if (!athleteId) {
+      return NextResponse.json({ error: "athlete_id is required with athlete_match_score" }, { status: 400 });
+    }
+    const rawScore = (body as { athlete_match_score?: unknown }).athlete_match_score;
+    let matchScore: number | null = null;
+    if (rawScore != null && String(rawScore).trim() !== "") {
+      const n = Number(rawScore);
+      if (!Number.isFinite(n)) {
+        return NextResponse.json({ error: "Invalid athlete_match_score" }, { status: 400 });
+      }
+      matchScore = n;
+    }
+    updates.potential_athletes = setMatchScoreForAthlete(current.potential_athletes, athleteId, matchScore);
+  }
+
   for (const key of PATCH_KEYS) {
     if (!Object.prototype.hasOwnProperty.call(body, key) || body[key as keyof typeof body] === undefined) continue;
     if (key === "pipeline_contacts") {
       updates.pipeline_contacts = normalizePipelineContacts(body.pipeline_contacts);
+    } else if (key === "draft_messages") {
+      updates.draft_messages = mergeDraftMessagesPreservingSentAt(
+        current.draft_messages,
+        body.draft_messages
+      );
     } else {
       updates[key] = body[key as keyof typeof body];
     }
+  }
+
+  if (markDraftSentAt) {
+    const base = Array.isArray(updates.draft_messages)
+      ? updates.draft_messages
+      : current.draft_messages;
+    updates.draft_messages = markDraftSent(
+      mergeDraftMessagesPreservingSentAt(current.draft_messages, base) as Parameters<
+        typeof markDraftSent
+      >[0],
+      markDraftSentAt
+    );
   }
 
   if (updates.pipeline_stage !== undefined) {
@@ -111,7 +170,29 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     if (!PIPELINE_STAGES.has(stage)) {
       return NextResponse.json({ error: "Invalid pipeline_stage" }, { status: 400 });
     }
-    updates.pipeline_stage = stage;
+    const normalizedStage = normalizePipelineStage(stage);
+    updates.pipeline_stage = normalizedStage;
+    updates.funnel_stage = pipelineStageToFunnel(normalizedStage);
+    // #region agent log
+    fetch("http://127.0.0.1:7310/ingest/3db61d27-132c-4ea5-8254-c4515c90a750", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a18aef" },
+      body: JSON.stringify({
+        sessionId: "a18aef",
+        runId: "post-fix",
+        hypothesisId: "P1-B",
+        location: "pipeline/[id]/route.ts:stage-sync",
+        message: "pipeline stage update with funnel sync",
+        data: {
+          cardId: id,
+          pipeline_stage: normalizedStage,
+          funnel_stage: updates.funnel_stage,
+          prior_funnel_stage: current.funnel_stage ?? null,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
   }
 
   if (
@@ -130,7 +211,11 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     updates.responded_at = new Date().toISOString();
   }
 
-  if (Object.keys(updates).length === 0 && Object.keys(companyPatch).length === 0) {
+  if (
+    Object.keys(updates).length === 0 &&
+    Object.keys(companyPatch).length === 0 &&
+    !markDraftSentAt
+  ) {
     const card = await fetchPipelineCardById(supabase, id);
     return NextResponse.json({ card });
   }
@@ -139,6 +224,33 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     const { error: upErr } = await supabase.from("crm_companies_pipeline").update(updates).eq("id", id);
     if (upErr) {
       return NextResponse.json({ error: upErr.message }, { status: 500 });
+    }
+  }
+
+  if (
+    Object.prototype.hasOwnProperty.call(body, "potential_athletes") &&
+    potentialAthletesAdded(current.potential_athletes, body.potential_athletes)
+  ) {
+    const { data: companyRow } = await supabaseAdmin
+      .from("companies")
+      .select("name, website, product_category, industry")
+      .eq("company_id", current.company_id)
+      .maybeSingle();
+    if (companyRow?.name && !String(companyRow.website ?? "").trim()) {
+      try {
+        await resolveCompanyWebsiteForTargetList(
+          supabaseAdmin,
+          current.company_id,
+          {
+            companyName: String(companyRow.name),
+            productCategory: companyRow.product_category ?? null,
+            industry: companyRow.industry ?? null,
+          },
+          { userId: profile.user_id }
+        );
+      } catch {
+        // Non-fatal: athlete link still succeeds.
+      }
     }
   }
 

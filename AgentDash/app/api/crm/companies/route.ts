@@ -1,9 +1,13 @@
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
+import { isApolloEnabled } from "@/lib/apollo/config";
+import { persistApolloMetadataForCompany } from "@/lib/apollo/persist-company";
+import { resolveCompanyWebsiteForTargetList } from "@/lib/crm/resolve-company-website-for-target-list";
+import { normalizePipelineStage, pipelineStageToFunnel, resolvePipelineStageFromBody } from "@/lib/crm/stage-map";
 import { NextResponse } from "next/server";
 
-const FUNNEL_STAGES = ["idea", "research", "contacted", "negotiating", "paused", "won", "lost"] as const;
-type FunnelStage = (typeof FUNNEL_STAGES)[number];
+const PIPELINE_UPDATE_SELECT =
+  "id, company_id, created_by_user_id, status, support_email, contact_emails, relevant_people, notes, pipeline_stage, funnel_stage, priority, next_follow_up_at, archived, sent_at, created_at, updated_at" as const;
 
 function normalizeEmails(emails: unknown): string[] {
   if (!Array.isArray(emails)) return [];
@@ -14,11 +18,6 @@ function normalizeEmails(emails: unknown): string[] {
     set.add(email);
   }
   return [...set];
-}
-
-function normalizeFunnelStage(value: unknown): FunnelStage {
-  const stage = String(value ?? "").trim().toLowerCase();
-  return (FUNNEL_STAGES as readonly string[]).includes(stage) ? (stage as FunnelStage) : "idea";
 }
 
 function normalizePriority(value: unknown): 1 | 2 | 3 {
@@ -62,7 +61,7 @@ export async function GET() {
 
   let query = supabase
     .from("crm_companies_pipeline")
-    .select("id, company_id, status, support_email, contact_emails, relevant_people, notes, funnel_stage, priority, next_follow_up_at, archived, sent_at, created_at, updated_at, companies(name, industry, website, instagram_url, support_email)")
+    .select("id, company_id, status, support_email, contact_emails, relevant_people, notes, pipeline_stage, funnel_stage, priority, next_follow_up_at, archived, sent_at, created_at, updated_at, companies(name, industry, website, instagram_url, support_email)")
     .order("updated_at", { ascending: false });
 
   if (profile.role === "agent") {
@@ -86,11 +85,26 @@ export async function POST(req: Request) {
   }
 
   const company_id = await getOrCreateCompanyByName(supabaseAdmin, company_name);
+  const websiteFromBody = body.website != null ? String(body.website).trim() || null : null;
+  try {
+    await resolveCompanyWebsiteForTargetList(
+      supabaseAdmin,
+      company_id,
+      {
+        companyName: company_name,
+        websiteHint: websiteFromBody,
+      },
+      { userId: profile.user_id }
+    );
+  } catch {
+    // Non-fatal: pipeline card creation continues.
+  }
   const support_email = body.support_email != null ? String(body.support_email).trim().toLowerCase() || null : null;
   const contact_emails = normalizeEmails(body.contact_emails);
   const relevant_people = Array.isArray(body.relevant_people) ? body.relevant_people : [];
   const notes = body.notes != null ? String(body.notes) : null;
-  const funnel_stage = normalizeFunnelStage(body.funnel_stage);
+  const pipeline_stage =
+    resolvePipelineStageFromBody(body) ?? normalizePipelineStage(body.funnel_stage);
   const priority = normalizePriority(body.priority);
   const next_follow_up_at = normalizeDate(body.next_follow_up_at);
   const archived = body.archived === true;
@@ -113,6 +127,13 @@ export async function POST(req: Request) {
   if (Object.keys(companyUpdate).length > 0) {
     await supabase.from("companies").update(companyUpdate).eq("company_id", company_id);
   }
+  if (isApolloEnabled() && website) {
+    try {
+      await persistApolloMetadataForCompany(supabaseAdmin, company_id, { website });
+    } catch {
+      // non-fatal
+    }
+  }
 
   if (existing) {
     const merged = normalizeEmails([...(existing.contact_emails ?? []), ...contact_emails]);
@@ -125,13 +146,14 @@ export async function POST(req: Request) {
         relevant_people: mergedPeople,
         notes,
         status: "in_progress",
-        funnel_stage,
+        pipeline_stage,
+        funnel_stage: pipelineStageToFunnel(pipeline_stage),
         priority,
         next_follow_up_at,
         archived,
       })
       .eq("id", existing.id)
-      .select("*")
+      .select(PIPELINE_UPDATE_SELECT)
       .single();
     if (updateError) return NextResponse.json({ error: updateError.message }, { status: 500 });
     return NextResponse.json({ company: updated, created: false });
@@ -147,12 +169,13 @@ export async function POST(req: Request) {
       contact_emails,
       relevant_people,
       notes,
-      funnel_stage,
+      pipeline_stage,
+      funnel_stage: pipelineStageToFunnel(pipeline_stage),
       priority,
       next_follow_up_at,
       archived,
     })
-    .select("*")
+    .select(PIPELINE_UPDATE_SELECT)
     .single();
   if (createError) return NextResponse.json({ error: createError.message }, { status: 500 });
   return NextResponse.json({ company: created, created: true });

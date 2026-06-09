@@ -1,5 +1,6 @@
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
+import { enforceContentLengthLimit, enforceFileSizeLimit, MAX_API_PAYLOAD_BYTES } from "@/lib/api/request-limits";
 import { NextResponse } from "next/server";
 import readXlsxFile from "read-excel-file/node";
 
@@ -105,6 +106,9 @@ async function getOrCreateCompanyByName(
 }
 
 export async function POST(req: Request) {
+  const contentLengthError = enforceContentLengthLimit(req);
+  if (contentLengthError) return contentLengthError;
+
   const profile = await requireProfile();
   if (profile.role === "sales") {
     return NextResponse.json({ error: "Not allowed for sales role" }, { status: 403 });
@@ -118,6 +122,12 @@ export async function POST(req: Request) {
   if (!file) {
     return NextResponse.json({ error: "No file provided" }, { status: 400 });
   }
+  const fileSizeError = enforceFileSizeLimit(
+    file,
+    MAX_API_PAYLOAD_BYTES,
+    "Uploaded file too large. Max 25 MB."
+  );
+  if (fileSizeError) return fileSizeError;
 
   const name = (file.name || "").toLowerCase();
   if (!name.endsWith(".xlsx") && !name.endsWith(".xls")) {
@@ -125,7 +135,8 @@ export async function POST(req: Request) {
   }
 
   const buffer = Buffer.from(await file.arrayBuffer());
-  const sheetRows = (await readXlsxFile(buffer)) as unknown[][];
+  const workbook = await readXlsxFile(buffer);
+  const sheetRows = (workbook[0]?.data ?? []) as unknown[][];
   const objects = rowsToObjects(sheetRows);
   if (objects.length === 0) {
     return NextResponse.json({ error: "No rows found in spreadsheet" }, { status: 400 });

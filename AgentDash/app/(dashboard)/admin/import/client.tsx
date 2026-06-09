@@ -1,7 +1,8 @@
 "use client";
 
+import Link from "next/link";
 import Papa from "papaparse";
-import readXlsxFile from "read-excel-file";
+import readXlsxFile from "read-excel-file/browser";
 import { useState } from "react";
 
 async function parseJsonResponse(res: Response): Promise<Record<string, unknown>> {
@@ -26,11 +27,126 @@ function rowsToObjects(rows: unknown[][]): Record<string, unknown>[] {
   });
 }
 
+type ImportProgressState = {
+  percent: number;
+  label: string;
+};
+
+function mapServerPercent(serverPercent: number, uploadComplete: boolean): number {
+  if (!uploadComplete) {
+    return Math.min(12, Math.round(serverPercent * 0.12));
+  }
+  return Math.min(100, 12 + Math.round(serverPercent * 0.88));
+}
+
+function importWithProgress(
+  formData: FormData,
+  onProgress: (progress: ImportProgressState) => void
+): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/admin/import");
+    xhr.withCredentials = true;
+
+    let uploadComplete = false;
+    let parsedThrough = 0;
+    let lineBuffer = "";
+    let settled = false;
+
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      fn();
+    };
+
+    const handleNdjsonChunk = (text: string) => {
+      if (!text) return;
+      lineBuffer += text;
+      const lines = lineBuffer.split("\n");
+      lineBuffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line) as Record<string, unknown>;
+          if (event.type === "progress" && typeof event.percent === "number") {
+            onProgress({
+              percent: mapServerPercent(event.percent, uploadComplete),
+              label: typeof event.label === "string" ? event.label : "Importing…",
+            });
+          } else if (event.type === "done") {
+            settle(() => resolve((event.result as Record<string, unknown>) ?? {}));
+          } else if (event.type === "error") {
+            settle(() =>
+              reject(new Error(typeof event.error === "string" ? event.error : "Import failed"))
+            );
+          }
+        } catch {
+          // Ignore malformed lines.
+        }
+      }
+    };
+
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable) return;
+      const uploadPct = Math.round((e.loaded / e.total) * 12);
+      onProgress({
+        percent: uploadPct,
+        label: e.loaded >= e.total ? "Processing import…" : "Uploading file…",
+      });
+      if (e.loaded >= e.total) uploadComplete = true;
+    };
+
+    xhr.onprogress = () => {
+      const chunk = xhr.responseText.slice(parsedThrough);
+      parsedThrough = xhr.responseText.length;
+      handleNdjsonChunk(chunk);
+    };
+
+    xhr.onload = () => {
+      const tail = xhr.responseText.slice(parsedThrough);
+      if (tail) handleNdjsonChunk(tail);
+      if (lineBuffer.trim()) handleNdjsonChunk("\n");
+
+      if (settled) return;
+
+      if (xhr.status >= 200 && xhr.status < 300) {
+        settle(() => reject(new Error("Import finished without a result from the server.")));
+        return;
+      }
+
+      if (!xhr.responseText.trim()) {
+        settle(() => reject(new Error(`Import failed (HTTP ${xhr.status})`)));
+        return;
+      }
+
+      try {
+        const data = JSON.parse(xhr.responseText) as Record<string, unknown>;
+        settle(() =>
+          reject(
+            new Error(typeof data.error === "string" ? data.error : `Import failed (HTTP ${xhr.status})`)
+          )
+        );
+      } catch {
+        settle(() =>
+          reject(new Error(xhr.responseText.slice(0, 200) || `Import failed (HTTP ${xhr.status})`))
+        );
+      }
+    };
+
+    xhr.onerror = () => reject(new Error("Import request failed. Check your connection and try again."));
+    xhr.onabort = () => reject(new Error("Import cancelled."));
+
+    xhr.send(formData);
+  });
+}
+
 export function ImportClient() {
   const [file, setFile] = useState<File | null>(null);
   const [importType, setImportType] = useState<"athletes" | "contracts" | "social_audience">("athletes");
   const [preview, setPreview] = useState<Record<string, unknown>[]>([]);
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState<ImportProgressState | null>(null);
   const [result, setResult] = useState<any>(null);
   const [showContractsClearConfirm, setShowContractsClearConfirm] = useState(false);
   const [showAthletesClearConfirm, setShowAthletesClearConfirm] = useState(false);
@@ -38,6 +154,8 @@ export function ImportClient() {
   const [clearingContracts, setClearingContracts] = useState(false);
   const [clearingAthletes, setClearingAthletes] = useState(false);
   const [mergingDuplicates, setMergingDuplicates] = useState(false);
+  const [rosterDiff, setRosterDiff] = useState<Record<string, unknown> | null>(null);
+  const [comparingRoster, setComparingRoster] = useState(false);
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
@@ -45,6 +163,7 @@ export function ImportClient() {
     setFile(f);
     setPreview([]);
     setResult(null);
+    setRosterDiff(null);
 
     const name = f.name.toLowerCase();
     if (name.endsWith(".csv")) {
@@ -57,9 +176,39 @@ export function ImportClient() {
       };
       reader.readAsText(f);
     } else {
-      readXlsxFile(f).then((rows) => {
-        setPreview(rowsToObjects(rows as unknown[][]).slice(0, 5));
+      readXlsxFile(f).then((sheets) => {
+        const rows = (sheets[0]?.data ?? []) as unknown[][];
+        setPreview(rowsToObjects(rows).slice(0, 5));
       });
+    }
+  }
+
+  async function handleCompareRoster() {
+    if (!file) return;
+    setComparingRoster(true);
+    setRosterDiff(null);
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const res = await fetch("/api/admin/import/roster-diff", {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok) {
+        setRosterDiff({ error: typeof data.error === "string" ? data.error : "Compare failed" });
+      } else {
+        setRosterDiff(data);
+      }
+    } catch (e: unknown) {
+      setRosterDiff({
+        error: e instanceof Error ? e.message : "Compare request failed",
+      });
+    } finally {
+      setComparingRoster(false);
     }
   }
 
@@ -67,29 +216,28 @@ export function ImportClient() {
     if (!file) return;
     setLoading(true);
     setResult(null);
+    setProgress({ percent: 0, label: "Starting import…" });
 
     const formData = new FormData();
     formData.append("file", file);
     formData.append("type", importType);
+    formData.append("stream", "1");
 
     try {
-      const res = await fetch("/api/admin/import", {
-        method: "POST",
-        body: formData,
-        credentials: "include",
-      });
-
-      const data = await parseJsonResponse(res);
+      const data = await importWithProgress(formData, setProgress);
+      setProgress({ percent: 100, label: "Import complete" });
       setResult(data);
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error("[Admin Import] Network or fetch error", e);
       setResult({
         error:
-          e?.message ||
-          "Import request failed before reaching the server. Check dev server status and network.",
+          e instanceof Error
+            ? e.message
+            : "Import request failed before reaching the server. Check dev server status and network.",
       });
     } finally {
       setLoading(false);
+      setTimeout(() => setProgress(null), 1200);
     }
   }
 
@@ -222,24 +370,36 @@ export function ImportClient() {
             <div className="rounded-md border border-white/10 bg-[#101513] p-3 text-sm text-[#D7D0C4]">
               <p className="mb-1 font-medium text-[#F4F1EB]">Athlete Social &amp; Audience format</p>
               <p className="mb-1">
-                Upload a single Excel workbook (.xlsx) with two sheets named{" "}
-                <strong>Social Data</strong> and <strong>Audience Data</strong>.
+                Upload a single Excel workbook (.xlsx) with sheets named{" "}
+                <strong>Social Data</strong> and <strong>Audience Data</strong>. Optional:{" "}
+                <strong>Talent Info</strong> (processed first).
               </p>
               <ul className="list-disc list-inside space-y-0.5">
                 <li>
-                  <strong>Social Data</strong> sheet columns (case-insensitive): Name, Talent ID, Total
-                  Followers, Avg. ER (20P), Total Lifetime Posts, IG Followers, Avg. ER (IG, 20P), IG
-                  Lifetime Posts, TT Followers, Avg. ER (TT, 20P), TT Lifetime Posts, FB Followers,
-                  Avg. ER (FB, 20P), FB Lifetime Posts, X Followers, Avg. ER (X, 20P), X Lifetime Posts.
+                  <strong>Talent Info</strong> (optional): row 1 may be a category title (e.g. Action Sports);
+                  header row with <strong>#</strong>, <strong>First Name</strong>, <strong>Last Name</strong>,{" "}
+                  <strong>Sport</strong>, <strong>Agent</strong>, <strong>Country of Origin</strong>.{" "}
+                  <strong>Properties</strong> (e.g. The Berrics) can leave <strong>Last Name</strong> blank — the full
+                  name goes in First Name. Creates or updates roster entries and agent links. Multiple agents:
+                  separate with <strong>/</strong> or commas.
                 </li>
                 <li>
-                  <strong>Audience Data</strong> sheet columns (case-insensitive): Name, Talent ID,
-                  Audience Category, Audience Name, % IG Audience, # IG Audience, Current IG Following.
+                  <strong>Social Data</strong> columns (case-insensitive): Name, Total Followers, Avg. ER
+                  (20P), Total Lifetime Posts, IG Followers, Avg. ER (IG, 20P), IG Lifetime Posts, TT
+                  Followers, Avg. ER (TT, 20P), TT Lifetime Posts, FB Followers, Avg. ER (FB, 20P), FB
+                  Lifetime Posts, X Followers, Avg. ER (X, 20P), X Lifetime Posts.
                 </li>
                 <li>
-                  Talent ID will be used to match athletes (via CreatorIQ ID) when possible; exact name
-                  matches are a fallback. Rows that cannot be matched or have invalid numbers are skipped
-                  with a clear reason.
+                  <strong>Audience Data</strong> columns (case-insensitive): Name, Last Updated, Audience
+                  Category, Audience Name, % IG Audience, # IG Audience, Current IG Following.
+                </li>
+                <li>
+                  Social and audience rows match athletes by <strong>Name</strong> (creates a minimal roster
+                  entry if still not found). Review skipped rows in the import summary.
+                </li>
+                <li>
+                  Large files are processed in bulk (roster loaded once, then batch database writes) so imports
+                  finish much faster than row-by-row uploads.
                 </li>
               </ul>
             </div>
@@ -284,13 +444,145 @@ export function ImportClient() {
               </div>
             </div>
           )}
-          <button
-            onClick={handleImport}
-            disabled={!file || loading}
-            className="rounded-md bg-[#2E7040] px-4 py-2 text-white hover:bg-[#285F36] disabled:opacity-50"
-          >
-            {loading ? "Importing..." : "Import"}
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={handleImport}
+              disabled={!file || loading}
+              className="rounded-md bg-[#2E7040] px-4 py-2 text-white hover:bg-[#285F36] disabled:opacity-50"
+            >
+              {loading ? "Importing..." : "Import"}
+            </button>
+            {importType === "social_audience" && (
+              <button
+                type="button"
+                onClick={handleCompareRoster}
+                disabled={!file || loading || comparingRoster}
+                className="rounded-md border border-white/20 bg-[#101513] px-4 py-2 text-sm text-[#ECE7DF] hover:bg-[#1A211D] disabled:opacity-50"
+              >
+                {comparingRoster ? "Comparing…" : "Compare roster to Excel"}
+              </button>
+            )}
+          </div>
+          {(loading || progress) && (
+            <div className="space-y-2 pt-2" role="status" aria-live="polite">
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-[#D7D0C4]">{progress?.label ?? "Importing…"}</span>
+                <span className="tabular-nums text-[#B9B2A6]">{progress?.percent ?? 0}%</span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-[#101513]">
+                <div
+                  className="h-full rounded-full bg-[#2E7040] transition-[width] duration-300 ease-out"
+                  style={{ width: `${progress?.percent ?? 0}%` }}
+                />
+              </div>
+            </div>
+          )}
+          {rosterDiff && (
+            <div
+              className={`mt-4 rounded-md border p-4 text-sm ${
+                rosterDiff.error
+                  ? "border-[#8C3A3A]/50 bg-[#3A1E1E] text-[#F1A2A2]"
+                  : "border-white/10 bg-[#101513] text-[#D7D0C4]"
+              }`}
+            >
+              {typeof rosterDiff.error === "string" ? (
+                <p>{rosterDiff.error}</p>
+              ) : (
+                <>
+                  <p className="mb-2 font-medium text-[#F4F1EB]">Roster vs Excel</p>
+                  {rosterDiff.summary && typeof rosterDiff.summary === "object" && (
+                    <ul className="mb-3 list-inside list-disc space-y-0.5">
+                      <li>
+                        Roster: {(rosterDiff.summary as any).rosterCount} athletes · Excel (Talent Info):{" "}
+                        {(rosterDiff.summary as any).excelRowsCompared} rows compared · Matched:{" "}
+                        {(rosterDiff.summary as any).matchedOnRoster}
+                      </li>
+                      <li>
+                        Only on roster (not in Excel):{" "}
+                        <strong className="text-[#F4F1EB]">
+                          {(rosterDiff.summary as any).onlyOnRosterCount}
+                        </strong>
+                      </li>
+                      <li>
+                        Only in Excel (not on roster):{" "}
+                        <strong className="text-[#F4F1EB]">
+                          {(rosterDiff.summary as any).onlyInExcelCount}
+                        </strong>
+                      </li>
+                      {(rosterDiff.summary as any).ambiguousExcelCount > 0 && (
+                        <li>
+                          Ambiguous Excel names (duplicate roster matches):{" "}
+                          {(rosterDiff.summary as any).ambiguousExcelCount}
+                        </li>
+                      )}
+                    </ul>
+                  )}
+                  {Array.isArray(rosterDiff.onlyOnRoster) && rosterDiff.onlyOnRoster.length > 0 && (
+                    <div className="mb-3">
+                      <p className="mb-1 font-medium text-[#F3D8A2]">On roster only</p>
+                      <ul className="max-h-48 space-y-1 overflow-y-auto text-xs">
+                        {(rosterDiff.onlyOnRoster as any[]).map((row) => (
+                          <li key={row.athlete_id}>
+                            <Link
+                              href={row.profilePath ?? `/athlete/${row.athlete_id}`}
+                              className="text-[#DBEEE0] underline hover:text-[#F4F1EB]"
+                            >
+                              {[row.first_name, row.last_name].filter(Boolean).join(" ").trim() ||
+                                row.athlete_id}
+                            </Link>
+                            {row.sport ? (
+                              <span className="text-[#B9B2A6]"> · {row.sport}</span>
+                            ) : null}
+                            {row.country ? (
+                              <span className="text-[#B9B2A6]"> · {row.country}</span>
+                            ) : null}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {Array.isArray(rosterDiff.onlyInExcel) && rosterDiff.onlyInExcel.length > 0 && (
+                    <div className="mb-3">
+                      <p className="mb-1 font-medium text-[#F3D8A2]">In Excel only</p>
+                      <ul className="max-h-48 space-y-1 overflow-y-auto text-xs">
+                        {(rosterDiff.onlyInExcel as any[]).map((row, i) => (
+                          <li key={`${row.sheet}-${row.rowIndex}-${i}`}>
+                            {row.displayName}
+                            <span className="text-[#B9B2A6]">
+                              {" "}
+                              ({row.sheet} row {row.rowIndex})
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {Array.isArray(rosterDiff.ambiguousExcel) &&
+                    rosterDiff.ambiguousExcel.length > 0 && (
+                      <div>
+                        <p className="mb-1 font-medium text-[#FFD2D2]">Ambiguous in Excel</p>
+                        <ul className="max-h-32 space-y-1 overflow-y-auto text-xs text-[#F1A2A2]">
+                          {(rosterDiff.ambiguousExcel as any[]).map((row, i) => (
+                            <li key={`${row.displayName}-${i}`}>
+                              {row.displayName} (row {row.rowIndex}) — multiple roster profiles
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  {Array.isArray(rosterDiff.onlyOnRoster) &&
+                    rosterDiff.onlyOnRoster.length === 0 &&
+                    Array.isArray(rosterDiff.onlyInExcel) &&
+                    rosterDiff.onlyInExcel.length === 0 && (
+                      <p className="text-[#DBEEE0]">
+                        Every Talent Info row matches a roster profile, and every roster athlete appears in
+                        the Excel file.
+                      </p>
+                    )}
+                </>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -371,6 +663,36 @@ export function ImportClient() {
                         {key}: {val}
                       </li>
                     ))}
+                  </ul>
+                </div>
+              )}
+              {result.sheets && Array.isArray(result.sheets) && result.sheets.length > 0 && (
+                <div className="mt-3 space-y-2">
+                  <p className="font-medium">By sheet:</p>
+                  <ul className="list-disc list-inside ml-2 space-y-1">
+                    {result.sheets.map((sheet: any) => (
+                      <li key={sheet.sheet}>
+                        {sheet.sheet}: {sheet.inserted} inserted, {sheet.updated} updated, {sheet.skipped}{" "}
+                        skipped, {sheet.failed} failed ({sheet.total} rows)
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {result.failures && Array.isArray(result.failures) && result.failures.length > 0 && (
+                <div className="mt-3 rounded border border-[#8C3A3A]/50 bg-[#3A1E1E] p-3">
+                  <p className="font-medium text-[#FFD2D2]">
+                    Row issues ({result.failures.length} row(s)):
+                  </p>
+                  <ul className="mt-2 list-inside list-disc space-y-1 text-sm text-[#F1A2A2]">
+                    {result.failures.slice(0, 25).map((err: any, i: number) => (
+                      <li key={i}>
+                        {err.sheet} row {err.rowIndex}: {err.reason}
+                      </li>
+                    ))}
+                    {result.failures.length > 25 && (
+                      <li>… and {result.failures.length - 25} more</li>
+                    )}
                   </ul>
                 </div>
               )}

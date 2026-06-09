@@ -3,6 +3,7 @@ import { requireProfile } from "@/lib/auth";
 import {
   ensureAthleteAccess,
   getContractCategoryDisplay,
+  markAthleteCategoriesCovered,
   resolveOrCreateCompanyId,
 } from "@/lib/features/contracts/service";
 import { NextResponse } from "next/server";
@@ -127,6 +128,14 @@ export async function PATCH(
     const { error: exclError } = await supabase.from("contract_exclusivities").insert(inserts);
     if (exclError) {
       return NextResponse.json({ error: "Failed to update categories" }, { status: 500 });
+    }
+
+    try {
+      await markAthleteCategoriesCovered(supabase, athleteId, categoryTaxonomyIds);
+    } catch (e: unknown) {
+      const message =
+        e instanceof Error ? e.message : "Failed to update athlete prospecting categories";
+      return NextResponse.json({ error: message }, { status: 500 });
     }
   }
 

@@ -26,7 +26,7 @@ export default async function ContractsPage({
 
   let query = supabase
     .from("contracts")
-    .select("*")
+    .select("contract_id, athlete_id, company_id, category, start_date, end_date, status, archived")
     .order("status", { ascending: false })
     .order("start_date", { ascending: false });
 
@@ -55,8 +55,12 @@ export default async function ContractsPage({
   const companyIds = [...new Set(contracts.map((c: any) => c.company_id).filter(Boolean))];
 
   const [athletesByAthleteId, athletesById, companiesRes] = await Promise.all([
-    athleteIds.length > 0 ? supabase.from("athletes").select("*").in("athlete_id", athleteIds) : Promise.resolve({ data: [] }),
-    athleteIds.length > 0 ? supabase.from("athletes").select("*").in("id", athleteIds) : Promise.resolve({ data: [] }),
+    athleteIds.length > 0
+      ? supabase.from("athletes").select("athlete_id, id, first_name, last_name").in("athlete_id", athleteIds)
+      : Promise.resolve({ data: [] }),
+    athleteIds.length > 0
+      ? supabase.from("athletes").select("athlete_id, id, first_name, last_name").in("id", athleteIds)
+      : Promise.resolve({ data: [] }),
     companyIds.length > 0 ? supabase.from("companies").select("company_id, name").in("company_id", companyIds) : Promise.resolve({ data: [] }),
   ]);
 
@@ -159,12 +163,14 @@ export default async function ContractsPage({
           <tbody className="divide-y divide-white/10">
             {contractsWithRelations?.map((contract: any) => (
               <tr key={contract.contract_id} className="hover:bg-white/5">
-                <td className="py-4 pl-4 text-sm">
+                <td className="whitespace-nowrap py-4 pl-4 pr-3 text-sm font-medium text-[#F4F1EB] sm:pl-4">
                   <Link
                     href={`/athlete/${contract.athlete_id}`}
                     className="text-[#CEE4D4] hover:text-[#E8F6ED]"
                   >
-                    {contract.athletes?.first_name} {contract.athletes?.last_name}
+                    {contract.athletes?.first_name || contract.athletes?.last_name
+                      ? `${contract.athletes?.first_name ?? ""} ${contract.athletes?.last_name ?? ""}`.trim()
+                      : "—"}
                   </Link>
                 </td>
                 <td className="px-3 py-4 text-sm text-[#D7D0C4]">

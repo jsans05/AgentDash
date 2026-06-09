@@ -7,7 +7,14 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip } from "@/components/ui/tooltip";
+import { useAuth } from "@/app/providers";
+import type { Profile } from "@/lib/supabase/types";
+import type { PostAiChatResult } from "@/lib/ai/chat-fetch";
+import type { ChatSseEvent, ChatSseWebSource } from "@/lib/ai/chat-sse";
+import type { InteractionResponsePayload, UserQuestionPrompt } from "@/lib/ai/user-question";
+import { formatInteractionUserSummary } from "@/lib/ai/user-question";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { ChatMultiSelectCard } from "./ChatMultiSelectCard";
 import { Copy, RefreshCw, Trash2, ArrowDown, Paperclip, X as XIcon, FileSpreadsheet, ImageIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -31,7 +38,25 @@ export type Message = {
   role: "user" | "assistant";
   content: string;
   createdAt?: string;
+  interaction?: UserQuestionPrompt | null;
+  interactionStatus?: "pending" | "answered" | "expired";
+  toolCallId?: string | null;
 };
+
+/** Keep the last row per id so stale stream updates cannot duplicate React keys. */
+function dedupeMessagesById(messages: Message[]): Message[] {
+  const lastIndexById = new Map<string, number>();
+  messages.forEach((m, i) => lastIndexById.set(m.id, i));
+  return messages.filter((m, i) => lastIndexById.get(m.id) === i);
+}
+
+function upsertAssistantMessage(prev: Message[], next: Message): Message[] {
+  const idx = prev.findIndex((m) => m.id === next.id);
+  if (idx >= 0) {
+    return prev.map((m, i) => (i === idx ? { ...m, ...next } : m));
+  }
+  return [...prev, next];
+}
 
 export type ChatProject = {
   id: string;
@@ -42,11 +67,60 @@ export type ChatProject = {
   createdAt?: string;
 };
 
+export type ChatUiContext = "target_list" | "crm_pipeline" | "global";
+
+export type ChatPanelSendOptions = {
+  signal?: AbortSignal;
+  mode?: "default" | "deep_research" | "web_search";
+  attachments?: File[];
+  onStreamToken?: (text: string) => void;
+  onStreamEvent?: (event: ChatSseEvent) => void;
+  interactionResponse?: InteractionResponsePayload;
+  athleteId?: string;
+  uiContext?: ChatUiContext;
+};
+
+function withChatRoutingOptions(
+  options: ChatPanelSendOptions | undefined,
+  athleteId?: string,
+  uiContext?: ChatUiContext
+): ChatPanelSendOptions | undefined {
+  if (!athleteId && !uiContext) return options;
+  return {
+    ...options,
+    ...(athleteId ? { athleteId } : {}),
+    ...(uiContext ? { uiContext } : {}),
+  };
+}
+
 const NEAR_BOTTOM_THRESHOLD = 80;
 
 /** Abort hung chat requests so the UI does not stay on "AI is thinking" forever (network/proxy stalls). CRM/tool-heavy turns can exceed 3m. */
 const CHAT_SEND_TIMEOUT_MS = 900_000;
 const FOREST_GREEN = "#2E7040";
+/** Former assistant bubble — reused for the message composer. */
+const COMPOSER_SURFACE = "rounded-3xl border border-white/10 bg-[#1A1F1C] shadow-sm";
+
+function buildUserInitials(profile: Profile | null): string {
+  const first = String(profile?.first_name ?? "").trim();
+  const last = String(profile?.last_name ?? "").trim();
+  if (first && last) {
+    return `${first[0] ?? ""}${last[0] ?? ""}`.toUpperCase();
+  }
+  if (first.length >= 2) return first.slice(0, 2).toUpperCase();
+  if (first.length === 1) return first.toUpperCase();
+  const email = String(profile?.email ?? "").trim();
+  if (email.includes("@")) {
+    const local = (email.split("@")[0] ?? "").trim();
+    const parts = local.split(/[._-]+/).filter(Boolean);
+    if (parts.length >= 2) {
+      return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase();
+    }
+    if (parts[0]?.length >= 2) return parts[0].slice(0, 2).toUpperCase();
+    if (parts[0]) return parts[0][0]!.toUpperCase();
+  }
+  return "U";
+}
 
 function isAbortError(e: unknown): boolean {
   return (
@@ -66,13 +140,11 @@ export type ChatPanelProps = {
     messages: Message[],
     project: ChatProject,
     conversationId: string,
-    options?: {
-      signal?: AbortSignal;
-      mode?: "default" | "deep_research" | "web_search";
-      attachments?: File[];
-    }
-  ) => Promise<string>;
+    options?: ChatPanelSendOptions
+  ) => Promise<PostAiChatResult>;
   placeholder?: string;
+  athleteId?: string;
+  uiContext?: ChatUiContext;
   /** Hides project sidebar; use in embedded panels (e.g. CRM drafting). */
   layout?: "default" | "embedded";
   /** Fired after a successful assistant reply (send or regenerate). */
@@ -94,26 +166,41 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
     layout = "default",
     onAssistantReply,
     embeddedDedicatedProjectName,
+    athleteId,
+    uiContext,
   },
   ref
 ) {
+  const { profile } = useAuth();
+  const userInitials = buildUserInitials(profile);
   const [projects, setProjects] = useState<ChatProject[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string>("");
   const [activeConversationId, setActiveConversationId] = useState<string>("");
+  const [conversationReady, setConversationReady] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [bootLoading, setBootLoading] = useState(true);
   const [projectLoading, setProjectLoading] = useState(false);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [streamingAssistantId, setStreamingAssistantId] = useState<string | null>(null);
+  const [streamingSources, setStreamingSources] = useState<string[]>([]);
+  const [streamingWebSources, setStreamingWebSources] = useState<ChatSseWebSource[]>([]);
+  const [streamingToolStatus, setStreamingToolStatus] = useState<string | null>(null);
   const [sendMode, setSendMode] = useState<"default" | "deep_research" | "web_search">("default");
   const [attachments, setAttachments] = useState<File[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [instructionsModalOpen, setInstructionsModalOpen] = useState(false);
   const [memoryModalOpen, setMemoryModalOpen] = useState(false);
+  const [renameModalOpen, setRenameModalOpen] = useState(false);
+  const [newProjectModalOpen, setNewProjectModalOpen] = useState(false);
   const [instructionsDraft, setInstructionsDraft] = useState("");
   const [memoryDraft, setMemoryDraft] = useState("");
+  const [renameDraft, setRenameDraft] = useState("");
+  const [newProjectDraft, setNewProjectDraft] = useState("");
   const [savingProjectMeta, setSavingProjectMeta] = useState(false);
+  const [renamingProject, setRenamingProject] = useState(false);
+  const [creatingProject, setCreatingProject] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
@@ -121,6 +208,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   const abortSendRef = useRef<AbortController | null>(null);
   const messagesRef = useRef<Message[]>([]);
   messagesRef.current = messages;
+  const pendingInteractionRef = useRef<{ toolCallId: string; prompt: UserQuestionPrompt } | null>(null);
   const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
 
   const fetchProjects = useCallback(async () => {
@@ -139,11 +227,17 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
     return nextProjects;
   }, []);
 
-  const loadConversationForProject = useCallback(async (projectId: string) => {
+  const loadConversationForProject = useCallback(async (projectId: string, conversationId?: string) => {
     if (!projectId) return;
     setProjectLoading(true);
+    setConversationReady(false);
     try {
-      const res = await fetch(`/api/ai/projects/${projectId}/conversation`, { credentials: "include" });
+      const qs = conversationId?.trim()
+        ? `?conversation_id=${encodeURIComponent(conversationId.trim())}`
+        : "";
+      const res = await fetch(`/api/ai/projects/${projectId}/conversation${qs}`, {
+        credentials: "include",
+      });
       if (!res.ok) throw new Error("Failed to load conversation");
       const data = await res.json();
       const nextMessages: Message[] = (Array.isArray(data?.messages) ? data.messages : []).map((m: any) => ({
@@ -151,12 +245,33 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
         role: m.role,
         content: String(m.content ?? ""),
         createdAt: m.createdAt ? String(m.createdAt) : undefined,
+        interaction: m.interaction ?? null,
+        interactionStatus: m.interactionStatus ?? undefined,
+        toolCallId: m.toolCallId ?? null,
       }));
+      const pendingFromServer = data?.pending_interaction as
+        | { tool_call_id?: string; prompt?: UserQuestionPrompt }
+        | null
+        | undefined;
+      if (pendingFromServer?.tool_call_id && pendingFromServer?.prompt) {
+        pendingInteractionRef.current = {
+          toolCallId: String(pendingFromServer.tool_call_id),
+          prompt: pendingFromServer.prompt,
+        };
+      } else {
+        const pending = nextMessages.find(
+          (m) => m.role === "assistant" && m.interactionStatus === "pending" && m.interaction && m.toolCallId
+        );
+        pendingInteractionRef.current = pending?.interaction && pending.toolCallId
+          ? { toolCallId: pending.toolCallId, prompt: pending.interaction }
+          : null;
+      }
       setActiveConversationId(String(data?.conversation_id ?? ""));
-      setMessages(nextMessages);
+      setMessages(dedupeMessagesById(nextMessages));
       setShowJumpToLatest(false);
     } finally {
       setProjectLoading(false);
+      setConversationReady(true);
     }
   }, []);
 
@@ -238,11 +353,19 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   }, [fetchProjects, embeddedDedicatedProjectName]);
 
   useEffect(() => {
-    if (!activeProjectId || bootLoading || loading) return;
+    abortSendRef.current?.abort();
+    setActiveConversationId("");
+    setConversationReady(false);
+    pendingInteractionRef.current = null;
+  }, [activeProjectId]);
+
+  useEffect(() => {
+    if (!activeProjectId || bootLoading) return;
     loadConversationForProject(activeProjectId).catch((e) => {
       console.error("[ChatPanel] load conversation error", e);
+      setConversationReady(false);
     });
-  }, [activeProjectId, bootLoading, loading, loadConversationForProject]);
+  }, [activeProjectId, bootLoading, loadConversationForProject]);
 
   const isNearBottom = useCallback(() => {
     const el = scrollRef.current;
@@ -279,13 +402,220 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
     }
   }, [messages, loading, isNearBottom, scrollToBottom]);
 
+  const applyAssistantResult = useCallback(
+    (result: PostAiChatResult, streamMsgId: string, _streamStarted: boolean) => {
+      if (result.status === "interaction_required" && result.interaction) {
+        pendingInteractionRef.current = {
+          toolCallId: result.interaction.tool_call_id,
+          prompt: result.interaction.prompt,
+        };
+        const assistantMsg: Message = {
+          id: streamMsgId,
+          role: "assistant",
+          content: result.message,
+          interaction: result.interaction.prompt,
+          interactionStatus: "pending",
+          toolCallId: result.interaction.tool_call_id,
+          createdAt: new Date().toISOString(),
+        };
+        setMessages((prev) => dedupeMessagesById(upsertAssistantMessage(prev, assistantMsg)));
+        return;
+      }
+      pendingInteractionRef.current = null;
+      const assistantMsg: Message = {
+        id: streamMsgId,
+        role: "assistant",
+        content: result.message,
+        createdAt: new Date().toISOString(),
+      };
+      setMessages((prev) => dedupeMessagesById(upsertAssistantMessage(prev, assistantMsg)));
+      onAssistantReply?.(result.message);
+      setProjects((prev) =>
+        prev.map((p) =>
+          p.id === activeProject?.id ? { ...p, updatedAt: new Date().toISOString() } : p
+        )
+      );
+    },
+    [activeProject?.id, onAssistantReply]
+  );
+
+  const submitInteractionResponse = useCallback(
+    async (response: InteractionResponsePayload, userSummary: string) => {
+      if (!activeProject || !activeConversationId || !conversationReady || projectLoading || loading) return;
+
+      setMessages((prev) =>
+        dedupeMessagesById(
+          prev
+            .map((m) =>
+              m.interactionStatus === "pending" ? { ...m, interactionStatus: "answered" as const } : m
+            )
+            .concat({
+              id: crypto.randomUUID(),
+              role: "user",
+              content: userSummary,
+              createdAt: new Date().toISOString(),
+            })
+        )
+      );
+      pendingInteractionRef.current = null;
+      setLoading(true);
+      setShowJumpToLatest(false);
+
+      const ac = new AbortController();
+      abortSendRef.current = ac;
+      const timeoutId = window.setTimeout(() => ac.abort(), CHAT_SEND_TIMEOUT_MS);
+      const streamMsgId = crypto.randomUUID();
+      let streamStarted = false;
+      setStreamingSources([]);
+      setStreamingWebSources([]);
+      setStreamingToolStatus(null);
+
+      const followUpMessages: Message[] = response.dismissed
+        ? [{ id: crypto.randomUUID(), role: "user", content: userSummary }]
+        : [];
+
+      try {
+        const result = await onSend(
+          followUpMessages,
+          activeProject,
+          activeConversationId,
+          withChatRoutingOptions(
+            {
+          signal: ac.signal,
+          mode: sendMode,
+          interactionResponse: response,
+          onStreamToken: (token) => {
+            if (!streamStarted) {
+              streamStarted = true;
+              setStreamingAssistantId(streamMsgId);
+              setStreamingToolStatus(null);
+              setMessages((prev) =>
+                dedupeMessagesById(
+                  upsertAssistantMessage(prev, {
+                    id: streamMsgId,
+                    role: "assistant",
+                    content: token,
+                    createdAt: new Date().toISOString(),
+                  })
+                )
+              );
+            } else {
+              setMessages((prev) =>
+                dedupeMessagesById(
+                  prev.map((m) =>
+                    m.id === streamMsgId ? { ...m, content: m.content + token } : m
+                  )
+                )
+              );
+            }
+          },
+          onStreamEvent: (event) => {
+            if (event.type === "meta" && event.phase === "tools") {
+              setStreamingToolStatus(
+                event.tools.length
+                  ? `Running tools: ${event.tools.join(", ")}`
+                  : "Running tools…"
+              );
+            } else if (event.type === "sources") {
+              setStreamingSources(event.sources);
+              setStreamingWebSources(event.web_sources);
+            } else if (event.type === "interaction") {
+              pendingInteractionRef.current = {
+                toolCallId: event.tool_call_id,
+                prompt: event.prompt,
+              };
+              setMessages((prev) => {
+                const patch: Message = {
+                  id: streamMsgId,
+                  role: "assistant",
+                  content:
+                    event.message ??
+                    prev.find((m) => m.id === streamMsgId)?.content ??
+                    "",
+                  interaction: event.prompt,
+                  interactionStatus: "pending",
+                  toolCallId: event.tool_call_id,
+                  createdAt:
+                    prev.find((m) => m.id === streamMsgId)?.createdAt ?? new Date().toISOString(),
+                };
+                return dedupeMessagesById(upsertAssistantMessage(prev, patch));
+              });
+            }
+          },
+        },
+        athleteId,
+        uiContext
+          )
+        );
+        applyAssistantResult(result, streamMsgId, streamStarted);
+      } catch (e: unknown) {
+        const details = isAbortError(e)
+          ? "Request timed out or was stopped. Try again."
+          : e instanceof Error && e.message
+            ? e.message
+            : "Failed to get response.";
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: `Error: ${details.replace(/^Error:\s*/i, "")}`,
+            createdAt: new Date().toISOString(),
+          },
+        ]);
+      } finally {
+        window.clearTimeout(timeoutId);
+        abortSendRef.current = null;
+        setLoading(false);
+        setStreamingAssistantId(null);
+        setStreamingSources([]);
+        setStreamingWebSources([]);
+        setStreamingToolStatus(null);
+      }
+    },
+    [
+      loading,
+      activeProject,
+      activeConversationId,
+      conversationReady,
+      projectLoading,
+      onSend,
+      sendMode,
+      applyAssistantResult,
+      athleteId,
+      uiContext,
+    ]
+  );
+
   const sendWithText = useCallback(
     async (text: string, clearInput: boolean) => {
       const trimmed = text.trim();
-      // Allow a send that has no text but includes attachments (e.g. "here's the target list screenshot").
-      if ((!trimmed && attachments.length === 0) || loading || !activeProject || !activeConversationId) return;
+      if (
+        (!trimmed && attachments.length === 0) ||
+        loading ||
+        projectLoading ||
+        !conversationReady ||
+        !activeProject ||
+        !activeConversationId
+      ) {
+        return;
+      }
 
-      // Capture + reset now so the UI never sends the same files twice on rapid enter-presses.
+      if (pendingInteractionRef.current && trimmed) {
+        const { toolCallId } = pendingInteractionRef.current;
+        if (clearInput) setInput("");
+        await submitInteractionResponse(
+          {
+            conversation_id: activeConversationId,
+            tool_call_id: toolCallId,
+            selected_ids: [],
+            dismissed: true,
+          },
+          trimmed
+        );
+        return;
+      }
+
       const attachmentsToSend = attachments;
       const attachmentSummary =
         attachmentsToSend.length > 0
@@ -297,7 +627,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
         content: `${trimmed}${attachmentSummary}`.trim() || "[attachment]",
         createdAt: new Date().toISOString(),
       };
-      const fullHistory = [...messagesRef.current, userMsg];
+      const fullHistory = dedupeMessagesById([...messagesRef.current, userMsg]);
       setMessages(fullHistory);
       if (clearInput) setInput("");
       setAttachments([]);
@@ -308,43 +638,138 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
       const ac = new AbortController();
       abortSendRef.current = ac;
       const timeoutId = window.setTimeout(() => ac.abort(), CHAT_SEND_TIMEOUT_MS);
+      const streamMsgId = crypto.randomUUID();
+      let streamStarted = false;
+      setStreamingSources([]);
+      setStreamingWebSources([]);
+      setStreamingToolStatus(null);
       try {
-        const assistantContent = await onSend(fullHistory, activeProject, activeConversationId, {
+        const routingOptions = withChatRoutingOptions(
+          {
           signal: ac.signal,
           mode: sendMode,
           attachments: attachmentsToSend,
-        });
-        const assistantMsg: Message = {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: assistantContent,
-          createdAt: new Date().toISOString(),
-        };
-        setMessages((prev) => [...prev, assistantMsg]);
-        onAssistantReply?.(assistantContent);
-        setProjects((prev) =>
-          prev.map((p) => (p.id === activeProject.id ? { ...p, updatedAt: new Date().toISOString() } : p))
-        );
+          onStreamToken: (token) => {
+            if (!streamStarted) {
+              streamStarted = true;
+              setStreamingAssistantId(streamMsgId);
+              setStreamingToolStatus(null);
+              setMessages((prev) =>
+                dedupeMessagesById(
+                  upsertAssistantMessage(prev, {
+                    id: streamMsgId,
+                    role: "assistant",
+                    content: token,
+                    createdAt: new Date().toISOString(),
+                  })
+                )
+              );
+            } else {
+              setMessages((prev) =>
+                dedupeMessagesById(
+                  prev.map((m) =>
+                    m.id === streamMsgId ? { ...m, content: m.content + token } : m
+                  )
+                )
+              );
+            }
+          },
+          onStreamEvent: (event) => {
+            if (event.type === "meta" && event.phase === "tools") {
+              setStreamingToolStatus(
+                event.tools.length
+                  ? `Running tools: ${event.tools.join(", ")}`
+                  : "Running tools…"
+              );
+            } else if (event.type === "sources") {
+              setStreamingSources(event.sources);
+              setStreamingWebSources(event.web_sources);
+            } else if (event.type === "interaction") {
+              pendingInteractionRef.current = {
+                toolCallId: event.tool_call_id,
+                prompt: event.prompt,
+              };
+              setMessages((prev) => {
+                const patch: Message = {
+                  id: streamMsgId,
+                  role: "assistant",
+                  content:
+                    event.message ??
+                    prev.find((m) => m.id === streamMsgId)?.content ??
+                    "",
+                  interaction: event.prompt,
+                  interactionStatus: "pending",
+                  toolCallId: event.tool_call_id,
+                  createdAt:
+                    prev.find((m) => m.id === streamMsgId)?.createdAt ?? new Date().toISOString(),
+                };
+                return dedupeMessagesById(upsertAssistantMessage(prev, patch));
+              });
+            }
+          },
+        },
+        athleteId,
+        uiContext
+      );
+        // #region agent log
+        fetch("http://127.0.0.1:7310/ingest/3db61d27-132c-4ea5-8254-c4515c90a750", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a18aef" },
+          body: JSON.stringify({
+            sessionId: "a18aef",
+            runId: "post-fix",
+            hypothesisId: "P2-A",
+            location: "ChatPanel.tsx:sendWithText",
+            message: "chat send routing options",
+            data: {
+              athleteId: routingOptions?.athleteId ?? null,
+              uiContext: routingOptions?.uiContext ?? null,
+            },
+            timestamp: Date.now(),
+          }),
+        }).catch(() => {});
+        // #endregion
+        const result = await onSend(fullHistory, activeProject, activeConversationId, routingOptions);
+        applyAssistantResult(result, streamMsgId, streamStarted);
       } catch (e: unknown) {
         const details = isAbortError(e)
           ? "Request timed out or was stopped. Try again."
           : e instanceof Error && e.message
             ? e.message
             : "Failed to get response.";
-        const errMsg: Message = {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: `Error: ${details.replace(/^Error:\s*/i, "")}`,
-          createdAt: new Date().toISOString(),
-        };
-        setMessages((prev) => [...prev, errMsg]);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: `Error: ${details.replace(/^Error:\s*/i, "")}`,
+            createdAt: new Date().toISOString(),
+          },
+        ]);
       } finally {
         window.clearTimeout(timeoutId);
         abortSendRef.current = null;
         setLoading(false);
+        setStreamingAssistantId(null);
+        setStreamingSources([]);
+        setStreamingWebSources([]);
+        setStreamingToolStatus(null);
       }
     },
-    [loading, activeProject, activeConversationId, onSend, onAssistantReply, attachments, sendMode]
+    [
+      loading,
+      activeProject,
+      activeConversationId,
+      onSend,
+      attachments,
+      sendMode,
+      applyAssistantResult,
+      submitInteractionResponse,
+      conversationReady,
+      projectLoading,
+      athleteId,
+      uiContext,
+    ]
   );
 
   const handleSend = async () => {
@@ -417,27 +842,82 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
     const upToUser = messages.slice(0, messages.indexOf(lastUser) + 1);
     setMessages(upToUser);
     setLoading(true);
+    const streamMsgId = crypto.randomUUID();
+    let streamStarted = false;
+    setStreamingSources([]);
+    setStreamingWebSources([]);
+    setStreamingToolStatus(null);
+    pendingInteractionRef.current = null;
     try {
-      const assistantContent = await onSend(upToUser, activeProject, activeConversationId, {
+      const result = await onSend(
+        upToUser,
+        activeProject,
+        activeConversationId,
+        withChatRoutingOptions(
+          {
         mode: sendMode,
-      });
-      const assistantMsg: Message = {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        content: assistantContent,
-        createdAt: new Date().toISOString(),
-      };
-      setMessages((prev) => [...prev, assistantMsg]);
-      onAssistantReply?.(assistantContent);
+        onStreamToken: (text) => {
+          if (!streamStarted) {
+            streamStarted = true;
+            setStreamingAssistantId(streamMsgId);
+            setStreamingToolStatus(null);
+            setMessages((prev) =>
+              dedupeMessagesById(
+                upsertAssistantMessage(prev, {
+                  id: streamMsgId,
+                  role: "assistant",
+                  content: text,
+                  createdAt: new Date().toISOString(),
+                })
+              )
+            );
+          } else {
+            setMessages((prev) =>
+              dedupeMessagesById(
+                prev.map((m) =>
+                  m.id === streamMsgId ? { ...m, content: m.content + text } : m
+                )
+              )
+            );
+          }
+        },
+        onStreamEvent: (event) => {
+          if (event.type === "meta" && event.phase === "tools") {
+            setStreamingToolStatus(
+              event.tools.length
+                ? `Running tools: ${event.tools.join(", ")}`
+                : "Running tools…"
+            );
+          } else if (event.type === "sources") {
+            setStreamingSources(event.sources);
+            setStreamingWebSources(event.web_sources);
+          } else if (event.type === "interaction") {
+            pendingInteractionRef.current = {
+              toolCallId: event.tool_call_id,
+              prompt: event.prompt,
+            };
+          }
+        },
+          },
+          athleteId,
+          uiContext
+        )
+      );
+      applyAssistantResult(result, streamMsgId, streamStarted);
     } catch {
       setMessages((prev) => [...prev, { id: crypto.randomUUID(), role: "assistant", content: "Error: Failed to get response." }]);
     } finally {
       setLoading(false);
+      setStreamingAssistantId(null);
+      setStreamingSources([]);
+      setStreamingWebSources([]);
+      setStreamingToolStatus(null);
     }
   };
 
   const clearChat = async () => {
     if (!activeProject) return;
+    abortSendRef.current?.abort();
     const res = await fetch(`/api/ai/projects/${activeProject.id}/conversation`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -446,62 +926,98 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
     });
     if (!res.ok) return;
     const data = await res.json();
-    setActiveConversationId(String(data?.conversation_id ?? ""));
-    setMessages([]);
+    const newConversationId = String(data?.conversation_id ?? "");
+    pendingInteractionRef.current = null;
     setInput("");
     setShowJumpToLatest(false);
+    if (newConversationId) {
+      await loadConversationForProject(activeProject.id, newConversationId);
+    } else {
+      setActiveConversationId("");
+      setMessages([]);
+      setConversationReady(true);
+    }
+  };
+
+  const openNewProjectModal = () => {
+    setNewProjectDraft("");
+    setNewProjectModalOpen(true);
   };
 
   const createProject = async () => {
-    const name = window.prompt("New project name");
-    if (!name?.trim()) return;
-    const res = await fetch("/api/ai/projects", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: name.trim(), instructions: "", memory_notes: [] }),
-      credentials: "include",
-    });
-    if (!res.ok) return;
-    const created = await res.json();
-    const project: ChatProject = {
-      id: created.project_id,
-      name: created.name,
-      instructions: created.instructions ?? "",
-      memoryNotes: Array.isArray(created.memory_notes) ? created.memory_notes.map((n: unknown) => String(n)).filter(Boolean) : [],
-      updatedAt: created.updated_at ?? new Date().toISOString(),
-      createdAt: created.created_at ?? undefined,
-    };
-    setProjects((prev) => [project, ...prev]);
-    setActiveProjectId(project.id);
-    setActiveConversationId(String(created.conversation_id ?? ""));
-    setMessages([]);
+    const name = newProjectDraft.trim();
+    if (!name) {
+      setNewProjectModalOpen(false);
+      return;
+    }
+    setCreatingProject(true);
+    try {
+      const res = await fetch("/api/ai/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, instructions: "", memory_notes: [] }),
+        credentials: "include",
+      });
+      if (!res.ok) return;
+      const created = await res.json();
+      const project: ChatProject = {
+        id: created.project_id,
+        name: created.name,
+        instructions: created.instructions ?? "",
+        memoryNotes: Array.isArray(created.memory_notes) ? created.memory_notes.map((n: unknown) => String(n)).filter(Boolean) : [],
+        updatedAt: created.updated_at ?? new Date().toISOString(),
+        createdAt: created.created_at ?? undefined,
+      };
+      setProjects((prev) => [project, ...prev]);
+      setActiveProjectId(project.id);
+      setActiveConversationId(String(created.conversation_id ?? ""));
+      setMessages([]);
+      setNewProjectModalOpen(false);
+    } finally {
+      setCreatingProject(false);
+    }
+  };
+
+  const editProjectName = () => {
+    if (!activeProject) return;
+    setRenameDraft(activeProject.name);
+    setRenameModalOpen(true);
   };
 
   const renameProject = async () => {
     if (!activeProject) return;
-    const name = window.prompt("Rename project", activeProject.name);
-    if (!name?.trim()) return;
-    const res = await fetch(`/api/ai/projects/${activeProject.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: name.trim() }),
-      credentials: "include",
-    });
-    if (!res.ok) return;
-    const updated = await res.json();
-    setProjects((prev) =>
-      prev.map((p) =>
-        p.id === activeProject.id
-          ? {
-              ...p,
-              name: updated.name,
-              instructions: updated.instructions ?? "",
-              memoryNotes: Array.isArray(updated.memory_notes) ? updated.memory_notes.map((n: unknown) => String(n)).filter(Boolean) : [],
-              updatedAt: updated.updated_at ?? new Date().toISOString(),
-            }
-          : p
-      )
-    );
+    const name = renameDraft.trim();
+    if (!name || name === activeProject.name) {
+      setRenameModalOpen(false);
+      return;
+    }
+    setRenamingProject(true);
+    try {
+      const res = await fetch(`/api/ai/projects/${activeProject.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+        credentials: "include",
+      });
+      if (!res.ok) return;
+      const updated = await res.json();
+      setProjects((prev) =>
+        prev.map((p) =>
+          p.id === activeProject.id
+            ? {
+                ...p,
+                name: updated.name,
+                instructions: updated.instructions ?? "",
+                memoryNotes: Array.isArray(updated.memory_notes) ? updated.memory_notes.map((n: unknown) => String(n)).filter(Boolean) : [],
+                updatedAt: updated.updated_at ?? new Date().toISOString(),
+              }
+            : p
+        )
+      );
+      setRenameModalOpen(false);
+    } finally {
+      setRenamingProject(false);
+    }
   };
 
   const editProjectInstructions = async () => {
@@ -616,7 +1132,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
             size="sm"
             className="w-full text-white"
             style={{ backgroundColor: FOREST_GREEN }}
-            onClick={createProject}
+            onClick={openNewProjectModal}
             disabled={loading || projectLoading || bootLoading}
           >
             New project
@@ -639,11 +1155,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
                 disabled={loading || projectLoading || bootLoading}
               >
                 <div className="text-sm font-medium truncate">{project.name}</div>
-                <div className="truncate text-[11px] opacity-80">
-                  {project.memoryNotes.length
-                    ? `${project.memoryNotes.length} memory note${project.memoryNotes.length === 1 ? "" : "s"}`
-                    : "No memory notes"}
-                </div>
+                {project.memoryNotes.length > 0 ? (
+                  <div className="truncate text-[11px] opacity-80">
+                    {project.memoryNotes.length} memory note
+                    {project.memoryNotes.length === 1 ? "" : "s"}
+                  </div>
+                ) : null}
               </button>
             ))}
           </div>
@@ -655,7 +1172,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
             <Button
               variant="outline"
               size="sm"
-              onClick={renameProject}
+              onClick={editProjectName}
               disabled={loading || !activeProject}
               className="border-white/15 bg-transparent text-[#E6E0D5] hover:bg-white/5"
             >
@@ -745,35 +1262,98 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
               {/* Avatar / initial */}
               <div
                 className={cn(
-                  "flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-medium",
+                  "flex h-8 w-8 shrink-0 items-center justify-center rounded-full font-medium tracking-tight",
+                  msg.role === "user" && userInitials.length > 1 ? "text-[10px]" : "text-xs",
                   msg.role === "user"
                     ? "bg-[#2E7040] text-[#EDF7F0]"
                     : "bg-[#2A2F2B] text-[#C9C2B6]"
                 )}
               >
-                {msg.role === "user" ? "U" : "AI"}
+                {msg.role === "user" ? userInitials : "MM"}
               </div>
 
               <div
                 className={cn(
-                  "flex max-w-[88%] flex-col gap-1",
-                  msg.role === "user" ? "items-end" : "items-start"
+                  "flex min-w-0 flex-col gap-1",
+                  msg.role === "user" ? "max-w-[88%] items-end" : "flex-1 items-start"
                 )}
               >
-                <div
-                  className={cn(
-                    "rounded-3xl border px-4 py-2.5 shadow-sm",
-                    msg.role === "user"
-                      ? "border-[#2E7040]/60 bg-[#2E7040] text-[#F2FFF5]"
-                      : "border-white/10 bg-[#1A1F1C] text-[#EFEAE1]"
-                  )}
-                >
-                  {msg.role === "assistant" ? (
-                    <ChatMarkdown content={msg.content} />
-                  ) : (
+                {msg.role === "assistant" ? (
+                  <div
+                    className="w-full py-1 pr-2 text-[#EFEAE1]"
+                    style={{ fontFamily: "var(--font-body)" }}
+                  >
+                    {msg.content.trim() ? (
+                      <ChatMarkdown content={msg.content} className="text-[15px] text-[#EFEAE1]" />
+                    ) : null}
+                    {msg.interaction && msg.interactionStatus === "expired" ? (
+                      <p className="mt-2 text-sm text-[#C9A227]">
+                        This category picker expired. Send your email request again, or type your picks as a normal
+                        message.
+                      </p>
+                    ) : null}
+                    {msg.interaction &&
+                    msg.interactionStatus === "pending" &&
+                    msg.toolCallId ? (
+                      <ChatMultiSelectCard
+                        prompt={msg.interaction}
+                        disabled={loading || !conversationReady || projectLoading}
+                        onSubmit={(selectedIds, otherText) => {
+                          void submitInteractionResponse(
+                            {
+                              conversation_id: activeConversationId,
+                              tool_call_id: msg.toolCallId!,
+                              selected_ids: selectedIds,
+                              other_text: otherText,
+                            },
+                            formatInteractionUserSummary(msg.interaction!, {
+                              conversation_id: activeConversationId,
+                              tool_call_id: msg.toolCallId!,
+                              selected_ids: selectedIds,
+                              other_text: otherText,
+                            })
+                          );
+                        }}
+                        onSkip={() => {
+                          void submitInteractionResponse(
+                            {
+                              conversation_id: activeConversationId,
+                              tool_call_id: msg.toolCallId!,
+                              selected_ids: [],
+                              skipped: true,
+                            },
+                            formatInteractionUserSummary(msg.interaction!, {
+                              conversation_id: activeConversationId,
+                              tool_call_id: msg.toolCallId!,
+                              selected_ids: [],
+                              skipped: true,
+                            })
+                          );
+                        }}
+                        onDismiss={() => {
+                          void submitInteractionResponse(
+                            {
+                              conversation_id: activeConversationId,
+                              tool_call_id: msg.toolCallId!,
+                              selected_ids: [],
+                              dismissed: true,
+                            },
+                            formatInteractionUserSummary(msg.interaction!, {
+                              conversation_id: activeConversationId,
+                              tool_call_id: msg.toolCallId!,
+                              selected_ids: [],
+                              dismissed: true,
+                            })
+                          );
+                        }}
+                      />
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="rounded-3xl border border-[#2E7040]/60 bg-[#2E7040] px-4 py-2.5 text-[#F2FFF5] shadow-sm">
                     <div className="whitespace-pre-wrap text-sm">{msg.content}</div>
-                  )}
-                </div>
+                  </div>
+                )}
                 <div className="flex items-center gap-1 px-1">
                   {msg.createdAt && (
                     <span className="text-xs text-[#9E978B]">
@@ -802,16 +1382,49 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
             </div>
           ))}
 
-          {(loading || projectLoading || bootLoading) && (
+          {(loading || projectLoading || bootLoading) && !streamingAssistantId && (
             <div className="flex gap-3 mb-4 items-start">
               <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#2A2F2B] text-xs font-medium text-[#C9C2B6]">
-                AI
+                MM
               </div>
-              <div className="flex flex-wrap items-center gap-2 min-w-0">
-                <div className="rounded-3xl border border-white/10 bg-[#1A1F1C] px-4 py-3 text-sm text-[#C9C2B6]">
-                  {projectLoading || bootLoading ? "Loading project" : "AI is thinking"}
+              <div className="flex flex-col gap-2 min-w-0 flex-1">
+                <div
+                  className="py-1 text-sm text-[#C9C2B6]"
+                  style={{ fontFamily: "var(--font-body)" }}
+                >
+                  {projectLoading || bootLoading
+                    ? "Loading project"
+                    : streamingToolStatus ?? "AI is thinking"}
                   <span className="inline-block w-4 ml-1 animate-pulse">...</span>
                 </div>
+                {(streamingSources.length > 0 || streamingWebSources.length > 0) && (
+                  <div className="rounded-2xl border border-white/10 bg-[#151917] px-3 py-2 text-xs text-[#AEA79A]">
+                    {streamingSources.length > 0 && (
+                      <p className="mb-1">
+                        <span className="font-medium text-[#C9C2B6]">Sources: </span>
+                        {streamingSources.join("; ")}
+                      </p>
+                    )}
+                    {streamingWebSources.length > 0 && (
+                      <ul className="list-disc pl-4 space-y-0.5">
+                        {streamingWebSources.map((s) => (
+                          <li key={s.url}>
+                            <a
+                              href={s.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[#8FC99E] hover:underline"
+                            >
+                              {s.title?.trim() || s.url}
+                            </a>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-2 min-w-0 shrink-0">
                 {loading && !projectLoading && !bootLoading && (
                   <Button
                     type="button"
@@ -954,7 +1567,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
               if (fileInputRef.current) fileInputRef.current.value = "";
             }}
           />
-          <div className="flex items-end gap-2 rounded-3xl border border-white/10 bg-[#0D100F] p-2">
+          <div className={cn("flex items-end gap-2 p-2", COMPOSER_SURFACE)}>
             <Tooltip content="Attach screenshot or spreadsheet (.xlsx / .csv)">
               <Button
                 type="button"
@@ -1057,6 +1670,96 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
                 style={{ backgroundColor: FOREST_GREEN }}
               >
                 Save
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {renameModalOpen && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-lg rounded-2xl border border-white/15 bg-[#151917] p-4 shadow-xl">
+            <h3 className="mb-2 text-base font-semibold text-[#F4F1EB]">Rename project</h3>
+            <p className="mb-3 text-xs text-[#AFA89C]">
+              Update the project name shown in your chat sidebar.
+            </p>
+            <input
+              value={renameDraft}
+              onChange={(e) => setRenameDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  if (!renamingProject) void renameProject();
+                }
+              }}
+              className="w-full rounded-md border border-white/15 bg-[#101311] px-3 py-2 text-sm text-[#F4F1EB] placeholder:text-[#8E877A] focus:outline-none focus:ring-2 focus:ring-[#2E7040]/60"
+              placeholder="Project name"
+              disabled={renamingProject}
+              autoFocus
+            />
+            <div className="mt-3 flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setRenameModalOpen(false)}
+                disabled={renamingProject}
+                className="text-[#D1CABF] hover:bg-white/5"
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => void renameProject()}
+                disabled={renamingProject || !renameDraft.trim()}
+                className="text-white"
+                style={{ backgroundColor: FOREST_GREEN }}
+              >
+                Save
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {newProjectModalOpen && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-lg rounded-2xl border border-white/15 bg-[#151917] p-4 shadow-xl">
+            <h3 className="mb-2 text-base font-semibold text-[#F4F1EB]">New project</h3>
+            <p className="mb-3 text-xs text-[#AFA89C]">
+              Create a new project to keep chats and memory notes grouped together.
+            </p>
+            <input
+              value={newProjectDraft}
+              onChange={(e) => setNewProjectDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  if (!creatingProject) void createProject();
+                }
+              }}
+              className="w-full rounded-md border border-white/15 bg-[#101311] px-3 py-2 text-sm text-[#F4F1EB] placeholder:text-[#8E877A] focus:outline-none focus:ring-2 focus:ring-[#2E7040]/60"
+              placeholder="Project name"
+              disabled={creatingProject}
+              autoFocus
+            />
+            <div className="mt-3 flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setNewProjectModalOpen(false)}
+                disabled={creatingProject}
+                className="text-[#D1CABF] hover:bg-white/5"
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => void createProject()}
+                disabled={creatingProject || !newProjectDraft.trim()}
+                className="text-white"
+                style={{ backgroundColor: FOREST_GREEN }}
+              >
+                Create
               </Button>
             </div>
           </div>

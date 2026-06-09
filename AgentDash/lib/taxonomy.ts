@@ -23,6 +23,8 @@ export type TaxonomyNodeRow = {
   tier: string;
   category: string;
   sort_order: number;
+  parent_id?: string | null;
+  is_group?: boolean;
 };
 
 /** Normalize category for comparison: lowercase, trim, collapse whitespace. */
@@ -140,14 +142,14 @@ export async function fetchTaxonomyNodesForSport(
   const [endemicRes, globalRes] = await Promise.all([
     supabase
       .from("sponsorship_taxonomies")
-      .select("id, sport, tier, category, sort_order")
+      .select("id, sport, tier, category, sort_order, parent_id, is_group")
       .eq("sport", endemicSport)
       .eq("tier", "ENDEMIC")
       .eq("is_active", true)
       .order("sort_order", { ascending: true }),
     supabase
       .from("sponsorship_taxonomies")
-      .select("id, sport, tier, category, sort_order")
+      .select("id, sport, tier, category, sort_order, parent_id, is_group")
       .eq("sport", TAXONOMY_NON_ENDEMIC_GLOBAL_SPORT)
       .eq("tier", "NON_ENDEMIC")
       .eq("is_active", true)
@@ -163,7 +165,7 @@ export async function fetchTaxonomyNodesForSport(
 
   const { data: legacyNon } = await supabase
     .from("sponsorship_taxonomies")
-    .select("id, sport, tier, category, sort_order")
+    .select("id, sport, tier, category, sort_order, parent_id, is_group")
     .eq("sport", endemicSport)
     .eq("tier", "NON_ENDEMIC")
     .eq("is_active", true)
@@ -185,6 +187,7 @@ export async function getTaxonomyBySport(sport: string | null): Promise<Taxonomy
   const endemic: string[] = [];
   const nonEndemic: string[] = [];
   for (const r of nodes) {
+    if (r.is_group) continue;
     if (r.tier === "ENDEMIC") endemic.push(r.category);
     else if (r.tier === "NON_ENDEMIC") nonEndemic.push(r.category);
   }

@@ -74,3 +74,31 @@ export async function getContractCategoryDisplay(
   if (error) throw new Error(error.message);
   return taxonomy?.category ?? "Unknown";
 }
+
+export async function markAthleteCategoriesCovered(
+  supabase: SupabaseClientLike,
+  athleteId: string,
+  taxonomyIds: string[]
+): Promise<void> {
+  const uniqueTaxonomyIds = Array.from(
+    new Set(
+      (taxonomyIds ?? [])
+        .filter((id) => typeof id === "string")
+        .map((id) => id.trim())
+        .filter(Boolean)
+    )
+  );
+
+  if (uniqueTaxonomyIds.length === 0) return;
+
+  const rows = uniqueTaxonomyIds.map((taxonomy_id) => ({
+    athlete_id: athleteId,
+    taxonomy_id,
+  }));
+
+  const { error } = await supabase
+    .from("athlete_covered_categories")
+    .upsert(rows, { onConflict: "athlete_id,taxonomy_id", ignoreDuplicates: true });
+
+  if (error) throw new Error(error.message);
+}

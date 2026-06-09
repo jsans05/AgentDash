@@ -59,6 +59,37 @@ export async function PATCH(
   if (body.category !== undefined) updates.category = String(body.category).trim();
   if (body.sort_order !== undefined) updates.sort_order = Number(body.sort_order);
   if (body.is_active !== undefined) updates.is_active = Boolean(body.is_active);
+  if (body.is_group !== undefined) updates.is_group = Boolean(body.is_group);
+  if (body.parent_id !== undefined) {
+    updates.parent_id =
+      typeof body.parent_id === "string" && body.parent_id.trim() ? body.parent_id.trim() : null;
+  }
+
+  if (updates.is_group === true && updates.parent_id) {
+    return NextResponse.json({ error: "Groups cannot have a parent" }, { status: 400 });
+  }
+
+  if (updates.parent_id) {
+    const { data: parentRow, error: parentErr } = await supabase
+      .from("sponsorship_taxonomies")
+      .select("id, sport, tier, is_group")
+      .eq("id", updates.parent_id as string)
+      .single();
+    if (parentErr || !parentRow) {
+      return NextResponse.json({ error: "Parent group not found" }, { status: 400 });
+    }
+    if (!parentRow.is_group) {
+      return NextResponse.json({ error: "parent_id must reference a group row" }, { status: 400 });
+    }
+    const sportCheck = (updates.sport as string) ?? existing.sport;
+    const tierCheck = (updates.tier as string) ?? existing.tier;
+    if (parentRow.sport !== sportCheck || parentRow.tier !== tierCheck) {
+      return NextResponse.json(
+        { error: "Child must share sport and tier with its parent group" },
+        { status: 400 }
+      );
+    }
+  }
 
   const { data, error } = await supabase
     .from("sponsorship_taxonomies")

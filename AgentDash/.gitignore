@@ -23,9 +23,14 @@ yarn-debug.log*
 yarn-error.log*
 
 # local env files (never commit)
-.env*.local
 .env
+.env.*
+*.env
+.env.keys
+.env*.local
 supabase.env
+!.env.example
+!supabase.env.example
 
 # vercel
 .vercel

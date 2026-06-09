@@ -3,17 +3,19 @@
 import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase/client";
+import { normalizeOrIlikeFragment } from "@/lib/supabase/ilike";
 
 type AthleteOption = {
   athlete_id: string;
   name: string;
 };
 
-function escapeForIlike(q: string): string {
-  return q.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
-}
+type CrmBrandIdeaQuickAddProps = {
+  /** Called after a successful add (e.g. refetch client-side pipeline data). `router.refresh()` still runs. */
+  onSuccess?: () => void;
+};
 
-export function CrmBrandIdeaQuickAdd() {
+export function CrmBrandIdeaQuickAdd({ onSuccess }: CrmBrandIdeaQuickAddProps = {}) {
   const router = useRouter();
   const [companyName, setCompanyName] = useState("");
   const [notes, setNotes] = useState("");
@@ -34,12 +36,11 @@ export function CrmBrandIdeaQuickAdd() {
     const t = setTimeout(async () => {
       setSearchingAthletes(true);
       try {
-        const escaped = escapeForIlike(q);
-        const pattern = `%${escaped}%`;
+        const orPattern = `%${normalizeOrIlikeFragment(q)}%`;
         const { data } = await supabase
           .from("athletes")
           .select("athlete_id, first_name, last_name")
-          .or(`first_name.ilike.${pattern},last_name.ilike.${pattern}`)
+          .or(`first_name.ilike.${orPattern},last_name.ilike.${orPattern}`)
           .limit(12);
 
         const rows: AthleteOption[] = (data ?? [])
@@ -108,6 +109,7 @@ export function CrmBrandIdeaQuickAdd() {
       setSelectedAthlete(null);
       setSearchOpen(false);
       router.refresh();
+      onSuccess?.();
     } finally {
       setSubmitting(false);
     }

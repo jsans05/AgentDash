@@ -2,13 +2,7 @@ import { createServerClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
 import Link from "next/link";
 import Image from "next/image";
-
-function escapeForIlike(q: string): string {
-  return q
-    .replace(/\\/g, "\\\\")
-    .replace(/%/g, "\\%")
-    .replace(/_/g, "\\_");
-}
+import { escapeForIlike, ilikeContains } from "@/lib/supabase/ilike";
 
 export default async function RosterPage({
   searchParams: searchParamsPromise,
@@ -63,8 +57,7 @@ export default async function RosterPage({
   // Search: names (incl. full "First Last"), sport, city, state, country, and agent (by agent name)
   if (searchParams.search?.trim()) {
     const term = searchParams.search.trim().replace(/,/g, " "); // commas would break .or()
-    const escaped = escapeForIlike(term);
-    const pattern = `%${escaped}%`;
+    const pattern = ilikeContains(term);
     const orParts = [
       `first_name.ilike.${pattern}`,
       `last_name.ilike.${pattern}`,
@@ -87,13 +80,13 @@ export default async function RosterPage({
         supabase
           .from("athletes")
           .select("athlete_id")
-          .ilike("first_name", `%${firstTok}%`)
-          .ilike("last_name", `%${middleTok}%`),
+          .ilike("first_name", ilikeContains(firstTok))
+          .ilike("last_name", ilikeContains(middleTok)),
         supabase
           .from("athletes")
           .select("athlete_id")
-          .ilike("first_name", `%${middleTokRev}%`)
-          .ilike("last_name", `%${lastTok}%`),
+          .ilike("first_name", ilikeContains(middleTokRev))
+          .ilike("last_name", ilikeContains(lastTok)),
       ]);
       const nameAthleteIds = [
         ...(fnMatches1.data?.map((r) => r.athlete_id) ?? []),
@@ -117,8 +110,8 @@ export default async function RosterPage({
           .from("profiles")
           .select("user_id")
           .eq("role", "agent")
-          .ilike("first_name", `%${firstTok}%`)
-          .ilike("last_name", `%${lastTok}%`);
+          .ilike("first_name", ilikeContains(firstTok))
+          .ilike("last_name", ilikeContains(lastTok));
         const fullNameAgentIds = fullNameAgents?.map((r) => r.user_id).filter(Boolean) ?? [];
         if (fullNameAgentIds.length > 0) {
           agentOrParts.push(`user_id.in.(${fullNameAgentIds.join(",")})`);

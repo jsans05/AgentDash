@@ -1,6 +1,20 @@
 import { createServerClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
+import { internalErrorResponse, logServerError } from "@/lib/api-errors";
 import { NextResponse } from "next/server";
+import { z } from "zod";
+
+const createAccoladeSchema = z
+  .object({
+    accolade: z.string().trim().min(1).max(300),
+  })
+  .strict();
+
+const deleteAccoladeSchema = z
+  .object({
+    index: z.number().int().min(0),
+  })
+  .strict();
 
 export async function POST(
   req: Request,
@@ -8,7 +22,11 @@ export async function POST(
 ) {
   const profile = await requireProfile();
   const supabase = await createServerClient();
-  const { accolade } = await req.json();
+  const parsedBody = createAccoladeSchema.safeParse(await req.json().catch(() => null));
+  if (!parsedBody.success) {
+    return NextResponse.json({ error: "Invalid request body", issues: parsedBody.error.flatten() }, { status: 400 });
+  }
+  const { accolade } = parsedBody.data;
   const { id: athleteId } = await params;
 
   // Check access
@@ -36,7 +54,10 @@ export async function POST(
     .update({ accolades: updated })
     .eq("athlete_id", athleteId);
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) {
+    logServerError("athlete-accolades:post:update", error);
+    return internalErrorResponse();
+  }
   return NextResponse.json({ success: true });
 }
 
@@ -46,7 +67,11 @@ export async function DELETE(
 ) {
   const profile = await requireProfile();
   const supabase = await createServerClient();
-  const { index } = await req.json();
+  const parsedBody = deleteAccoladeSchema.safeParse(await req.json().catch(() => null));
+  if (!parsedBody.success) {
+    return NextResponse.json({ error: "Invalid request body", issues: parsedBody.error.flatten() }, { status: 400 });
+  }
+  const { index } = parsedBody.data;
   const { id: athleteId } = await params;
 
   const { data: athlete } = await supabase
@@ -73,6 +98,9 @@ export async function DELETE(
     .update({ accolades: updated })
     .eq("athlete_id", athleteId);
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) {
+    logServerError("athlete-accolades:delete:update", error);
+    return internalErrorResponse();
+  }
   return NextResponse.json({ success: true });
 }

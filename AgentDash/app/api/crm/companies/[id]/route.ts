@@ -1,9 +1,15 @@
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
+import { internalServerError } from "@/lib/api/http-errors";
+import {
+  normalizePipelineStage,
+  pipelineStageToFunnel,
+  resolvePipelineStageFromBody,
+} from "@/lib/crm/stage-map";
 import { NextResponse } from "next/server";
 
-const FUNNEL_STAGES = ["idea", "research", "contacted", "negotiating", "paused", "won", "lost"] as const;
-type FunnelStage = (typeof FUNNEL_STAGES)[number];
+const PIPELINE_UPDATE_SELECT =
+  "id, company_id, created_by_user_id, status, support_email, contact_emails, relevant_people, notes, pipeline_stage, funnel_stage, priority, next_follow_up_at, archived, sent_at, created_at, updated_at" as const;
 
 function normalizeEmails(emails: unknown): string[] {
   if (!Array.isArray(emails)) return [];
@@ -14,11 +20,6 @@ function normalizeEmails(emails: unknown): string[] {
     set.add(email);
   }
   return [...set];
-}
-
-function normalizeFunnelStage(value: unknown, fallback: FunnelStage): FunnelStage {
-  const stage = String(value ?? "").trim().toLowerCase();
-  return (FUNNEL_STAGES as readonly string[]).includes(stage) ? (stage as FunnelStage) : fallback;
 }
 
 function normalizePriority(value: unknown, fallback: number): 1 | 2 | 3 {
@@ -60,10 +61,10 @@ export async function PATCH(
 
   const { data: existing, error: fetchError } = await supabase
     .from("crm_companies_pipeline")
-    .select("id, company_id, created_by_user_id, status, support_email, contact_emails, relevant_people, notes, funnel_stage, priority, next_follow_up_at, archived, companies(name)")
+    .select("id, company_id, created_by_user_id, status, support_email, contact_emails, relevant_people, notes, pipeline_stage, funnel_stage, priority, next_follow_up_at, archived, companies(name)")
     .eq("id", id)
     .single();
-  if (fetchError) return NextResponse.json({ error: fetchError.message }, { status: 500 });
+  if (fetchError) return internalServerError(fetchError, "crm-company-pipeline:patch:load");
   if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   const action = String(body.action ?? "").trim();
@@ -93,7 +94,7 @@ export async function PATCH(
         email,
         notes: `Imported from AI company pipeline${existing.status === "in_progress" ? "" : " (updated)"}`,
       });
-      if (insertError) return NextResponse.json({ error: insertError.message }, { status: 500 });
+      if (insertError) return internalServerError(insertError, "crm-company-pipeline:patch:promote-email");
     }
 
     const relevantPeople = Array.isArray(existing.relevant_people) ? existing.relevant_people : [];
@@ -128,16 +129,16 @@ export async function PATCH(
         outreach_mode: email ? "email" : "linkedin",
         notes: `Imported from AI company pipeline${existing.status === "in_progress" ? "" : " (updated)"}`,
       });
-      if (insertError) return NextResponse.json({ error: insertError.message }, { status: 500 });
+      if (insertError) return internalServerError(insertError, "crm-company-pipeline:patch:promote-person");
     }
 
     const { data: updated, error: updateError } = await supabase
       .from("crm_companies_pipeline")
       .update({ status: "promoted_to_crm", sent_at: new Date().toISOString() })
       .eq("id", id)
-      .select("*")
+      .select(PIPELINE_UPDATE_SELECT)
       .single();
-    if (updateError) return NextResponse.json({ error: updateError.message }, { status: 500 });
+    if (updateError) return internalServerError(updateError, "crm-company-pipeline:patch:promote-update");
     return NextResponse.json({ company: updated });
   }
 
@@ -147,7 +148,13 @@ export async function PATCH(
     body.support_email != null ? String(body.support_email).trim().toLowerCase() || null : existing.support_email;
   const notes = body.notes != null ? String(body.notes) : existing.notes;
   const status = body.status != null ? String(body.status) : existing.status;
-  const funnel_stage = normalizeFunnelStage(body.funnel_stage, (existing.funnel_stage ?? "idea") as FunnelStage);
+  const existingPipelineStage = normalizePipelineStage(
+    (existing as { pipeline_stage?: string }).pipeline_stage ?? existing.funnel_stage,
+    "target"
+  );
+  const resolvedStage = resolvePipelineStageFromBody(body);
+  const pipeline_stage = resolvedStage ?? existingPipelineStage;
+  const funnel_stage = pipelineStageToFunnel(pipeline_stage);
   const priority = normalizePriority(body.priority, Number(existing.priority ?? 2));
   const next_follow_up_at = normalizeDate(body.next_follow_up_at, existing.next_follow_up_at ?? null);
   const archived = body.archived != null ? body.archived === true : (existing.archived ?? false);
@@ -167,11 +174,11 @@ export async function PATCH(
 
   const { data: updated, error: updateError } = await supabase
     .from("crm_companies_pipeline")
-    .update({ contact_emails, relevant_people, support_email, notes, status, funnel_stage, priority, next_follow_up_at, archived, sent_at })
+    .update({ contact_emails, relevant_people, support_email, notes, status, pipeline_stage, funnel_stage, priority, next_follow_up_at, archived, sent_at })
     .eq("id", id)
-    .select("*")
+    .select(PIPELINE_UPDATE_SELECT)
     .single();
-  if (updateError) return NextResponse.json({ error: updateError.message }, { status: 500 });
+  if (updateError) return internalServerError(updateError, "crm-company-pipeline:patch:update");
   return NextResponse.json({ company: updated });
 }
 
@@ -184,6 +191,6 @@ export async function DELETE(
   const { id } = await params;
 
   const { error } = await supabase.from("crm_companies_pipeline").delete().eq("id", id);
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) return internalServerError(error, "crm-company-pipeline:delete");
   return NextResponse.json({ ok: true });
 }

@@ -1,9 +1,8 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import type { Contract, CreatorIQSnapshot } from "@/lib/supabase/types";
 import { formatContractDateForDisplay, getContractDisplayStatus } from "@/lib/contracts";
 import { ArchiveContractButton } from "@/components/contracts/ArchiveContractButton";
 import { ContractCategoriesEditor } from "@/components/contracts/ContractCategoriesEditor";
@@ -12,6 +11,7 @@ type Props = {
   athleteId: string;
   athleteSport: string | null;
   initialAccolades: string[];
+  initialAbout?: string | null;
   initialNotes?: string | null;
   canEdit: boolean;
   contracts: any[];
@@ -23,6 +23,7 @@ export function AthleteProfileClient({
   athleteId,
   athleteSport,
   initialAccolades,
+  initialAbout = "",
   initialNotes = "",
   canEdit,
   contracts,
@@ -31,9 +32,12 @@ export function AthleteProfileClient({
 }: Props) {
   const [accolades, setAccolades] = useState(initialAccolades);
   const [newAccolade, setNewAccolade] = useState("");
+  const [about, setAbout] = useState(initialAbout ?? "");
+  const [savedAbout, setSavedAbout] = useState(initialAbout ?? "");
+  const [aboutSaving, setAboutSaving] = useState(false);
   const [notes, setNotes] = useState(initialNotes ?? "");
   const [savedNotes, setSavedNotes] = useState(initialNotes ?? "");
-  const [savingNotes, setSavingNotes] = useState(false);
+  const [notesSaving, setNotesSaving] = useState(false);
   const [showNewContract, setShowNewContract] = useState(false);
   const [editingContractId, setEditingContractId] = useState<string | null>(null);
   const [savingContract, setSavingContract] = useState(false);
@@ -45,6 +49,83 @@ export function AthleteProfileClient({
     "active"
   );
   const router = useRouter();
+  const aboutSaveRequest = useRef(0);
+  const notesSaveRequest = useRef(0);
+
+  useEffect(() => {
+    if (!canEdit || about === savedAbout) return;
+    const timer = setTimeout(() => {
+      const requestId = ++aboutSaveRequest.current;
+      setAboutSaving(true);
+      void (async () => {
+        try {
+          const res = await fetch(`/api/athletes/${athleteId}/about`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ about: about.trim() || null }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (requestId !== aboutSaveRequest.current) return;
+          if (!res.ok) {
+            const message =
+              typeof data?.error === "string"
+                ? data.error
+                : `HTTP ${res.status}`;
+            console.error("Failed to save athlete about:", message);
+            return;
+          }
+          const persisted = data.about ?? "";
+          setAbout(persisted);
+          setSavedAbout(persisted);
+        } finally {
+          if (requestId === aboutSaveRequest.current) setAboutSaving(false);
+        }
+      })();
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [about, savedAbout, canEdit, athleteId]);
+
+  useEffect(() => {
+    if (!canEdit || notes === savedNotes) return;
+    const timer = setTimeout(() => {
+      const requestId = ++notesSaveRequest.current;
+      setNotesSaving(true);
+      void (async () => {
+        try {
+          const res = await fetch(`/api/athletes/${athleteId}/notes`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ notes: notes.trim() || null }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (requestId !== notesSaveRequest.current) return;
+          if (!res.ok) {
+            const message =
+              typeof data?.error === "string"
+                ? data.error
+                : `HTTP ${res.status}`;
+            console.error("Failed to save athlete notes:", message);
+            return;
+          }
+          const persisted = data.notes ?? "";
+          setNotes(persisted);
+          setSavedNotes(persisted);
+        } finally {
+          if (requestId === notesSaveRequest.current) setNotesSaving(false);
+        }
+      })();
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [notes, savedNotes, canEdit, athleteId]);
+
+  function syncCoveredCategoriesFromContract(taxonomyIds: string[]) {
+    if (typeof window === "undefined") return;
+    window.dispatchEvent(
+      new CustomEvent("athlete-covered-categories:contract-selected", {
+        detail: { taxonomyIds },
+      })
+    );
+  }
 
   function openEditForm(contract: any) {
     setEditingContractId(contract.contract_id);
@@ -124,6 +205,7 @@ export function AthleteProfileClient({
         console.error("Failed to add contract", data);
         alert(data.error || "Failed to add contract");
       } else {
+        syncCoveredCategoriesFromContract(categoryTaxonomyIds);
         closeContractForm();
         router.refresh();
       }
@@ -156,35 +238,12 @@ export function AthleteProfileClient({
         console.error("Failed to update contract", data);
         alert(data.error || "Failed to update contract");
       } else {
+        syncCoveredCategoriesFromContract(categoryTaxonomyIds);
         closeContractForm();
         router.refresh();
       }
     } finally {
       setSavingContract(false);
-    }
-  }
-
-  async function saveNotes() {
-    if (!canEdit) return;
-    setSavingNotes(true);
-    try {
-      const res = await fetch(`/api/athletes/${athleteId}/notes`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ notes: notes.trim() || null }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        console.error("Failed to save athlete notes", data);
-        alert(data.error || "Failed to save notes");
-        return;
-      }
-      const persisted = data.notes ?? "";
-      setNotes(persisted);
-      setSavedNotes(persisted);
-      router.refresh();
-    } finally {
-      setSavingNotes(false);
     }
   }
 
@@ -194,9 +253,32 @@ export function AthleteProfileClient({
   return (
     <>
       {showAccoladesSection && (
-        <section>
-          <h2 className="mb-3 text-lg font-medium text-[#F4F1EB]">Accolades</h2>
-          <ul className="space-y-2">
+        <>
+          <section>
+            <h2 className="mb-2 flex items-baseline gap-2 text-lg font-medium text-[#F4F1EB]">
+              About
+              {canEdit && aboutSaving && (
+                <span className="text-xs font-normal text-[#8E877A]">Saving…</span>
+              )}
+            </h2>
+            {canEdit ? (
+              <textarea
+                value={about}
+                onChange={(e) => setAbout(e.target.value)}
+                rows={4}
+                placeholder="e.g. WSL Championship Tour surfer, ranked #12 globally..."
+                className="w-full rounded-md border border-white/20 bg-[#101513] px-3 py-2 text-sm text-[#ECE7DF] placeholder:text-[#8E877A]"
+              />
+            ) : (
+              <p className="whitespace-pre-wrap text-sm text-[#ECE7DF]">
+                {(about ?? "").trim() ? about : "No about text yet."}
+              </p>
+            )}
+          </section>
+
+          <section>
+            <h2 className="mb-2 text-lg font-medium text-[#F4F1EB]">Accolades</h2>
+            <ul className="space-y-2">
             {accolades.map((acc, i) => (
               <li key={i} className="flex items-center justify-between text-sm text-[#ECE7DF]">
                 <span>{acc}</span>
@@ -230,33 +312,27 @@ export function AthleteProfileClient({
             </div>
           )}
         </section>
+        </>
       )}
 
       {showNotesContractsSection && (
         <>
           {/* Notes */}
           <section>
-            <h2 className="mb-3 text-lg font-medium text-[#F4F1EB]">Notes</h2>
+            <h2 className="mb-2 flex items-baseline gap-2 text-lg font-medium text-[#F4F1EB]">
+              Notes
+              {canEdit && notesSaving && (
+                <span className="text-xs font-normal text-[#8E877A]">Saving…</span>
+              )}
+            </h2>
             {canEdit ? (
-              <div className="space-y-3">
-                <textarea
-                  value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
-                  rows={4}
-                  placeholder="Add notes about this athlete..."
-                  className="w-full rounded-md border border-white/20 bg-[#101513] px-3 py-2 text-sm text-[#ECE7DF] placeholder:text-[#8E877A]"
-                />
-                <div className="flex justify-end">
-                  <button
-                    type="button"
-                    onClick={saveNotes}
-                    disabled={savingNotes || notes === savedNotes}
-                    className="rounded-md bg-[#2E7040] px-4 py-2 text-sm text-white hover:bg-[#285F36] disabled:opacity-50"
-                  >
-                    {savingNotes ? "Saving..." : "Save Notes"}
-                  </button>
-                </div>
-              </div>
+              <textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                rows={4}
+                placeholder="Add notes about this athlete..."
+                className="w-full rounded-md border border-white/20 bg-[#101513] px-3 py-2 text-sm text-[#ECE7DF] placeholder:text-[#8E877A]"
+              />
             ) : (
               <p className="whitespace-pre-wrap text-sm text-[#ECE7DF]">
                 {(notes ?? "").trim() ? notes : "No notes yet."}

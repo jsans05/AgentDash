@@ -1,14 +1,13 @@
 #!/bin/bash
 # Run the new migrations for contract archiving, category, and prospecting logs
-# Usage: ./scripts/run_migrations.sh [database_password]
+# Usage: SUPABASE_DB_URL=postgresql://... ./scripts/run_migrations.sh
 
 set -e
 
-DB_URL="${SUPABASE_DB_URL:-postgresql://postgres.yegjchfodmvvcnrmemcn:grOx6yg4wFNRH9J6@aws-1-us-east-1.pooler.supabase.com:5432/postgres}"
-
-if [ -n "$1" ]; then
-  # If password provided as argument, use it
-  DB_URL="postgresql://postgres.yegjchfodmvvcnrmemcn:$1@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+DB_URL="${SUPABASE_DB_URL:-}"
+if [ -z "$DB_URL" ]; then
+  echo "SUPABASE_DB_URL is required. Export it before running this script."
+  exit 1
 fi
 
 echo "Running migrations..."

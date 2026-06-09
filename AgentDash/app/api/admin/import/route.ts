@@ -1,15 +1,25 @@
 import { requireRole } from "@/lib/auth";
+import { enforceContentLengthLimit, enforceFileSizeLimit, MAX_API_PAYLOAD_BYTES } from "@/lib/api/request-limits";
 import { createServerClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
 import Papa from "papaparse";
-import readXlsxFile from "read-excel-file/node";
-import { findAthleteByTalentOrName } from "@/lib/athletes/lookup";
+import readXlsxFile, { readSheet } from "read-excel-file/node";
+import { escapeForIlike, ilikeContains, normalizeOrIlikeFragment } from "@/lib/supabase/ilike";
+import {
+  detectAudienceDataHeader,
+  detectSocialDataHeader,
+  detectTalentInfoHeader,
+  sheetRowsToObjects,
+  sheetRowsToObjectsRepeatingHeaders,
+} from "@/lib/import/excel-sheet";
+import { resolveAgentValue } from "@/lib/import/resolve-agent";
 import {
   normalizeAudienceRow,
   normalizeSocialRow,
   type ImportRowFailure,
   type SheetImportSummary,
 } from "@/lib/import/social-audience";
+import { processTalentInfoRows } from "@/lib/import/talent-info";
 
 function rowsToObjects(rows: unknown[][]): Record<string, unknown>[] {
   if (rows.length === 0) return [];
@@ -148,8 +158,8 @@ async function resolveAthleteByName(
       const { data } = await supabase
         .from("athletes")
         .select(sel)
-        .ilike("first_name", first)
-        .ilike("last_name", last)
+        .ilike("first_name", escapeForIlike(first))
+        .ilike("last_name", escapeForIlike(last))
         .limit(1);
       const row = firstRow({ data });
       if (row) return athletePk(row);
@@ -162,8 +172,8 @@ async function resolveAthleteByName(
     let res = await supabase
       .from("athletes")
       .select(sel)
-      .ilike("first_name", first)
-      .ilike("last_name", last)
+      .ilike("first_name", escapeForIlike(first))
+      .ilike("last_name", escapeForIlike(last))
       .limit(1);
     let row = firstRow(res);
     if (row) return athletePk(row);
@@ -172,17 +182,18 @@ async function resolveAthleteByName(
     res = await supabase
       .from("athletes")
       .select(sel)
-      .ilike("first_name", lastFirst)
-      .ilike("last_name", firstRest)
+      .ilike("first_name", escapeForIlike(lastFirst))
+      .ilike("last_name", escapeForIlike(firstRest))
       .limit(1);
     row = firstRow(res);
     if (row) return athletePk(row);
   }
   if (parts.length === 1) {
+    const orPattern = `%${normalizeOrIlikeFragment(parts[0] ?? "")}%`;
     const res = await supabase
       .from("athletes")
       .select(sel)
-      .or(`first_name.ilike.%${parts[0]}%,last_name.ilike.%${parts[0]}%`)
+      .or(`first_name.ilike.${orPattern},last_name.ilike.${orPattern}`)
       .limit(1);
     const row = firstRow(res);
     if (row) return athletePk(row);
@@ -263,8 +274,8 @@ async function resolveAthleteBySocialAudienceExcelName(
   const { data: candidates, error } = await supabase
     .from("athletes")
     .select("athlete_id, first_name, last_name")
-    .ilike("first_name", `%${first}%`)
-    .ilike("last_name", `%${last}%`)
+    .ilike("first_name", ilikeContains(first))
+    .ilike("last_name", ilikeContains(last))
     .limit(50);
 
   if (error) {
@@ -279,52 +290,6 @@ async function resolveAthleteBySocialAudienceExcelName(
   if (matches.length === 1) return { athlete_id: matches[0]!.athlete_id, ambiguous: false };
   if (matches.length === 0) return { athlete_id: null, ambiguous: false };
   return { athlete_id: null, ambiguous: true };
-}
-
-/** Resolve one agent string (email, UUID, or "First Last" name) to profile user_id. */
-async function resolveAgentValue(
-  supabase: Awaited<ReturnType<typeof createServerClient>>,
-  agentValue: string
-): Promise<string | null> {
-  const v = agentValue.trim();
-  if (!v) return null;
-  if (v.includes("@")) {
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("user_id")
-      .eq("email", v.toLowerCase())
-      .eq("role", "agent")
-      .maybeSingle();
-    return profile?.user_id ?? null;
-  }
-  if (/^[0-9a-f-]{36}$/i.test(v)) return v;
-  const nameParts = v.split(/\s+/).filter(Boolean);
-  if (nameParts.length >= 2) {
-    const agentFirst = nameParts[0] ?? "";
-    const agentLast = nameParts.slice(1).join(" ");
-    let { data: profile } = await supabase
-      .from("profiles")
-      .select("user_id")
-      .eq("role", "agent")
-      .ilike("first_name", agentFirst)
-      .ilike("last_name", agentLast)
-      .maybeSingle();
-    if (!profile) {
-      const { data: profiles } = await supabase
-        .from("profiles")
-        .select("user_id, first_name, last_name")
-        .eq("role", "agent")
-        .or(`first_name.ilike.%${agentFirst}%,last_name.ilike.%${agentLast}%`)
-        .limit(5);
-      profile = profiles?.find(
-        (p) =>
-          p.first_name?.toLowerCase() === agentFirst.toLowerCase() &&
-          p.last_name?.toLowerCase() === agentLast.toLowerCase()
-      ) ?? profiles?.[0] ?? null;
-    }
-    return profile?.user_id ?? null;
-  }
-  return null;
 }
 
 function splitName(raw: string | null | undefined): { first_name: string; last_name: string } {
@@ -377,7 +342,7 @@ async function ensureAthleteForImport(
 
   if (insertErr) {
     console.warn("[Import social_audience] Failed to auto-create athlete", {
-      name,
+      reason: "insert_failed",
       error: insertErr.message,
     });
     return null;
@@ -394,6 +359,9 @@ export async function POST(req: Request) {
   }
 
   try {
+    const contentLengthError = enforceContentLengthLimit(req);
+    if (contentLengthError) return contentLengthError;
+
     const formData = await req.formData();
     const file = formData.get("file") as File;
     const type = formData.get("type") as string;
@@ -401,6 +369,12 @@ export async function POST(req: Request) {
     if (!file) {
       return NextResponse.json({ error: "No file provided" }, { status: 400 });
     }
+    const fileSizeError = enforceFileSizeLimit(
+      file,
+      MAX_API_PAYLOAD_BYTES,
+      "Uploaded file too large. Max 25 MB."
+    );
+    if (fileSizeError) return fileSizeError;
 
     const buffer = Buffer.from(await file.arrayBuffer());
     const name = (file.name || "").toLowerCase();
@@ -423,12 +397,14 @@ export async function POST(req: Request) {
         });
         rows = parsed.data ?? [];
       } else {
-        const sheetRows = await readXlsxFile(buffer);
-        rows = rowsToObjects(sheetRows as unknown[][]);
+        const workbook = await readXlsxFile(buffer);
+        const sheetRows = (workbook[0]?.data ?? []) as unknown[][];
+        rows = rowsToObjects(sheetRows);
       }
       // Import athletes (supports: First Name, Last Name, Sport, Agent, Country of Origin, plus optional columns)
       let imported = 0;
-      for (const rawRow of rows) {
+      for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+        const rawRow = rows[rowIndex];
         const row = normalizeAthleteRow(rawRow as Record<string, unknown>) as any;
 
         const firstName = row.first_name != null ? String(row.first_name).trim() : "";
@@ -447,7 +423,10 @@ export async function POST(req: Request) {
           const id = await resolveAgentValue(supabase, v);
           if (id && !agentIds.includes(id)) agentIds.push(id);
           else if (!id && v) {
-            console.warn(`[Import] ${firstName} ${lastName}: no agent found for "${v}"`);
+            console.warn("[Import athletes] No agent resolved", {
+              row: rowIndex + 1,
+              reason: "agent_not_found",
+            });
           }
         }
         const primaryAgentId = agentIds[0] ?? null;
@@ -497,8 +476,9 @@ export async function POST(req: Request) {
         });
         rows = parsed.data ?? [];
       } else {
-        const sheetRows = await readXlsxFile(buffer);
-        rows = rowsToObjects(sheetRows as unknown[][]);
+        const workbook = await readXlsxFile(buffer);
+        const sheetRows = (workbook[0]?.data ?? []) as unknown[][];
+        rows = rowsToObjects(sheetRows);
       }
       // Import contracts. Columns: athlete_name, sponsor_name, category, contract_start, contract_end, agent (optional).
       // Multiple rows per athlete_name = multiple contracts (supported).
@@ -553,7 +533,10 @@ export async function POST(req: Request) {
         }
         if (!athleteId) {
           skippedNoAthlete++;
-          console.warn(`[Import contracts] Athlete not found: "${athleteName}"`);
+          console.warn("[Import contracts] Athlete not found", {
+            row: rowIndex + 1,
+            reason: "athlete_not_found",
+          });
           continue;
         }
 
@@ -663,14 +646,17 @@ export async function POST(req: Request) {
     } else if (type === "social_audience") {
       if (!name.endsWith(".xlsx") && !name.endsWith(".xls")) {
         return NextResponse.json(
-          { error: "Social & Audience import requires an .xlsx Excel workbook with two sheets." },
+          {
+            error:
+              "Social & Audience import requires an .xlsx Excel workbook with Social Data and Audience Data sheets (Talent Info optional).",
+          },
           { status: 400 }
         );
       }
 
-      // First, get sheet metadata (names only)
-      const workbook = await readXlsxFile(buffer, { getSheets: true });
-      const sheetNames = workbook.map((s) => String(s.name ?? ""));
+      // First, get sheet names.
+      const workbook = await readXlsxFile(buffer);
+      const sheetNames = workbook.map((sheet) => String(sheet.sheet ?? ""));
 
       const requiredSheets: Array<"Social Data" | "Audience Data"> = ["Social Data", "Audience Data"];
       const missingSheets = requiredSheets.filter(
@@ -681,41 +667,58 @@ export async function POST(req: Request) {
           {
             error: `Missing required sheet(s): ${missingSheets.join(
               ", "
-            )}. Expected sheets named "Social Data" and "Audience Data".`,
+            )}. Expected sheets named "Social Data" and "Audience Data" (optional: "Talent Info").`,
           },
           { status: 400 }
         );
       }
 
-      // read-excel-file with getSheets only returns metadata; we must re-read each sheet by name.
-      const socialSheetMeta = workbook.find(
-        (s) => String(s.name ?? "").trim().toLowerCase() === "social data".toLowerCase()
+      const socialSheetName =
+        sheetNames.find((s) => s.trim().toLowerCase() === "social data") ?? "Social Data";
+      const audienceSheetName =
+        sheetNames.find((s) => s.trim().toLowerCase() === "audience data") ?? "Audience Data";
+      const talentInfoSheetName = sheetNames.find(
+        (s) => s.trim().toLowerCase() === "talent info"
       );
-      const audienceSheetMeta = workbook.find(
-        (s) => String(s.name ?? "").trim().toLowerCase() === "audience data".toLowerCase()
-      );
 
-      const socialSheetName = String(socialSheetMeta?.name ?? "Social Data");
-      const audienceSheetName = String(audienceSheetMeta?.name ?? "Audience Data");
+      const socialSheetRows = (await readSheet(buffer, socialSheetName)) as unknown[][];
+      const audienceSheetRows = (await readSheet(buffer, audienceSheetName)) as unknown[][];
+      const {
+        objects: socialRowsRaw,
+        headerRowIndex: socialHeaderRowIndex,
+      } = sheetRowsToObjects(socialSheetRows, detectSocialDataHeader);
+      const {
+        objects: audienceRowsRaw,
+        headerRowIndex: audienceHeaderRowIndex,
+      } = sheetRowsToObjects(audienceSheetRows, detectAudienceDataHeader);
 
-      const socialSheetRows = await readXlsxFile(buffer, { sheet: socialSheetName });
-      const audienceSheetRows = await readXlsxFile(buffer, { sheet: audienceSheetName });
-
-      const socialRowsRaw = rowsToObjects(
-        socialSheetRows as unknown[][]
-      ) as Record<string, unknown>[];
-      const audienceRowsRaw = rowsToObjects(
-        audienceSheetRows as unknown[][]
-      ) as Record<string, unknown>[];
+      let talentRowsRaw: Record<string, unknown>[] = [];
+      let talentRowIndexForObject: (objectIndex: number) => number = (i) => i + 2;
+      if (talentInfoSheetName) {
+        const talentSheetRows = (await readSheet(buffer, talentInfoSheetName)) as unknown[][];
+        const parsed = sheetRowsToObjectsRepeatingHeaders(talentSheetRows, detectTalentInfoHeader);
+        talentRowsRaw = parsed.objects;
+        talentRowIndexForObject = parsed.rowIndexForObject;
+      }
 
       console.log("[Admin Import] Parsed sheets", {
         socialSheetName,
         audienceSheetName,
+        talentInfoSheetName: talentInfoSheetName ?? null,
         socialRows: socialRowsRaw.length,
         audienceRows: audienceRowsRaw.length,
+        talentRows: talentRowsRaw.length,
       });
 
       const failures: ImportRowFailure[] = [];
+      const talentSummary: SheetImportSummary = {
+        sheet: "Talent Info",
+        total: talentRowsRaw.length,
+        inserted: 0,
+        updated: 0,
+        skipped: 0,
+        failed: 0,
+      };
       const socialSummary: SheetImportSummary = {
         sheet: "Social Data",
         total: socialRowsRaw.length,
@@ -735,10 +738,21 @@ export async function POST(req: Request) {
 
       const sourceFileName = file.name || null;
 
+      if (talentInfoSheetName) {
+        await processTalentInfoRows(
+          supabase,
+          talentRowsRaw,
+          talentRowIndexForObject,
+          resolveAgentValue,
+          talentSummary,
+          failures
+        );
+      }
+
       // Process Social Data sheet
       for (let idx = 0; idx < socialRowsRaw.length; idx++) {
         const rawRow = socialRowsRaw[idx] as Record<string, unknown>;
-        const rowIndex = idx + 2; // +2 to account for header and 1-based Excel rows
+        const rowIndex = socialHeaderRowIndex + idx + 2;
 
         try {
           const parsed = normalizeSocialRow(rawRow);
@@ -850,7 +864,7 @@ export async function POST(req: Request) {
       // Process Audience Data sheet
       for (let idx = 0; idx < audienceRowsRaw.length; idx++) {
         const rawRow = audienceRowsRaw[idx] as Record<string, unknown>;
-        const rowIndex = idx + 2;
+        const rowIndex = audienceHeaderRowIndex + idx + 2;
 
         try {
           const parsed = normalizeAudienceRow(rawRow);
@@ -971,14 +985,21 @@ export async function POST(req: Request) {
         }
       }
 
+      const sheetSummaries = talentInfoSheetName
+        ? [talentSummary, socialSummary, audienceSummary]
+        : [socialSummary, audienceSummary];
+
       const totalSummary = {
-        total_rows: socialSummary.total + audienceSummary.total,
-        inserted: socialSummary.inserted + audienceSummary.inserted,
-        updated: socialSummary.updated + audienceSummary.updated,
-        skipped: socialSummary.skipped + audienceSummary.skipped,
-        failed: socialSummary.failed + audienceSummary.failed,
-        imported: socialSummary.inserted + socialSummary.updated + audienceSummary.inserted + audienceSummary.updated,
-        sheets: [socialSummary, audienceSummary],
+        total_rows: sheetSummaries.reduce((n, s) => n + s.total, 0),
+        inserted: sheetSummaries.reduce((n, s) => n + s.inserted, 0),
+        updated: sheetSummaries.reduce((n, s) => n + s.updated, 0),
+        skipped: sheetSummaries.reduce((n, s) => n + s.skipped, 0),
+        failed: sheetSummaries.reduce((n, s) => n + s.failed, 0),
+        imported: sheetSummaries.reduce(
+          (n, s) => n + s.inserted + s.updated,
+          0
+        ),
+        sheets: sheetSummaries,
         failures,
       };
 

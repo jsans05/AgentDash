@@ -30,14 +30,16 @@ export type ParsedAudienceRow = {
   current_ig_following: number | null;
 };
 
+export type ImportSheetName = "Social Data" | "Audience Data" | "Talent Info";
+
 export type ImportRowFailure = {
-  sheet: "Social Data" | "Audience Data";
+  sheet: ImportSheetName;
   rowIndex: number;
   reason: string;
 };
 
 export type SheetImportSummary = {
-  sheet: "Social Data" | "Audience Data";
+  sheet: ImportSheetName;
   total: number;
   inserted: number;
   updated: number;
@@ -78,6 +80,7 @@ const SOCIAL_HEADER_MAP: Record<string, string> = {
 const AUDIENCE_HEADER_MAP: Record<string, string> = {
   name: "name_raw",
   "talent id": "talent_id",
+  "last updated": "last_updated",
   "audience category": "audience_category",
   "audience name": "audience_name",
   "% ig audience": "ig_audience_percent",

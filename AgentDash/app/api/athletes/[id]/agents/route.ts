@@ -1,4 +1,5 @@
 import { requireRole } from "@/lib/auth";
+import { internalServerError } from "@/lib/api/http-errors";
 import { createServiceRoleClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
 
@@ -21,7 +22,7 @@ export async function GET(
     .eq("athlete_id", athleteId)
     .order("is_primary", { ascending: false });
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) return internalServerError(error, "athlete-agents:get");
   return NextResponse.json(data ?? []);
 }
 
@@ -59,7 +60,7 @@ export async function POST(
     if (error.code === "23505") {
       return NextResponse.json({ error: "Agent already assigned to this athlete" }, { status: 409 });
     }
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return internalServerError(error, "athlete-agents:post");
   }
   return NextResponse.json({ ok: true });
 }
@@ -89,7 +90,7 @@ export async function PATCH(
     .eq("athlete_id", athleteId)
     .eq("user_id", user_id);
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) return internalServerError(error, "athlete-agents:patch");
   return NextResponse.json({ ok: true });
 }
 
@@ -113,6 +114,6 @@ export async function DELETE(
     .eq("athlete_id", athleteId)
     .eq("user_id", user_id);
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) return internalServerError(error, "athlete-agents:delete");
   return NextResponse.json({ ok: true });
 }

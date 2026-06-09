@@ -4,12 +4,9 @@ import { NextResponse } from "next/server";
 import { audiencePercentPoints, getAthleteAudienceProfile } from "@/lib/athlete-data";
 import { getRelevantAudienceInterests } from "@/lib/ai/getRelevantAudienceInterests";
 import { validateEmailDraft } from "@/lib/ai/output-validation";
-import OpenAI from "openai";
-import { OPENAI_CHAT_MODEL, OPENAI_REASONING_EFFORT } from "@/lib/ai/openai-chat-defaults";
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+import { normalizeSportForPitch } from "@/lib/ai/email-generation";
+import { curatePitchInterests } from "@/lib/ai/pitch-interest-curation";
+import { composePitchEmail } from "@/lib/ai/pitch-composer";
 
 export async function POST(
   req: Request,
@@ -19,7 +16,7 @@ export async function POST(
   const profile = await requireProfile();
   const supabase = await createServerClient();
   const body = await req.json().catch(() => ({}));
-  const { companyName, industry, category } = body;
+  const { companyName, industry, category, pipeline_id } = body;
   const targetIndustryOrCategory = category || industry || null;
 
   if (!companyName) {
@@ -29,7 +26,6 @@ export async function POST(
     );
   }
 
-  // Check access
   if (profile.role === "agent") {
     const { data: link } = await supabase
       .from("athlete_agents")
@@ -42,7 +38,6 @@ export async function POST(
     }
   }
 
-  // Get athlete
   const { data: athlete } = await supabase
     .from("athletes")
     .select("*")
@@ -53,7 +48,6 @@ export async function POST(
     return NextResponse.json({ error: "Athlete not found" }, { status: 404 });
   }
 
-  // Get accolades
   const accolades: string[] = Array.isArray(athlete.accolades) ? athlete.accolades.map((a: any) => String(a)) : [];
 
   const audienceSignals = await getAthleteAudienceProfile(supabase, athleteId);
@@ -64,88 +58,66 @@ export async function POST(
     maxUsedInterests: 3,
     debugLog: process.env.NODE_ENV !== "production",
   });
-  const usedInterests = relevantInterestsDebug.usedInterests;
-  const maxInterestPct = relevantInterestsDebug.interestStrength.maxInterestPct;
-  const interestStrengthLabel = maxInterestPct != null && maxInterestPct >= 6 ? "strong" : "weak";
-
-  const hasAudience = audienceSignals.age?.length || audienceSignals.countries?.length || usedInterests?.length || 0;
-
-  // Get active contracts to understand gaps
-  const { data: contracts } = await supabase
-    .from("contracts")
-    .select("category")
-    .eq("athlete_id", athleteId)
-    .eq("archived", false)
-    .in("status", ["active"]);
-
-  const existingCategories = (contracts || []).map((c) => c.category).filter(Boolean);
 
   const athleteName = `${athlete.first_name} ${athlete.last_name}`;
+  const pitchSport = normalizeSportForPitch(athlete.sport);
 
-  const relevantInterestLines =
-    usedInterests.length > 0
-      ? [
-          "- Relevant interests for this pitch:",
-          ...usedInterests.map((i) => `  - ${i.name}: ${i.value}%`),
-        ].join("\n")
-      : "- Relevant interests for this pitch: Not available";
+  let companyResearch: {
+    past_partnerships: string | null;
+    company_description: string | null;
+    personal_notes: string | null;
+  } = {
+    past_partnerships: null,
+    company_description: null,
+    personal_notes: null,
+  };
 
-  const prompt = `Generate a copy-ready email pitch for ${athleteName} to ${companyName} (${industry || category || "sponsor"}).
-
-Athlete info:
-- Name: ${athleteName}
-- Sport: ${athlete.sport || "Unknown"}
-- Location: ${[athlete.city, athlete.state, athlete.country].filter(Boolean).join(", ") || "Unknown"}
-
-Accolades:
-${accolades.length > 0 ? accolades.map((a) => `- ${a}`).join("\n") : "None listed"}
-
-Audience highlights:
-${hasAudience
-  ? `- Age bands: ${audienceSignals.age.map((a) => `${a.audience_name}: ${audiencePercentPoints(a.ig_audience_percent).toFixed(1)}%`).join(", ")}
-- Top countries: ${audienceSignals.countries.slice(0, 3).map((c) => `${c.audience_name}: ${audiencePercentPoints(c.ig_audience_percent).toFixed(1)}%`).join(", ")}
-${relevantInterestLines}`
-  : "Not available"}
-
-Current sponsor categories: ${existingCategories.length > 0 ? existingCategories.join(", ") : "None"}
-
-Gap rationale: ${category ? `Athlete lacks a sponsor in the ${category} category.` : "General sponsorship opportunity."}
-
-Generate a professional email pitch that includes:
-1. Subject line
-2. Opening greeting
-3. Athlete accolades (2-3 key highlights)
-4. Key audience metrics (bullets)
-5. Why this company is a fit (gap + audience alignment)
-6. Call to action
-7. Closing
-
-Interest alignment rules (important):
-- Only reference the "Relevant interests for this pitch" list when you mention audience interests.
-- Do not mention any other interest categories.
-- If interest alignment is marked as "${interestStrengthLabel}", avoid overclaiming; rely more on sport, location, and accomplishments for the fit.
-
-Format as:
-Subject: [subject line]
-
-[email body]`;
+  if (pipeline_id) {
+    const { data: pipelineRow } = await supabase
+      .from("crm_companies_pipeline")
+      .select("past_partnerships, company_description, personal_notes")
+      .eq("id", String(pipeline_id))
+      .eq("created_by_user_id", profile.user_id)
+      .maybeSingle();
+    if (pipelineRow) {
+      companyResearch = {
+        past_partnerships: pipelineRow.past_partnerships ?? null,
+        company_description: pipelineRow.company_description ?? null,
+        personal_notes: pipelineRow.personal_notes ?? null,
+      };
+    }
+  }
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
-      reasoning_effort: OPENAI_REASONING_EFFORT,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are a professional sports sponsorship email writer. Generate copy-ready email pitches.",
-        },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0.8,
+    const curation = await curatePitchInterests({
+      supabase,
+      profile,
+      pitch_type: "single_athlete",
+      company_name: companyName,
+      target_industry_or_category: targetIndustryOrCategory,
+      athlete_id: athleteId,
     });
 
-    const emailDraft = completion.choices[0].message.content || "";
+    const interest_names =
+      curation.suggested_interests.length > 0
+        ? curation.suggested_interests.map((s) => s.interest_name)
+        : relevantInterestsDebug.usedInterests.map((i) => i.name);
+
+    const composed = await composePitchEmail({
+      supabase,
+      profile,
+      pitch_type: "single_athlete",
+      company_name: companyName,
+      interest_names: interest_names.length ? interest_names : curation.mapped_valid_categories.slice(0, 3),
+      recipient_name: "Partnership Team",
+      athlete_id: athleteId,
+      target_industry_or_category: targetIndustryOrCategory,
+      past_partnerships: companyResearch.past_partnerships,
+      company_description: companyResearch.company_description,
+      personal_notes: companyResearch.personal_notes,
+    });
+
+    const emailDraft = composed.body_markdown;
     const validation = validateEmailDraft(emailDraft);
     if (!validation.ok) {
       return NextResponse.json(
@@ -158,6 +130,8 @@ Subject: [subject line]
       emailDraft,
       athlete: athleteName,
       company: companyName,
+      used_interests: composed.used_interests,
+      curation_rationale: composed.curation_rationale,
       debug: {
         targetIndustryOrCategory,
         industryKey: relevantInterestsDebug.industryKey,
@@ -165,6 +139,8 @@ Subject: [subject line]
         usedInterests: relevantInterestsDebug.usedInterests,
         excludedInterests: relevantInterestsDebug.excludedInterests,
         interestStrength: relevantInterestsDebug.interestStrength,
+        athlete_sport_pitch: pitchSport,
+        accolades_count: accolades.length,
       },
     });
   } catch (error) {

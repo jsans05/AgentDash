@@ -1,6 +1,17 @@
 import { requireProfile } from "@/lib/auth";
+import { internalServerError } from "@/lib/api/http-errors";
+import { enforceContentLengthLimit } from "@/lib/api/request-limits";
 import { createServerClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
+import { z } from "zod";
+
+const createProjectSchema = z
+  .object({
+    name: z.string().trim().min(1).max(120).optional(),
+    instructions: z.string().trim().max(8000).optional(),
+    memory_notes: z.array(z.string().trim().min(1).max(500)).max(200).optional(),
+  })
+  .strict();
 
 export async function GET() {
   const profile = await requireProfile();
@@ -13,20 +24,27 @@ export async function GET() {
     .order("updated_at", { ascending: false });
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return internalServerError(error, "ai-projects:get");
   }
 
   return NextResponse.json(projects ?? []);
 }
 
 export async function POST(req: Request) {
+  const contentLengthError = enforceContentLengthLimit(req);
+  if (contentLengthError) return contentLengthError;
+
   const profile = await requireProfile();
   const supabase = await createServerClient();
-  const body = await req.json().catch(() => ({}));
+  const parsedBody = createProjectSchema.safeParse(await req.json().catch(() => null));
+  if (!parsedBody.success) {
+    return NextResponse.json({ error: "Invalid request body", issues: parsedBody.error.flatten() }, { status: 400 });
+  }
+  const body = parsedBody.data;
 
-  const name = String(body?.name ?? "").trim() || "General";
-  const instructions = String(body?.instructions ?? "").trim();
-  const memory_notes = Array.isArray(body?.memory_notes) ? body.memory_notes : [];
+  const name = body.name || "General";
+  const instructions = body.instructions ?? "";
+  const memory_notes = body.memory_notes ?? [];
 
   const { data: project, error: projectError } = await supabase
     .from("ai_projects")
@@ -40,7 +58,7 @@ export async function POST(req: Request) {
     .single();
 
   if (projectError || !project) {
-    return NextResponse.json({ error: projectError?.message ?? "Failed to create project" }, { status: 500 });
+    return internalServerError(projectError ?? new Error("Missing project row"), "ai-projects:post:create-project");
   }
 
   const { data: conversation, error: convoError } = await supabase
@@ -54,7 +72,10 @@ export async function POST(req: Request) {
     .single();
 
   if (convoError || !conversation) {
-    return NextResponse.json({ error: convoError?.message ?? "Failed to create conversation" }, { status: 500 });
+    return internalServerError(
+      convoError ?? new Error("Missing conversation row"),
+      "ai-projects:post:create-conversation"
+    );
   }
 
   return NextResponse.json({

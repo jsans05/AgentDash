@@ -1,4 +1,5 @@
 import { requireRole } from "@/lib/auth";
+import { internalServerError } from "@/lib/api/http-errors";
 import { createServiceRoleClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
 
@@ -16,36 +17,28 @@ export async function POST() {
       .delete()
       .neq("id", fakeId);
 
-    if (audienceError) {
-      return NextResponse.json({ error: audienceError.message }, { status: 500 });
-    }
+    if (audienceError) return internalServerError(audienceError, "admin-athletes-clear:audience");
 
     const { error: socialError } = await supabase
       .from("athlete_social_data")
       .delete()
       .neq("id", fakeId);
 
-    if (socialError) {
-      return NextResponse.json({ error: socialError.message }, { status: 500 });
-    }
+    if (socialError) return internalServerError(socialError, "admin-athletes-clear:social");
 
     const { error: contractsError } = await supabase
       .from("contracts")
       .delete()
       .neq("contract_id", fakeId);
 
-    if (contractsError) {
-      return NextResponse.json({ error: contractsError.message }, { status: 500 });
-    }
+    if (contractsError) return internalServerError(contractsError, "admin-athletes-clear:contracts");
 
     const { error: historyError } = await supabase
       .from("athlete_agent_history")
       .delete()
       .neq("id", fakeId);
 
-    if (historyError) {
-      return NextResponse.json({ error: historyError.message }, { status: 500 });
-    }
+    if (historyError) return internalServerError(historyError, "admin-athletes-clear:history");
 
     const { data: deletedAthletes, error: athletesError } = await supabase
       .from("athletes")
@@ -53,12 +46,10 @@ export async function POST() {
       .neq("athlete_id", fakeId)
       .select("athlete_id");
 
-    if (athletesError) {
-      return NextResponse.json({ error: athletesError.message }, { status: 500 });
-    }
+    if (athletesError) return internalServerError(athletesError, "admin-athletes-clear:athletes");
 
     return NextResponse.json({ success: true, deleted: deletedAthletes?.length ?? 0 });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  } catch (error: unknown) {
+    return internalServerError(error, "admin-athletes-clear:catch");
   }
 }
