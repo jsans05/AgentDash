@@ -18,7 +18,7 @@ import {
 import {
   getEmailInterestSelectionPromptAddon,
   getEmailRevisionModeAddon,
-  getFlowSystemPromptAddon,
+  getFlowIntentRoutingAddon,
   getPostInterestSelectionComposeAddon,
 } from "@/lib/ai/flow-guards";
 import {
@@ -157,7 +157,13 @@ export function buildAIChatFlowContext(input: BuildFlowContextInput): AIChatFlow
     (skipInterestPicker && autoConfirmAddon.length > 0);
 
   const afterInterestPrompt = userReplyingAfterInterestCategoryPrompt(trimmedMessages);
-  const allowInterestPicker = interestPickerAllowed(flowMode);
+  const allowInterestPicker =
+    interestPickerAllowed(flowMode) ||
+    flowIntent === "inbound_company_athlete_match" ||
+    flowIntent === "email_single_athlete" ||
+    flowIntent === "email_group_outreach" ||
+    flowIntent === "email_roster_outreach" ||
+    flowIntent === "email_general_outreach";
 
   const revisionAddon = emailRevisionMode
     ? getEmailRevisionModeAddon({
@@ -194,7 +200,7 @@ export function buildAIChatFlowContext(input: BuildFlowContextInput): AIChatFlow
       : "";
 
   const flowPromptAddon = [
-    getFlowSystemPromptAddon(flowIntent, flowMode),
+    getFlowIntentRoutingAddon(flowIntent),
     revisionAddon,
     routingAddon,
     userStatedAnglesAddon,

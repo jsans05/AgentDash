@@ -1,11 +1,8 @@
 import { NextResponse } from "next/server";
-import OpenAI from "openai";
 import { createServerClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
 import { searchCompanies } from "@/lib/enrichment";
-import { OPENAI_CHAT_MODEL, OPENAI_REASONING_EFFORT } from "@/lib/ai/openai-chat-defaults";
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+import { createChatCompletion } from "@/lib/ai/anthropic-chat-client";
 
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const profile = await requireProfile();
@@ -72,9 +69,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     .join("\n");
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
-      reasoning_effort: OPENAI_REASONING_EFFORT,
+    const completion = await createChatCompletion({
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },

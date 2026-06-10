@@ -4,13 +4,8 @@ import { NextResponse } from "next/server";
 import { formatAthleteGender } from "@/lib/athletes/gender";
 import { discoverAthleteProspects } from "@/lib/ai/athlete-prospect-discovery";
 import { PROSPECTING_TABLE_HEADER } from "@/lib/ai/grouped-prospecting";
-import OpenAI from "openai";
 import { validateGroupedProspectingOutput } from "@/lib/ai/output-validation";
-import { OPENAI_CHAT_MODEL, OPENAI_REASONING_EFFORT } from "@/lib/ai/openai-chat-defaults";
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+import { createChatCompletion } from "@/lib/ai/anthropic-chat-client";
 
 export async function POST(
   req: Request,
@@ -101,9 +96,7 @@ Markdown to polish:
 ${discovery.markdown}`;
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
-      reasoning_effort: OPENAI_REASONING_EFFORT,
+    const completion = await createChatCompletion({
       messages: [
         {
           role: "system",

@@ -41,6 +41,7 @@ function AIChatClientInner({ role }: { role: string }) {
         athleteId?: string;
         uiContext?: ChatUiContext;
         flowMode?: ChatFlowMode;
+        chatModel?: "sonnet" | "opus";
       }
     ): Promise<PostAiChatResult> => {
       const payload = messages.map((m) => ({ role: m.role, content: m.content }));
@@ -62,6 +63,7 @@ function AIChatClientInner({ role }: { role: string }) {
           ...(resolvedAthleteId ? { athlete_id: resolvedAthleteId } : {}),
           ...(resolvedUiContext ? { ui_context: resolvedUiContext } : {}),
           flow_mode: resolvedFlowMode ?? "auto",
+          ...(options?.chatModel ? { chat_model: options.chatModel } : {}),
         },
         {
           signal: options?.signal,

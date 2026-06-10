@@ -1,15 +1,10 @@
 import { createServerClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
 import { NextResponse } from "next/server";
-import OpenAI from "openai";
 import { audiencePercentPoints, getAthleteAudienceProfile } from "@/lib/athlete-data";
 import { getRelevantAudienceInterests } from "@/lib/ai/getRelevantAudienceInterests";
 import { validateOutreachNotes } from "@/lib/ai/output-validation";
-import { OPENAI_CHAT_MODEL, OPENAI_REASONING_EFFORT } from "@/lib/ai/openai-chat-defaults";
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+import { createChatCompletion } from "@/lib/ai/anthropic-chat-client";
 
 export async function POST(
   req: Request,
@@ -104,9 +99,7 @@ export async function POST(
   const prompt = `You are a professional sports sponsorship outreach writer.\n\nWrite concise outreach notes for the following contact.\n\nContact:\n- Name: ${contact.first_name} ${contact.last_name}\n- Role: ${contact.role || "N/A"}\n- Company: ${contact.companies?.name || "Unknown"}\n\nCRM lane:\n- Category: ${contact.category || contact.sponsorship_taxonomies?.category || "N/A"}\n- Product description: ${contact.product_description || "N/A"}\n\n${athleteContext ? athleteContext : "No specific athlete context provided; write generic but still relevant outreach."}\n\n${audienceSection}\n\nChannel: ${outreach_channel}\n\nTask:\n- Produce outreach_notes in plain text.\n- Keep it under 120 words.\n- Include: (1) why this company is a fit for this lane, (2) what you’re proposing, (3) a clear next step question.\n- Important: Only mention audience interests that appear under "Audience signals" -> "- Interests: ..." Do not invent or mention other interest categories.\n- If interest alignment is weak, avoid overstating audience interest; lean more on sport/demo/location/accolades.\n`;
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
-      reasoning_effort: OPENAI_REASONING_EFFORT,
+    const completion = await createChatCompletion({
       messages: [
         { role: "system", content: "You write crisp sponsorship outreach notes suitable for copying into an email or CRM." },
         { role: "user", content: prompt },

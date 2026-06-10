@@ -225,6 +225,7 @@ async function searchGroupedBySport(
 
 async function searchFlat(
   supabase: SupabaseClient,
+  profile: Profile,
   interestNames: string[],
   selectedSports: string[],
   expandedKeywords: string[],
@@ -402,5 +403,13 @@ export async function searchAthletesByAudienceMatch(
   }
 
   const expandedKeywords = hasKeywords ? expandInterestKeywords(inputKeywords) : [];
-  return searchFlat(supabase, interestNames, selectedSports, expandedKeywords, minFollowers, outputLimit);
+  return searchFlat(
+    supabase,
+    profile,
+    interestNames,
+    selectedSports,
+    expandedKeywords,
+    minFollowers,
+    outputLimit
+  );
 }

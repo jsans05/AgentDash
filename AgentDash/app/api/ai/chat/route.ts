@@ -11,6 +11,7 @@ import {
 } from "@/lib/ai/flow-guards";
 import {
   detectChatBulkImportIntent,
+  detectFlow5MultiCompanyTemplateIntent,
   detectTargetListOutreachPushIntent,
   detectTargetListSaveIntent,
 } from "@/lib/ai/flow-intent";
@@ -20,7 +21,11 @@ import {
   type ChatSseEvent,
   type ChatSseWebSource,
 } from "@/lib/ai/chat-sse";
-import { OPENAI_CHAT_MODEL, OPENAI_REASONING_EFFORT } from "@/lib/ai/openai-chat-defaults";
+import { parseChatModelTier, resolveChatModelId } from "@/lib/ai/chat-model";
+import {
+  createChatCompletionStreamWithReasoningCompat,
+  createChatCompletionWithReasoningCompat,
+} from "@/lib/ai/anthropic-chat-client";
 import { streamChatCompletionToMessage } from "@/lib/ai/openai-chat-stream";
 import { stripSponsorGapCopy } from "@/lib/ai/email-copy-guard";
 import { enforcePitchEmailClosing, validateGroupedProspectingOutput } from "@/lib/ai/output-validation";
@@ -34,10 +39,7 @@ import { buildAIChatFlowContext } from "@/lib/features/ai-chat-orchestrator/flow
 import { parseFlowMode, resolveFlowMode, type FlowMode } from "@/lib/ai/flow-mode";
 import { buildSystemPrompt, filterToolDefinitions } from "@/lib/ai/prompts";
 import { enforceContentLengthLimit, enforceTextSizeLimit } from "@/lib/api/request-limits";
-import { searchCompanies } from "@/lib/enrichment";
 import { createServerClient } from "@/lib/supabase/server";
-import OpenAI from "openai";
-import type { ChatCompletionChunk } from "openai/resources/chat/completions";
 import { NextResponse } from "next/server";
 import Papa from "papaparse";
 import readXlsxFile from "read-excel-file/node";
@@ -85,6 +87,7 @@ type UploadedImage = {
 };
 
 const chatModeSchema = z.enum(["default", "deep_research", "web_search"]);
+const chatModelTierSchema = z.enum(["sonnet", "opus"]);
 const chatUiContextSchema = z.enum(["target_list", "crm_pipeline", "global"]);
 const flowModeSchema = z.enum(["outbound", "inbound", "email", "auto"]);
 const chatMessageSchema = z
@@ -112,6 +115,7 @@ const chatPayloadSchema = z
     athlete_id: z.string().trim().max(120).optional(),
     ui_context: chatUiContextSchema.optional(),
     flow_mode: flowModeSchema.optional(),
+    chat_model: chatModelTierSchema.optional(),
     mode: chatModeSchema.optional(),
     stream: z.boolean().optional(),
     interaction_response: interactionResponseSchema.optional(),
@@ -217,54 +221,6 @@ async function parseImageFile(file: File): Promise<UploadedImage | null> {
   const mime = file.type || "image/png";
   const dataUrl = `data:${mime};base64,${buf.toString("base64")}`;
   return { filename: file.name || "screenshot", dataUrl };
-}
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
-function supportsReasoningEffortRetryWithoutTools(error: any): boolean {
-  const message = String(error?.message ?? "");
-  return error?.param === "reasoning_effort" || /reasoning_effort/i.test(message);
-}
-
-async function createChatCompletionWithReasoningCompat(body: any) {
-  try {
-    return await openai.chat.completions.create({
-      ...body,
-      reasoning_effort: OPENAI_REASONING_EFFORT,
-    });
-  } catch (error: any) {
-    const hasTools = Array.isArray(body?.tools) && body.tools.length > 0;
-    if (hasTools && supportsReasoningEffortRetryWithoutTools(error)) {
-      console.warn(
-        "[AI Chat] Retrying completion without reasoning_effort because this model + endpoint rejects it with tools."
-      );
-      return await openai.chat.completions.create(body);
-    }
-    throw error;
-  }
-}
-
-async function createChatCompletionStreamWithReasoningCompat(
-  body: any
-): Promise<AsyncIterable<ChatCompletionChunk>> {
-  const streamBody = { ...body, stream: true as const };
-  try {
-    return (await openai.chat.completions.create({
-      ...streamBody,
-      reasoning_effort: OPENAI_REASONING_EFFORT,
-    })) as unknown as AsyncIterable<ChatCompletionChunk>;
-  } catch (error: any) {
-    const hasTools = Array.isArray(body?.tools) && body.tools.length > 0;
-    if (hasTools && supportsReasoningEffortRetryWithoutTools(error)) {
-      console.warn(
-        "[AI Chat] Retrying stream without reasoning_effort because this model + endpoint rejects it with tools."
-      );
-      return (await openai.chat.completions.create(streamBody)) as unknown as AsyncIterable<ChatCompletionChunk>;
-    }
-    throw error;
-  }
 }
 
 function cleanSourceUrl(raw: string): string {
@@ -431,45 +387,6 @@ const TOOLS = [
           max_suggestions: { type: "number", description: "Default 5, max 8." },
         },
         required: ["pitch_type", "company_name"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "buildPitchAnglePickerOptions",
-      description:
-        "Build categorized ask_user_question options for email-flow audience picks (Interests / Age / Gender / Country / Brand affinity). Call after curatePitchInterests when interest_strength is not strong. Pass suggested_angles from curation and athlete_id when available.",
-      parameters: {
-        type: "object",
-        properties: {
-          suggested_angles: {
-            type: "array",
-            description: "Suggested angles from curatePitchInterests.suggested_angles.",
-            items: {
-              type: "object",
-              properties: {
-                kind: {
-                  type: "string",
-                  enum: ["interest", "age", "gender", "country", "brand_affinity"],
-                },
-                value: { type: "string" },
-              },
-              required: ["kind", "value"],
-            },
-          },
-          interest_names: {
-            type: "array",
-            items: { type: "string" },
-            description: "Optional canonical interests from getDistinctAudienceInterests.",
-          },
-          athlete_id: {
-            type: "string",
-            description: "Athlete UUID for country/brand sections from audience profile.",
-          },
-          top_country_count: { type: "number" },
-          top_brand_count: { type: "number" },
-        },
       },
     },
   },
@@ -805,21 +722,6 @@ const TOOLS = [
   {
     type: "function" as const,
     function: {
-      name: "getAthleteSocialStats",
-      description:
-        "Get social media follower counts and engagement rates for an athlete across all platforms (Instagram, TikTok, Facebook, X). Use this for any question about reach, followers, or engagement.",
-      parameters: {
-        type: "object",
-        properties: {
-          athlete_id: { type: "string" },
-        },
-        required: ["athlete_id"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
       name: "getAthleteAudienceByCategory",
       description:
         "Audience lookup for States or Cities (or any category not in getAthleteFullAudienceProfile). Returns items ranked by % of audience.",
@@ -842,7 +744,7 @@ const TOOLS = [
     function: {
       name: "getAthleteFullAudienceProfile",
       description:
-        "Get the complete audience profile for an athlete: interests, gender, age, ethnicity, countries, brands, and social stats. Call once instead of per-category lookups. Use getAthleteAudienceByCategory only for States or Cities.",
+        "Get the complete audience profile for an athlete: interests, gender, age, ethnicity, countries, brands, and social reach (followers + engagement per platform in social). Use for reach/follower/engagement questions and pitch prep. Call once instead of per-category lookups. Use getAthleteAudienceByCategory only for States or Cities.",
       parameters: {
         type: "object",
         properties: {
@@ -1219,7 +1121,7 @@ const TOOLS = [
     function: {
       name: "getAthleteIntelligence",
       description:
-        "Server-side athlete rollup in one call: full athlete record, contracts (current/expired/upcoming), social_data, full audience summary, accolades, sponsorship conflicts, and open taxonomy categories. Prefer this over chaining getAthlete + getAthleteContracts + getAthleteFullAudienceProfile when you need the combined prospecting picture.",
+        "Server-side athlete rollup in one call: athlete record, contracts (current/expired/upcoming), social_data, audience summary, accolades, sponsorship conflicts, and open taxonomy categories. Prefer this for high-level questions like 'tell me about [athlete]' or when you need the full prospecting picture. Use getAthlete, getAthleteContracts, or getAthleteFullAudienceProfile only when you need one slice without the rest.",
       parameters: {
         type: "object",
         properties: {
@@ -1314,7 +1216,6 @@ const ATHLETE_ID_TOOL_NAMES = new Set([
   "getAthleteAgents",
   "getAthleteContracts",
   "getAthleteCoveredCategories",
-  "getAthleteSocialStats",
   "getAthleteAudienceByCategory",
   "getAthleteFullAudienceProfile",
   "getSponsorshipTargets",
@@ -1325,7 +1226,6 @@ const ATHLETE_ID_TOOL_NAMES = new Set([
 const TOOLS_WITH_ATHLETE_ID_RESOLUTION = new Set([
   ...ATHLETE_ID_TOOL_NAMES,
   "curatePitchInterests",
-  "buildPitchAnglePickerOptions",
   "composePitchEmail",
   "mergePitchEmails",
   "pushEmailToCrm",
@@ -1392,6 +1292,7 @@ export async function POST(req: Request) {
     let athlete_id: string | undefined;
     let ui_context: z.infer<typeof chatUiContextSchema> | undefined;
     let flow_mode: FlowMode | undefined;
+    let chat_model: z.infer<typeof chatModelTierSchema> | undefined;
     let mode: any;
     let streamRequested = false;
     let interaction_response: z.infer<typeof interactionResponseSchema> | undefined;
@@ -1408,6 +1309,7 @@ export async function POST(req: Request) {
       athlete_id = payload.athlete_id;
       ui_context = payload.ui_context;
       flow_mode = parseFlowMode(payload.flow_mode);
+      chat_model = payload.chat_model;
       mode = payload.mode;
       interaction_response = payload.interaction_response;
       if (payload.stream === true) streamRequested = true;
@@ -1730,6 +1632,7 @@ export async function POST(req: Request) {
       athleteId: requestAthleteId || undefined,
       messages: trimmedMessages,
     });
+    const resolvedChatModel = resolveChatModelId(parseChatModelTier(chat_model));
 
     const {
       flowIntent,
@@ -1901,6 +1804,11 @@ REQUIRED behavior — do not deviate:
         return summary;
       };
       const usedToolNames = new Set<string>();
+      let composePitchEmailCallCount = 0;
+      let askUserQuestionCallCount = 0;
+      const multiCompanyEmailIntent = detectFlow5MultiCompanyTemplateIntent(trimmedMessages, {
+        pipelineDrafting,
+      });
       let runtimeSelectedInterestsCount = selectedInterests.length;
       let skipPickerThisRun = skipInterestPicker;
       let composeAfterInterestsThisRun = composeAfterInterestSelection;
@@ -1944,7 +1852,7 @@ REQUIRED behavior — do not deviate:
       };
 
       const completionBody = {
-        model: OPENAI_CHAT_MODEL,
+        model: resolvedChatModel,
         messages: currentMessages,
         tools: activeToolDefinitions,
         tool_choice: "auto" as const,
@@ -1993,6 +1901,9 @@ REQUIRED behavior — do not deviate:
           skipInterestPicker: skipPickerThisRun,
           composeAfterInterestSelection: composeAfterInterestsThisRun,
           lastAssistantContent: String(lastMessage?.content ?? ""),
+          multiCompanyEmailIntent,
+          composePitchEmailCallCount,
+          askUserQuestionCallCount,
         });
         const missingToolsCondition =
           toolCalls.length === 0 && missingRequiredTools.length > 0;
@@ -2107,6 +2018,12 @@ REQUIRED behavior — do not deviate:
             usedToolNames.add(toolName);
           }
           const { name, arguments: args } = call.function;
+          if (name === "composePitchEmail") {
+            composePitchEmailCallCount += 1;
+          }
+          if (name === ASK_USER_QUESTION_TOOL) {
+            askUserQuestionCallCount += 1;
+          }
           if (name === ASK_USER_QUESTION_TOOL) continue;
           let result: any;
           let parsedArgs: any = {};
@@ -2140,9 +2057,7 @@ REQUIRED behavior — do not deviate:
               }
             }
 
-            if (name === "searchWebCompanies") {
-              result = await searchCompanies(parsedArgs.query);
-            } else if (typeof (tools as any)[name] === "function") {
+            if (typeof (tools as any)[name] === "function") {
               result = await (tools as any)[name](parsedArgs);
               if (shouldRetryWithResolvedAthleteId(name, result)) {
                 const retriedArgs = await resolveAthleteIdIfNeeded(name, {
@@ -2249,9 +2164,6 @@ REQUIRED behavior — do not deviate:
             if (name === "getAthleteFullAudienceProfile" && result) {
               const maybeName = result?.athlete?.name ?? result?.athlete_name ?? null;
               sources.push(maybeName ? `Audience insights: ${maybeName} from audience profile.` : `Audience profile: ${parsedArgs.athlete_id}`);
-            }
-            if (name === "getAthleteSocialStats" && result) {
-              sources.push(`Social stats: ${parsedArgs.athlete_id}`);
             }
             if (name === "pushCompanyToCrmPipeline" && result && !result.error) {
               sources.push(`CRM pipeline company: ${parsedArgs.company_name}`);
@@ -2451,7 +2363,7 @@ REQUIRED behavior — do not deviate:
             const { message } = await streamChatCompletionToMessage(
               () =>
                 createChatCompletionStreamWithReasoningCompat({
-                  model: OPENAI_CHAT_MODEL,
+                  model: resolvedChatModel,
                   messages: forcedMessages,
                   tools: activeToolDefinitions,
                   tool_choice: forcedToolChoice,
@@ -2463,7 +2375,7 @@ REQUIRED behavior — do not deviate:
             lastMessage = message;
           } else {
             const completion = await createChatCompletionWithReasoningCompat({
-              model: OPENAI_CHAT_MODEL,
+              model: resolvedChatModel,
               messages: forcedMessages,
               tools: activeToolDefinitions,
               tool_choice: forcedToolChoice,

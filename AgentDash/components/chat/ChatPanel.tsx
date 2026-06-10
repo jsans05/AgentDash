@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from "react";
+import React, { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle, memo } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -20,8 +20,11 @@ import {
   COMPOSER_ICON_BUTTON_CLASS,
   COMPOSER_ICON_CLASS,
 } from "./ChatFlowModeSelector";
+import { ChatModelSelector } from "./ChatModelSelector";
+import { readStoredChatModelTier, type ChatModelTier } from "@/lib/ai/chat-model";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { ChatMultiSelectCard } from "./ChatMultiSelectCard";
+import { createStreamTokenBatcher } from "@/lib/chat/stream-token-batcher";
 import { Copy, RefreshCw, Trash2, ArrowDown, Paperclip, X as XIcon, FileSpreadsheet, ImageIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -65,6 +68,75 @@ function upsertAssistantMessage(prev: Message[], next: Message): Message[] {
   return [...prev, next];
 }
 
+type StreamTokenHandler = {
+  onStreamToken: (token: string) => void;
+  flushStream: () => void;
+  disposeStream: () => void;
+  getStreamStarted: () => boolean;
+};
+
+function createStreamTokenHandler(
+  streamMsgId: string,
+  setStreamingAssistantId: (id: string | null) => void,
+  setStreamingToolStatus: (status: string | null) => void,
+  setMessages: React.Dispatch<React.SetStateAction<Message[]>>
+): StreamTokenHandler {
+  let streamStarted = false;
+  const batcher = createStreamTokenBatcher({
+    onUpdate: (text, isFirst) => {
+      if (isFirst && !streamStarted) {
+        streamStarted = true;
+        setStreamingAssistantId(streamMsgId);
+        setStreamingToolStatus(null);
+        setMessages((prev) =>
+          dedupeMessagesById(
+            upsertAssistantMessage(prev, {
+              id: streamMsgId,
+              role: "assistant",
+              content: text,
+              createdAt: new Date().toISOString(),
+            })
+          )
+        );
+        return;
+      }
+      setMessages((prev) =>
+        dedupeMessagesById(
+          prev.map((m) => (m.id === streamMsgId ? { ...m, content: m.content + text } : m))
+        )
+      );
+    },
+  });
+  return {
+    onStreamToken: batcher.onToken,
+    flushStream: batcher.flush,
+    disposeStream: batcher.dispose,
+    getStreamStarted: () => streamStarted,
+  };
+}
+
+const AssistantMessageBody = memo(function AssistantMessageBody({
+  content,
+  isStreaming,
+}: {
+  content: string;
+  isStreaming: boolean;
+}) {
+  if (!content.trim()) return null;
+  if (isStreaming) {
+    return (
+      <div className="whitespace-pre-wrap text-[15px] leading-relaxed text-[#EFEAE1]">
+        {content}
+        <span
+          className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse bg-[#EFEAE1]/80"
+          aria-hidden
+        />
+      </div>
+    );
+  }
+  return <ChatMarkdown content={content} className="text-[15px] text-[#EFEAE1]" />;
+});
+
 export type ChatProject = {
   id: string;
   name: string;
@@ -82,6 +154,7 @@ export type ChatPanelSendOptions = {
   signal?: AbortSignal;
   mode?: "default" | "deep_research" | "web_search";
   flowMode?: ChatFlowMode;
+  chatModel?: ChatModelTier;
   attachments?: File[];
   onStreamToken?: (text: string) => void;
   onStreamEvent?: (event: ChatSseEvent) => void;
@@ -203,10 +276,15 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   const [streamingToolStatus, setStreamingToolStatus] = useState<string | null>(null);
   const [sendMode, setSendMode] = useState<"default" | "deep_research" | "web_search">("default");
   const [flowMode, setFlowMode] = useState<ChatFlowMode>(initialFlowMode);
+  const [chatModel, setChatModel] = useState<ChatModelTier>("sonnet");
 
   useEffect(() => {
     setFlowMode(initialFlowMode);
   }, [initialFlowMode]);
+
+  useEffect(() => {
+    setChatModel(readStoredChatModelTier());
+  }, []);
   const [attachments, setAttachments] = useState<File[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -419,9 +497,13 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
 
   useEffect(() => {
     if (messages.length || loading) {
-      if (isNearBottom()) scrollToBottom("smooth");
+      if (isNearBottom()) {
+        // Smooth scroll fights token updates; stay pinned instantly while streaming.
+        const behavior: ScrollBehavior = streamingAssistantId ? "instant" : "smooth";
+        scrollToBottom(behavior);
+      }
     }
-  }, [messages, loading, isNearBottom, scrollToBottom]);
+  }, [messages, loading, streamingAssistantId, isNearBottom, scrollToBottom]);
 
   const applyAssistantResult = useCallback(
     (result: PostAiChatResult, streamMsgId: string, _streamStarted: boolean) => {
@@ -486,7 +568,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
       abortSendRef.current = ac;
       const timeoutId = window.setTimeout(() => ac.abort(), CHAT_SEND_TIMEOUT_MS);
       const streamMsgId = crypto.randomUUID();
-      let streamStarted = false;
+      const streamHandler = createStreamTokenHandler(
+        streamMsgId,
+        setStreamingAssistantId,
+        setStreamingToolStatus,
+        setMessages
+      );
       setStreamingSources([]);
       setStreamingWebSources([]);
       setStreamingToolStatus(null);
@@ -504,32 +591,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
             {
           signal: ac.signal,
           mode: sendMode,
+          chatModel,
           interactionResponse: response,
-          onStreamToken: (token) => {
-            if (!streamStarted) {
-              streamStarted = true;
-              setStreamingAssistantId(streamMsgId);
-              setStreamingToolStatus(null);
-              setMessages((prev) =>
-                dedupeMessagesById(
-                  upsertAssistantMessage(prev, {
-                    id: streamMsgId,
-                    role: "assistant",
-                    content: token,
-                    createdAt: new Date().toISOString(),
-                  })
-                )
-              );
-            } else {
-              setMessages((prev) =>
-                dedupeMessagesById(
-                  prev.map((m) =>
-                    m.id === streamMsgId ? { ...m, content: m.content + token } : m
-                  )
-                )
-              );
-            }
-          },
+          onStreamToken: streamHandler.onStreamToken,
           onStreamEvent: (event) => {
             if (event.type === "meta" && event.phase === "tools") {
               setStreamingToolStatus(
@@ -569,7 +633,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
         flowMode
           )
         );
-        applyAssistantResult(result, streamMsgId, streamStarted);
+        streamHandler.flushStream();
+        applyAssistantResult(result, streamMsgId, streamHandler.getStreamStarted());
       } catch (e: unknown) {
         const details = isAbortError(e)
           ? "Request timed out or was stopped. Try again."
@@ -586,6 +651,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
           },
         ]);
       } finally {
+        streamHandler.flushStream();
+        streamHandler.disposeStream();
         window.clearTimeout(timeoutId);
         abortSendRef.current = null;
         setLoading(false);
@@ -603,6 +670,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
       projectLoading,
       onSend,
       sendMode,
+      chatModel,
       applyAssistantResult,
       athleteId,
       uiContext,
@@ -662,7 +730,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
       abortSendRef.current = ac;
       const timeoutId = window.setTimeout(() => ac.abort(), CHAT_SEND_TIMEOUT_MS);
       const streamMsgId = crypto.randomUUID();
-      let streamStarted = false;
+      const streamHandler = createStreamTokenHandler(
+        streamMsgId,
+        setStreamingAssistantId,
+        setStreamingToolStatus,
+        setMessages
+      );
       setStreamingSources([]);
       setStreamingWebSources([]);
       setStreamingToolStatus(null);
@@ -671,32 +744,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
           {
           signal: ac.signal,
           mode: sendMode,
+          chatModel,
           attachments: attachmentsToSend,
-          onStreamToken: (token) => {
-            if (!streamStarted) {
-              streamStarted = true;
-              setStreamingAssistantId(streamMsgId);
-              setStreamingToolStatus(null);
-              setMessages((prev) =>
-                dedupeMessagesById(
-                  upsertAssistantMessage(prev, {
-                    id: streamMsgId,
-                    role: "assistant",
-                    content: token,
-                    createdAt: new Date().toISOString(),
-                  })
-                )
-              );
-            } else {
-              setMessages((prev) =>
-                dedupeMessagesById(
-                  prev.map((m) =>
-                    m.id === streamMsgId ? { ...m, content: m.content + token } : m
-                  )
-                )
-              );
-            }
-          },
+          onStreamToken: streamHandler.onStreamToken,
           onStreamEvent: (event) => {
             if (event.type === "meta" && event.phase === "tools") {
               setStreamingToolStatus(
@@ -754,7 +804,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
         }).catch(() => {});
         // #endregion
         const result = await onSend(fullHistory, activeProject, activeConversationId, routingOptions);
-        applyAssistantResult(result, streamMsgId, streamStarted);
+        streamHandler.flushStream();
+        applyAssistantResult(result, streamMsgId, streamHandler.getStreamStarted());
       } catch (e: unknown) {
         const details = isAbortError(e)
           ? "Request timed out or was stopped. Try again."
@@ -771,6 +822,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
           },
         ]);
       } finally {
+        streamHandler.flushStream();
+        streamHandler.disposeStream();
         window.clearTimeout(timeoutId);
         abortSendRef.current = null;
         setLoading(false);
@@ -787,6 +840,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
       onSend,
       attachments,
       sendMode,
+      chatModel,
       applyAssistantResult,
       submitInteractionResponse,
       conversationReady,
@@ -868,7 +922,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
     setMessages(upToUser);
     setLoading(true);
     const streamMsgId = crypto.randomUUID();
-    let streamStarted = false;
+    const streamHandler = createStreamTokenHandler(
+      streamMsgId,
+      setStreamingAssistantId,
+      setStreamingToolStatus,
+      setMessages
+    );
     setStreamingSources([]);
     setStreamingWebSources([]);
     setStreamingToolStatus(null);
@@ -881,31 +940,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
         withChatRoutingOptions(
           {
         mode: sendMode,
-        onStreamToken: (text) => {
-          if (!streamStarted) {
-            streamStarted = true;
-            setStreamingAssistantId(streamMsgId);
-            setStreamingToolStatus(null);
-            setMessages((prev) =>
-              dedupeMessagesById(
-                upsertAssistantMessage(prev, {
-                  id: streamMsgId,
-                  role: "assistant",
-                  content: text,
-                  createdAt: new Date().toISOString(),
-                })
-              )
-            );
-          } else {
-            setMessages((prev) =>
-              dedupeMessagesById(
-                prev.map((m) =>
-                  m.id === streamMsgId ? { ...m, content: m.content + text } : m
-                )
-              )
-            );
-          }
-        },
+        chatModel,
+        onStreamToken: streamHandler.onStreamToken,
         onStreamEvent: (event) => {
           if (event.type === "meta" && event.phase === "tools") {
             setStreamingToolStatus(
@@ -929,10 +965,13 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
           flowMode
         )
       );
-      applyAssistantResult(result, streamMsgId, streamStarted);
+      streamHandler.flushStream();
+      applyAssistantResult(result, streamMsgId, streamHandler.getStreamStarted());
     } catch {
       setMessages((prev) => [...prev, { id: crypto.randomUUID(), role: "assistant", content: "Error: Failed to get response." }]);
     } finally {
+      streamHandler.flushStream();
+      streamHandler.disposeStream();
       setLoading(false);
       setStreamingAssistantId(null);
       setStreamingSources([]);
@@ -1297,9 +1336,10 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
                     className="w-full py-1 pr-2 text-[#EFEAE1]"
                     style={{ fontFamily: "var(--font-body)" }}
                   >
-                    {msg.content.trim() ? (
-                      <ChatMarkdown content={msg.content} className="text-[15px] text-[#EFEAE1]" />
-                    ) : null}
+                    <AssistantMessageBody
+                      content={msg.content}
+                      isStreaming={streamingAssistantId === msg.id}
+                    />
                     {msg.interaction && msg.interactionStatus === "expired" ? (
                       <p className="mt-2 text-sm text-[#C9A227]">
                         This category picker expired. Send your email request again, or type your picks as a normal
@@ -1565,6 +1605,11 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
                     <Paperclip className={COMPOSER_ICON_CLASS} />
                   </Button>
                 </Tooltip>
+                <ChatModelSelector
+                  value={chatModel}
+                  onChange={setChatModel}
+                  disabled={loading || projectLoading || bootLoading}
+                />
                 <ChatFlowModeSelector
                   flowMode={flowMode}
                   onFlowModeChange={setFlowMode}

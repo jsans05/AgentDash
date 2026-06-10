@@ -1,4 +1,17 @@
-import type { ChatCompletionChunk } from "openai/resources/chat/completions";
+type ChatCompletionChunk = {
+  choices: Array<{
+    delta?: {
+      content?: string;
+      tool_calls?: Array<{
+        index?: number;
+        id?: string;
+        type?: "function";
+        function?: { name?: string; arguments?: string };
+      }>;
+    };
+    finish_reason?: string | null;
+  }>;
+};
 
 export type StreamedAssistantMessage = {
   role: "assistant";

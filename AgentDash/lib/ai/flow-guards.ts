@@ -17,6 +17,9 @@ type FlowGuardContext = {
   skipInterestPicker?: boolean;
   composeAfterInterestSelection?: boolean;
   lastAssistantContent?: string;
+  multiCompanyEmailIntent?: boolean;
+  composePitchEmailCallCount?: number;
+  askUserQuestionCallCount?: number;
 };
 
 function isClarifyingAssistantQuestion(content: string | undefined): boolean {
@@ -62,11 +65,30 @@ You must **NOT**:
 `.trim();
 }
 
-export function getFlowSystemPromptAddon(_flowIntent: AIFlowIntent, flowMode?: ResolvedFlowMode): string {
-  if (flowMode === "default") {
-    return "";
+/** Mode-agnostic routing scaffolding keyed on classified flow intent (survives mode removal). */
+export function getFlowIntentRoutingAddon(flowIntent: AIFlowIntent): string {
+  if (flowIntent === "company_targets") {
+    return `
+━━━ ROUTING: COMPANY-TARGETS (find sponsors for an athlete) ━━━
+To answer: call getSponsorshipTargets THEN generateAthleteProspectList. Return the markdown field from generateAthleteProspectList verbatim. Do not freelance a category-research reply without the prospect list — the user needs the table.`.trim();
   }
-
+  if (flowIntent === "inbound_company_athlete_match") {
+    return `
+━━━ ROUTING: INBOUND-COMPANY-ATHLETE-MATCH (find athletes for a company) ━━━
+3-step flow: 1) getDistinctAudienceInterests → 2) ask_user_question with EVERY canonical interest → wait for selection → 3) ask_user_question with all sports → wait → 4) searchAthletesByAudienceMatch.
+Do NOT call curatePitchInterests / composePitchEmail for this intent — that's the email path. Inbound is about finding roster athletes whose AUDIENCE fits the brand, not drafting outreach.`.trim();
+  }
+  if (
+    flowIntent === "email_single_athlete" ||
+    flowIntent === "email_group_outreach" ||
+    flowIntent === "email_roster_outreach" ||
+    flowIntent === "email_general_outreach"
+  ) {
+    return `
+━━━ ROUTING: EMAIL OUTREACH ━━━
+Pipeline: curatePitchInterests → (auto-confirm if strong OR ask_user_question with server-built categorized options) → composePitchEmail with pitch_angles or interest_names.
+Multi-company fan-out: after each composePitchEmail, finish by calling pushEmailToCrm ONCE with emails[] containing one entry per company. Do not loop pushEmailToCrm per company.`.trim();
+  }
   return "";
 }
 
@@ -262,11 +284,17 @@ export function getMissingRequiredTools(
     return required;
   }
 
-  if (flowMode === "default") {
-    return required;
-  }
+  const isCompanyTargets = flowIntent === "company_targets" || flowMode === "outbound";
+  const isInboundMatch =
+    flowIntent === "inbound_company_athlete_match" || flowMode === "inbound";
+  const isEmailPitchFlow =
+    flowMode === "email" ||
+    flowIntent === "email_single_athlete" ||
+    flowIntent === "email_group_outreach" ||
+    flowIntent === "email_roster_outreach" ||
+    flowIntent === "email_general_outreach";
 
-  if (flowMode === "outbound") {
+  if (isCompanyTargets && !isInboundMatch) {
     if (!usedToolNames.has("getSponsorshipTargets")) {
       required.push("getSponsorshipTargets");
     }
@@ -276,7 +304,8 @@ export function getMissingRequiredTools(
     return required;
   }
 
-  if (flowMode === "inbound") {
+  if (isInboundMatch && !isCompanyTargets) {
+    const askCount = context?.askUserQuestionCallCount ?? 0;
     if (selectedInterestsCount === 0 && !usedToolNames.has("getDistinctAudienceInterests")) {
       required.push("getDistinctAudienceInterests");
     }
@@ -287,19 +316,23 @@ export function getMissingRequiredTools(
     ) {
       required.push(ASK_USER_QUESTION_TOOL);
     }
+    if (selectedInterestsCount > 0 && !usedToolNames.has("searchAthletesByAudienceMatch")) {
+      if (askCount < 2) {
+        required.push(ASK_USER_QUESTION_TOOL);
+      } else {
+        required.push("searchAthletesByAudienceMatch");
+      }
+    }
     return required;
   }
 
-  const isEmailPitchFlow =
-    flowMode === "email" ||
-    flowIntent === "email_single_athlete" ||
-    flowIntent === "email_group_outreach" ||
-    flowIntent === "email_roster_outreach";
+  if (!isEmailPitchFlow) {
+    return required;
+  }
 
-  const needsInterestSelection = isEmailPitchFlow && selectedInterestsCount === 0;
+  const needsInterestSelection = selectedInterestsCount === 0;
   const skipPicker = context?.skipInterestPicker === true;
 
-  // Flows 4-7 must collect explicit user-selected interests before final draft content.
   if (needsInterestSelection && !usedToolNames.has("curatePitchInterests")) {
     required.push("curatePitchInterests");
   }
@@ -317,7 +350,6 @@ export function getMissingRequiredTools(
 
   if (
     context?.composeAfterInterestSelection &&
-    isEmailPitchFlow &&
     selectedInterestsCount > 0 &&
     !usedToolNames.has("composePitchEmail") &&
     !usedToolNames.has("mergePitchEmails") &&
@@ -326,13 +358,22 @@ export function getMissingRequiredTools(
     required.push("composePitchEmail");
   }
 
-  // Flow 7 must establish company context unless already supplied by pipeline embedding.
   if (
     flowIntent === "email_roster_outreach" &&
     context?.pipelineDrafting !== true &&
     !usedToolNames.has("getCrmCompanyContext")
   ) {
     required.push("getCrmCompanyContext");
+  }
+
+  const multiCompanyFanOut =
+    context?.multiCompanyEmailIntent === true || (context?.composePitchEmailCallCount ?? 0) >= 2;
+  if (
+    multiCompanyFanOut &&
+    usedToolNames.has("composePitchEmail") &&
+    !usedToolNames.has("pushEmailToCrm")
+  ) {
+    required.push("pushEmailToCrm");
   }
 
   return required;

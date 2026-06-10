@@ -7,7 +7,7 @@ import {
   interestPickerAllowed,
   resolveFlowMode,
 } from "@/lib/ai/flow-mode";
-import { getMissingRequiredTools } from "@/lib/ai/flow-guards";
+import { getFlowIntentRoutingAddon, getMissingRequiredTools } from "@/lib/ai/flow-guards";
 import { buildSystemPrompt, filterToolDefinitions } from "@/lib/ai/prompts";
 
 test("resolveFlowMode prefers explicit outbound over auto classification", () => {
@@ -80,13 +80,32 @@ test("default mode has no blocked tools", () => {
   assert.equal(filterToolDefinitions(tools, "default").length, 3);
 });
 
-test("getMissingRequiredTools default mode requires no mandatory tools", () => {
+test("getMissingRequiredTools default mode enforces intent-based outbound tools", () => {
   const missing = getMissingRequiredTools("company_targets", new Set(), { flowMode: "default" });
-  assert.deepEqual(missing, []);
+  assert.deepEqual(missing, ["getSponsorshipTargets", "generateAthleteProspectList"]);
   const inboundMissing = getMissingRequiredTools("inbound_company_athlete_match", new Set(), {
     flowMode: "default",
   });
-  assert.deepEqual(inboundMissing, []);
+  assert.deepEqual(inboundMissing, ["getDistinctAudienceInterests"]);
+});
+
+test("getFlowIntentRoutingAddon returns inbound routing for company-athlete match", () => {
+  const addon = getFlowIntentRoutingAddon("inbound_company_athlete_match");
+  assert.match(addon, /searchAthletesByAudienceMatch/);
+  assert.match(addon, /Do NOT call curatePitchInterests/);
+});
+
+test("getMissingRequiredTools default email fan-out requires batched pushEmailToCrm", () => {
+  const missing = getMissingRequiredTools(
+    "email_single_athlete",
+    new Set(["composePitchEmail", "curatePitchInterests"]),
+    {
+      flowMode: "default",
+      selectedInterestsCount: 2,
+      composePitchEmailCallCount: 3,
+    }
+  );
+  assert.ok(missing.includes("pushEmailToCrm"));
 });
 
 test("buildSystemPrompt default uses minimal guardrails module", () => {

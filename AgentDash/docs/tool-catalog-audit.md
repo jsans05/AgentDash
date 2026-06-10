@@ -12,7 +12,7 @@ Source: TOOLS array in app/api/ai/chat/route.ts (const TOOLS … ]; before Agent
 
 - **Schema:** app/api/ai/chat/route.ts (TOOLS array)
 - **Default handlers:** createAITools() return object in lib/ai/tools.ts (~line 781+)
-- **Dispatch loop:** runToolCallingAgent in route.ts — (tools as any)[name](parsedArgs) except searchWebCompanies (inline) and ask_user_question (interaction pause)
+- **Dispatch loop:** runToolCallingAgent in route.ts — (tools as any)[name](parsedArgs) except ask_user_question (interaction pause)
 - **Mode filtering:** filterToolDefinitions(TOOLS, resolvedFlowMode) using blockedToolsForFlowMode() in lib/ai/flow-mode.ts
 - **Runtime required tools:** getMissingRequiredTools() in lib/ai/flow-guards.ts
 
@@ -998,7 +998,6 @@ Source: TOOLS array in app/api/ai/chat/route.ts (const TOOLS … ]; before Agent
 - `generateAthleteProspectList`
 - `getAthleteCoveredCategories`
 - `getSponsorshipTargets`
-- `getAthleteSocialStats`
 - `getAthleteFullAudienceProfile`
 - `apolloFindContactsForCompany`
 - `pushCompanyToCrmPipeline`
@@ -1024,7 +1023,7 @@ Source: TOOLS array in app/api/ai/chat/route.ts (const TOOLS … ]; before Agent
 
 ## Phase 4 consolidation (2026-06-10)
 
-**Catalog size after Phases 2–4:** ~32 LLM tools (down from 52 at audit time).
+**Catalog size after Phases 2–4 + deferred resolution:** 30 LLM tools (down from 52 at audit time).
 
 ### Removed in Phase 4 (low-risk dead / redundant)
 
@@ -1057,17 +1056,25 @@ Source: TOOLS array in app/api/ai/chat/route.ts (const TOOLS … ]; before Agent
 
 - `searchWebCompanies` vs `apolloSearchCompanies` — web/SERP fallback vs Apollo firmographics (different data sources)
 - `pushCompanyToCrmPipeline` vs `bulkImportCompaniesToCrmForAthlete` — single vs batch + athlete target-list linkage
-- `getAthleteSocialStats` vs `getAthleteFullAudienceProfile` — raw social row vs full audience rollup (social is subset of full profile but lighter for reach-only questions)
 - `getCrmCompanyContext` vs removed `getCompanyByName` — pipeline emails, past partnerships, CRM fields
+
+### Removed in deferred-resolution pass (2026-06-10)
+
+| Tool | Decision | Rationale |
+|------|----------|-----------|
+| `buildPitchAnglePickerOptions` | CONSOLIDATE (removed from LLM catalog) | Route auto-synthesizes picker via `lib/ai/pitch-angle-picker.ts`; no per-tool telemetry; model never needs to call it |
+| `getAthleteSocialStats` | DELETE | Redundant with `getAthleteFullAudienceProfile.social` (followers + engagement per platform) |
+
+## Phase 4 deferred decisions — resolved (2026-06-10)
+
+| Item | Decision |
+|------|----------|
+| `getAthleteIntelligence` | **KEEP** — server rollup saves round-trips for high-level athlete questions; description tightened to prefer over chaining getters |
+| `buildPitchAnglePickerOptions` | **CONSOLIDATE** — removed from LLM catalog; `lib/ai/pitch-angle-picker.ts` kept for server auto-synthesis in route |
+| `getAthleteSocialStats` | **DELETE** — reach/followers covered by `getAthleteFullAudienceProfile.social` |
+| `apolloExpandSimilarCompanies` | **LEAVE DELETED** — broken schema-only tool; no active workflow requesting lookalike expansion |
+| `searchWebCompanies` inline dispatch | **MOVE** — handler in `lib/ai/tools/search-web-companies.ts`, dispatched via `createAITools` like other tools |
 
 ## Phase 4 deferred decisions
 
-- **`getAthleteIntelligence`** — Keep for now: server computes open categories, contract conflicts, and partitioned contracts in one round-trip; not a trivial compose of `getAthlete` + `getAthleteFullAudienceProfile`. Should we ever expose this only to non-chat agents and drop from the LLM catalog?
-
-- **`buildPitchAnglePickerOptions`** — Route auto-synthesizes picker options at `route.ts` when the model skips the tool; should the LLM-callable tool be removed from the catalog while keeping the lib function for server synthesis?
-
-- **`getAthleteSocialStats`** — Overlaps `getAthleteFullAudienceProfile.social` for single-athlete reach questions; merge into full profile only (one tool) or keep both for token/latency savings?
-
-- **`apolloExpandSimilarCompanies`** — Removed from catalog as broken; should we implement the handler (Apollo lookalike search) or leave deleted permanently?
-
-- **`searchWebCompanies` inline dispatch** — Handler lives in `route.ts` not `tools.ts`; consolidate dispatch architecture or keep split for Tavily enrichment?
+_(none — all resolved above)_

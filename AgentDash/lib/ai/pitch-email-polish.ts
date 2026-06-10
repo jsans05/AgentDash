@@ -1,10 +1,10 @@
-import OpenAI from "openai";
 import { GLOBAL_EMAIL_CLOSING } from "@/lib/ai/pitch-spec";
+import { createChatCompletion } from "@/lib/ai/anthropic-chat-client";
 import {
-  OPENAI_CHAT_MODEL,
-  OPENAI_PITCH_POLISH_REASONING_EFFORT,
+  ANTHROPIC_PITCH_POLISH_MAX_TOKENS,
+  getAnthropicApiKey,
   PITCH_POLISH_TIMEOUT_MS,
-} from "@/lib/ai/openai-chat-defaults";
+} from "@/lib/ai/llm-chat-defaults";
 import type { AudienceFactRow, PitchFactSheet } from "@/lib/ai/pitch-fact-sheet-types";
 import { validatePolishedPitchEmail } from "@/lib/ai/pitch-email-polish-validation";
 
@@ -144,31 +144,23 @@ export async function polishPitchEmailCopy(params: {
   revisionHint?: string | null;
   suggestedSubject?: string | null;
 }): Promise<PolishedPitchEmail | null> {
-  if (!process.env.OPENAI_API_KEY?.trim()) return null;
+  if (!getAnthropicApiKey()) return null;
 
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const toneSamples = params.toneSamples ?? [];
   let priorErrors: string[] | undefined;
 
   for (let attempt = 0; attempt < 2; attempt++) {
-    const requestBody: Parameters<typeof openai.chat.completions.create>[0] = {
-      model: OPENAI_CHAT_MODEL,
-      messages: [
-        { role: "system", content: POLISH_SYSTEM },
-        {
-          role: "user",
-          content: buildUserPrompt(params.factSheet, toneSamples, params.revisionHint, priorErrors),
-        },
-      ],
-      response_format: { type: "json_object" },
-      max_completion_tokens: 1600,
-    };
-    if (OPENAI_PITCH_POLISH_REASONING_EFFORT) {
-      requestBody.reasoning_effort = OPENAI_PITCH_POLISH_REASONING_EFFORT;
-    }
-
     const completion = await withTimeout(
-      openai.chat.completions.create(requestBody),
+      createChatCompletion({
+        messages: [
+          { role: "system", content: POLISH_SYSTEM },
+          {
+            role: "user",
+            content: buildUserPrompt(params.factSheet, toneSamples, params.revisionHint, priorErrors),
+          },
+        ],
+        max_completion_tokens: ANTHROPIC_PITCH_POLISH_MAX_TOKENS,
+      }),
       PITCH_POLISH_TIMEOUT_MS
     );
     if (!completion) {

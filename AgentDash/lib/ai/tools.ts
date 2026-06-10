@@ -23,7 +23,7 @@ import {
   composeMultiAthletePitchEmails,
   type PitchAngle,
 } from "@/lib/ai/pitch-composer";
-import { buildPitchAnglePickerOptions as buildPitchAnglePickerOptionsImpl } from "@/lib/ai/pitch-angle-picker";
+import { searchWebCompanies as searchWebCompaniesImpl } from "@/lib/ai/tools/search-web-companies";
 import { fetchPitchToneSamples } from "@/lib/ai/pitch-tone-samples";
 import { stripSponsorGapCopy } from "@/lib/ai/email-copy-guard";
 import type { PitchType } from "@/lib/ai/pitch-spec";
@@ -781,30 +781,6 @@ export async function createAITools(profile: Profile) {
       return computeRosterAudienceSummary(supabase, profile, interest_names);
     },
 
-    buildPitchAnglePickerOptions: async (params: {
-      suggested_angles?: Array<{ kind: string; value: string }>;
-      interest_names?: string[];
-      athlete_id?: string | null;
-      top_country_count?: number;
-      top_brand_count?: number;
-    }) => {
-      const athlete_id = params.athlete_id?.trim() || null;
-      if (athlete_id && !(await agentCanAccessAthlete(supabase, profile, athlete_id))) {
-        return { error: "Cannot access this athlete" };
-      }
-      return buildPitchAnglePickerOptionsImpl({
-        supabase,
-        profile,
-        suggested_angles: Array.isArray(params.suggested_angles) ? params.suggested_angles : [],
-        interest_names: Array.isArray(params.interest_names)
-          ? params.interest_names.map((name) => String(name ?? "").trim()).filter(Boolean)
-          : [],
-        athlete_id,
-        top_country_count: params.top_country_count,
-        top_brand_count: params.top_brand_count,
-      });
-    },
-
     curatePitchInterests: async (params: {
       pitch_type: PitchType;
       company_name: string;
@@ -1534,15 +1510,6 @@ export async function createAITools(profile: Profile) {
       return pushSingleEmailToCrm(params as PushEmailToCrmSingleParams);
     },
 
-    getAthleteSocialStats: async (params: { athlete_id: string }) => {
-      const athlete_id = params.athlete_id;
-      if (!(await agentCanAccessAthlete(supabase, profile, athlete_id))) {
-        return null;
-      }
-      const { data } = await supabase.from("athlete_social_data").select("*").eq("athlete_id", athlete_id).maybeSingle();
-      return data ?? null;
-    },
-
     getAthleteAudienceByCategory: async (params: {
       athlete_id: string;
       category: "Brands" | "Cities" | "Combined_Age" | "Countries" | "Ethnicity" | "Gender" | "Interests" | "States";
@@ -1836,6 +1803,12 @@ export async function createAITools(profile: Profile) {
       } catch (e: unknown) {
         return { error: e instanceof Error ? e.message : "Apollo company search failed" };
       }
+    },
+
+    searchWebCompanies: async (params: { query: string }) => {
+      const query = String(params.query ?? "").trim();
+      if (!query) return { error: "query is required" };
+      return searchWebCompaniesImpl(query);
     },
 
     getAthleteCoveredCategories: async (params: { athlete_id: string }) => {
