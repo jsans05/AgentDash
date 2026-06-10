@@ -1,14 +1,13 @@
 import {
   AIFlowIntent,
   classifyFlowIntent,
-  detectFlow5MultiCompanyTemplateIntent,
   userReplyingAfterInterestCategoryPrompt,
 } from "@/lib/ai/flow-intent";
 import { detectEmailRevisionIntent } from "@/lib/ai/email-revision-intent";
 import {
   extractLatestCuratePitchInterestsFromMessages,
   getPitchAutoConfirmAddon,
-  resolveAutoConfirmedInterests,
+  resolveAutoConfirmedPitchSelection,
   shouldAutoConfirmPitchInterests,
 } from "@/lib/ai/pitch-auto-interests";
 import { parseEmailThreadContext } from "@/lib/ai/email-thread-context";
@@ -19,29 +18,41 @@ import {
 import {
   getEmailInterestSelectionPromptAddon,
   getEmailRevisionModeAddon,
-  getFlow1InterestSelectionGateAddon,
-  getFlow4InterestSelectionGateAddon,
-  getFlow5InterestSelectionGateAddon,
-  getFlow6InterestSelectionGateAddon,
-  getFlow7InterestSelectionGateAddon,
   getFlowSystemPromptAddon,
   getPostInterestSelectionComposeAddon,
 } from "@/lib/ai/flow-guards";
 import {
+  interestPickerAllowed,
+  resolveFlowIntentForMode,
+  type ResolvedFlowMode,
+} from "@/lib/ai/flow-mode";
+import {
+  APPROVED_INTEREST_CATEGORIES,
   ApprovedInterestCategory,
   extractApprovedInterestSelections,
 } from "@/lib/ai/interest-taxonomy";
+import {
+  extractUserStatedPitchAngles,
+  getUserStatedAnglesAddon,
+} from "@/lib/ai/user-stated-pitch-angles";
+import type { PitchAngle } from "@/lib/ai/pitch-angle-bullets";
+import { pitchAnglesToInterestNames } from "@/lib/ai/pitch-angle-id";
 
 type BuildFlowContextInput = {
   trimmedMessages: any[];
   pipelineDrafting: boolean;
   sessionContextText?: string | null;
+  flowMode: ResolvedFlowMode;
+  athleteId?: string | null;
   /** Interests from ask_user_question interaction_response (client may not include them in messages yet). */
   interactionSelectedInterests?: ApprovedInterestCategory[];
+  /** Multi-dimensional picker selections from ask_user_question. */
+  interactionSelectedPitchAngles?: PitchAngle[];
   forceComposeAfterInterests?: boolean;
 };
 
 export type AIChatFlowContext = {
+  flowMode: ResolvedFlowMode;
   flowIntent: AIFlowIntent;
   selectedInterests: ApprovedInterestCategory[];
   flowPromptAddon: string;
@@ -52,10 +63,13 @@ export type AIChatFlowContext = {
   emailRoutingShouldClarify: boolean;
   skipInterestPicker: boolean;
   composeAfterInterestSelection: boolean;
+  userStatedAnglesAddon: string;
+  userStatedPitchAngles: PitchAngle[];
+  interactionSelectedPitchAngles: PitchAngle[];
 };
 
 export function buildAIChatFlowContext(input: BuildFlowContextInput): AIChatFlowContext {
-  const { trimmedMessages, pipelineDrafting, sessionContextText } = input;
+  const { trimmedMessages, pipelineDrafting, sessionContextText, flowMode } = input;
   const forceComposeAfterInterests = input.forceComposeAfterInterests === true;
   const emailRouting = resolveEmailRoutingContext({
     messages: trimmedMessages,
@@ -63,14 +77,20 @@ export function buildAIChatFlowContext(input: BuildFlowContextInput): AIChatFlow
     sessionContextText,
   });
 
-  let flowIntent = classifyFlowIntent(trimmedMessages, { pipelineDrafting });
+  let flowIntent = resolveFlowIntentForMode(flowMode, trimmedMessages, {
+    pipelineDrafting,
+    athleteId: input.athleteId,
+  });
   if (
+    flowMode === "email" &&
     emailRouting.confidence === "high" &&
     emailRouting.flow_intent &&
     (emailRouting.is_revision || emailRouting.athlete_count >= 2)
   ) {
     flowIntent = emailRouting.flow_intent;
   }
+
+  const userStatedPitchAngles = extractUserStatedPitchAngles(trimmedMessages);
 
   const selectedInterestsFromUsers: ApprovedInterestCategory[] = [];
   for (const m of trimmedMessages) {
@@ -86,72 +106,58 @@ export function buildAIChatFlowContext(input: BuildFlowContextInput): AIChatFlow
   for (const p of threadInterests) {
     if (!selectedInterests.includes(p)) selectedInterests.push(p);
   }
+  const interactionSelectedPitchAngles = [...(input.interactionSelectedPitchAngles ?? [])];
   for (const pick of input.interactionSelectedInterests ?? []) {
     if (!selectedInterests.includes(pick)) selectedInterests.push(pick);
   }
-
-  const curationFromThread = extractLatestCuratePitchInterestsFromMessages(trimmedMessages);
-  const autoConfirmedFromThread =
-    selectedInterests.length === 0 &&
-    curationFromThread &&
-    shouldAutoConfirmPitchInterests(curationFromThread, { pipelineDrafting })
-      ? resolveAutoConfirmedInterests(curationFromThread)
-      : [];
-  for (const pick of autoConfirmedFromThread) {
+  for (const name of pitchAnglesToInterestNames(interactionSelectedPitchAngles)) {
+    const pick = name as ApprovedInterestCategory;
     if (!selectedInterests.includes(pick)) selectedInterests.push(pick);
   }
 
-  const skipInterestPicker = autoConfirmedFromThread.length > 0;
-  const autoConfirmAddon = getPitchAutoConfirmAddon(autoConfirmedFromThread);
+  const audiencePicksRecorded =
+    selectedInterests.length > 0 ||
+    interactionSelectedPitchAngles.length > 0 ||
+    (input.interactionSelectedInterests?.length ?? 0) > 0;
+  const applyUserStatedAngles =
+    flowMode === "email" && userStatedPitchAngles.length > 0 && !audiencePicksRecorded;
 
-  const flow5MultiCompany = detectFlow5MultiCompanyTemplateIntent(trimmedMessages, { pipelineDrafting });
+  if (applyUserStatedAngles) {
+    const approved = new Set<string>(APPROVED_INTEREST_CATEGORIES);
+    for (const angle of userStatedPitchAngles) {
+      if (angle.kind !== "interest") continue;
+      if (!approved.has(angle.name)) continue;
+      const pick = angle.name as ApprovedInterestCategory;
+      if (!selectedInterests.includes(pick)) selectedInterests.push(pick);
+    }
+  }
+
+  const curationFromThread = extractLatestCuratePitchInterestsFromMessages(trimmedMessages);
+  const autoConfirmedSelection =
+    !applyUserStatedAngles &&
+    selectedInterests.length === 0 &&
+    curationFromThread &&
+    shouldAutoConfirmPitchInterests(curationFromThread)
+      ? resolveAutoConfirmedPitchSelection(curationFromThread)
+      : { pitchAngles: [], interestNames: [] };
+  for (const pick of autoConfirmedSelection.interestNames) {
+    if (!selectedInterests.includes(pick)) selectedInterests.push(pick);
+  }
+
+  const skipInterestPicker =
+    applyUserStatedAngles ||
+    autoConfirmedSelection.pitchAngles.length > 0 ||
+    autoConfirmedSelection.interestNames.length > 0;
+  const userStatedAnglesAddon = applyUserStatedAngles
+    ? getUserStatedAnglesAddon(userStatedPitchAngles)
+    : "";
+  const autoConfirmAddon = applyUserStatedAngles ? "" : getPitchAutoConfirmAddon(autoConfirmedSelection);
+  const isAutoConfirmedCompose =
+    (applyUserStatedAngles && userStatedAnglesAddon.length > 0) ||
+    (skipInterestPicker && autoConfirmAddon.length > 0);
+
   const afterInterestPrompt = userReplyingAfterInterestCategoryPrompt(trimmedMessages);
-
-  const flow1InterestGate =
-    !emailRevisionMode &&
-    flowIntent === "inbound_company_athlete_match" &&
-    selectedInterests.length === 0 &&
-    !afterInterestPrompt
-      ? getFlow1InterestSelectionGateAddon()
-      : "";
-
-  const flow5InterestGate =
-    !emailRevisionMode &&
-    !skipInterestPicker &&
-    flowIntent === "email_single_athlete" &&
-    flow5MultiCompany &&
-    selectedInterests.length === 0 &&
-    !afterInterestPrompt
-      ? getFlow5InterestSelectionGateAddon()
-      : "";
-
-  const flow4InterestGate =
-    !emailRevisionMode &&
-    !skipInterestPicker &&
-    flowIntent === "email_single_athlete" &&
-    !flow5MultiCompany &&
-    selectedInterests.length === 0 &&
-    !afterInterestPrompt
-      ? getFlow4InterestSelectionGateAddon()
-      : "";
-
-  const flow6InterestGate =
-    !emailRevisionMode &&
-    !skipInterestPicker &&
-    flowIntent === "email_group_outreach" &&
-    selectedInterests.length === 0 &&
-    !afterInterestPrompt
-      ? getFlow6InterestSelectionGateAddon()
-      : "";
-
-  const flow7InterestGate =
-    !emailRevisionMode &&
-    !skipInterestPicker &&
-    flowIntent === "email_roster_outreach" &&
-    selectedInterests.length === 0 &&
-    !afterInterestPrompt
-      ? getFlow7InterestSelectionGateAddon()
-      : "";
+  const allowInterestPicker = interestPickerAllowed(flowMode);
 
   const revisionAddon = emailRevisionMode
     ? getEmailRevisionModeAddon({
@@ -165,29 +171,50 @@ export function buildAIChatFlowContext(input: BuildFlowContextInput): AIChatFlow
   const routingAddon =
     !emailRouting.should_clarify ? getEmailRoutingContextAddon(emailRouting) : "";
 
+  const hasConfirmedAudienceSignals =
+    selectedInterests.length > 0 ||
+    interactionSelectedPitchAngles.length > 0 ||
+    (applyUserStatedAngles && userStatedPitchAngles.length > 0) ||
+    autoConfirmedSelection.pitchAngles.length > 0 ||
+    autoConfirmedSelection.interestNames.length > 0;
+
   const composeAfterInterestSelection =
+    allowInterestPicker &&
     !emailRevisionMode &&
-    selectedInterests.length > 0 &&
+    hasConfirmedAudienceSignals &&
     (forceComposeAfterInterests || skipInterestPicker || afterInterestPrompt);
 
   const postInterestComposeAddon =
-    composeAfterInterestSelection ? getPostInterestSelectionComposeAddon(selectedInterests, flowIntent) : "";
+    composeAfterInterestSelection && !isAutoConfirmedCompose
+      ? getPostInterestSelectionComposeAddon(
+          selectedInterests,
+          flowIntent,
+          interactionSelectedPitchAngles.length ? interactionSelectedPitchAngles : undefined
+        )
+      : "";
 
-  const flowPromptAddon = [getFlowSystemPromptAddon(flowIntent), revisionAddon, routingAddon, autoConfirmAddon, postInterestComposeAddon]
+  const flowPromptAddon = [
+    getFlowSystemPromptAddon(flowIntent, flowMode),
+    revisionAddon,
+    routingAddon,
+    userStatedAnglesAddon,
+    autoConfirmAddon,
+    postInterestComposeAddon,
+  ]
     .filter(Boolean)
     .join("\n\n");
   const emailInterestAddon =
-    flowIntent === "email_single_athlete" ||
-    flowIntent === "email_group_outreach" ||
-    flowIntent === "email_roster_outreach"
+    allowInterestPicker &&
+    (flowIntent === "email_single_athlete" ||
+      flowIntent === "email_group_outreach" ||
+      flowIntent === "email_roster_outreach")
       ? getEmailInterestSelectionPromptAddon(selectedInterests, flowIntent)
       : "";
 
-  const interestGateAddons = [flow1InterestGate, flow4InterestGate, flow5InterestGate, flow6InterestGate, flow7InterestGate]
-    .filter(Boolean)
-    .join("");
+  const interestGateAddons = "";
 
   return {
+    flowMode,
     flowIntent,
     selectedInterests,
     flowPromptAddon,
@@ -198,5 +225,8 @@ export function buildAIChatFlowContext(input: BuildFlowContextInput): AIChatFlow
     emailRoutingShouldClarify: emailRouting.should_clarify,
     skipInterestPicker,
     composeAfterInterestSelection,
+    userStatedAnglesAddon,
+    userStatedPitchAngles: applyUserStatedAngles ? userStatedPitchAngles : [],
+    interactionSelectedPitchAngles,
   };
 }

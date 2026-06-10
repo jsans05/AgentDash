@@ -6,7 +6,7 @@ import {
 } from "@/lib/crm/resolve-company-website-for-target-list";
 import { findContactsForCompany } from "@/lib/apollo/find-company-contacts";
 import type { Profile } from "@/lib/supabase/types";
-import { fetchTaxonomyNodesForSport, getTaxonomyBySport, normalizeCategoryForMatch } from "@/lib/taxonomy";
+import { fetchTaxonomyNodesForSport, normalizeCategoryForMatch } from "@/lib/taxonomy";
 import { buildAthleteIntelligencePayload } from "@/lib/ai/retrieval";
 import { canonicalInterestByNormalized } from "@/lib/industry-interest-map";
 import { buildProspectingAudienceSignals, prioritizeProspectingCategories } from "@/lib/ai/prospecting-signals";
@@ -17,20 +17,13 @@ import {
   normalizeIgAudiencePercentToFraction,
   resolveAudiencePercentFraction,
 } from "@/lib/athlete-data";
-import {
-  renderGeneralOutreachEmailMarkdown,
-  renderCombinedAthleteOutreachEmailMarkdown,
-  renderGroupOutreachEmailMarkdown,
-  renderSingleAthleteOutreachEmailMarkdown,
-  validateGeneralOutreachEmailInput,
-  validateCombinedAthleteOutreachEmailInput,
-  validateGroupOutreachEmailInput,
-  validateSingleAthleteOutreachEmailInput,
-} from "@/lib/ai/email-templates";
-import { buildDraftFromTemplate, bulletizeProofPoints, normalizeSportForPitch } from "@/lib/ai/email-generation";
-import { getActiveEmailTemplate } from "@/lib/ai/email-template-store";
 import { curatePitchInterests } from "@/lib/ai/pitch-interest-curation";
-import { composePitchEmail, composeMultiAthletePitchEmails } from "@/lib/ai/pitch-composer";
+import {
+  composePitchEmail,
+  composeMultiAthletePitchEmails,
+  type PitchAngle,
+} from "@/lib/ai/pitch-composer";
+import { buildPitchAnglePickerOptions as buildPitchAnglePickerOptionsImpl } from "@/lib/ai/pitch-angle-picker";
 import { fetchPitchToneSamples } from "@/lib/ai/pitch-tone-samples";
 import { stripSponsorGapCopy } from "@/lib/ai/email-copy-guard";
 import type { PitchType } from "@/lib/ai/pitch-spec";
@@ -44,6 +37,7 @@ import { mergeAthleteIntoPotentialAthletes, parseOptionalMatchScore } from "@/li
 import { searchCompanies } from "@/lib/enrichment";
 import { formatAthleteGender, normalizeAthleteGender } from "@/lib/athletes/gender";
 import { upsertContactOutreachDraft } from "@/lib/crm/target-list-outreach";
+import { searchAthletesByAudienceMatch as searchAthletesByAudienceMatchImpl } from "@/lib/ai/search-athletes-by-audience-match";
 
 /** Hardcoded roster sport values for "find athletes for [company]" STEP 2 (must match prompt in chat route). */
 export const FIND_ATHLETES_FOR_COMPANY_SPORTS = [
@@ -553,6 +547,226 @@ export async function createAITools(profile: Profile) {
     };
   };
 
+  type PushEmailToCrmSingleParams = {
+    company_name: string;
+    contact_id?: string;
+    athlete_id?: string;
+    email_subject: string;
+    email_body: string;
+    label?: string;
+  };
+
+  const pushSingleEmailToCrm = async (params: PushEmailToCrmSingleParams) => {
+    const company_name = String(params.company_name ?? "").trim();
+    const email_subject = String(params.email_subject ?? "").trim();
+    const email_body = stripSponsorGapCopy(String(params.email_body ?? ""));
+    if (!company_name) return { ok: false as const, error: "company_name is required" };
+    if (!email_subject) return { ok: false as const, error: "email_subject is required" };
+    if (!email_body.trim()) return { ok: false as const, error: "email_body is required" };
+
+    const rawAthleteParam = params.athlete_id?.trim() || null;
+    const droppedNameLikeId = Boolean(rawAthleteParam && looksLikeHumanAthleteIdPlaceholder(rawAthleteParam));
+    let athleteIdOpt =
+      rawAthleteParam && !looksLikeHumanAthleteIdPlaceholder(rawAthleteParam) ? rawAthleteParam : null;
+    if (athleteIdOpt && !(await agentCanAccessAthlete(supabase, profile, athleteIdOpt))) {
+      return { ok: false as const, error: "Cannot access this athlete" };
+    }
+
+    const draftEntry = {
+      label: (params.label?.trim() || email_subject) as string,
+      subject: email_subject,
+      body: email_body,
+      athlete_id: athleteIdOpt,
+      created_at: new Date().toISOString(),
+    };
+
+    const rawContactId = params.contact_id != null ? String(params.contact_id).trim() : "";
+
+    if (rawContactId) {
+      const { data: contactRow, error: cErr } = await supabase
+        .from("crm_contacts")
+        .select("contact_id, company_id, first_name, last_name, email_drafts")
+        .eq("contact_id", rawContactId)
+        .maybeSingle();
+      if (cErr) {
+        const msg = cErr.message ?? "";
+        const hint =
+          /email_drafts|column|schema/i.test(msg)
+            ? " Ensure the Supabase migration adding crm_contacts.email_drafts has been applied."
+            : "";
+        return { ok: false as const, error: `${msg}${hint}` };
+      }
+      if (!contactRow) {
+        return { ok: false as const, error: "contact_id not found or not accessible (check CRM contact exists and RLS)" };
+      }
+
+      const contactCompanyId = String(contactRow.company_id ?? "");
+      const { data: coRow, error: coRowErr } = await supabase
+        .from("companies")
+        .select("name")
+        .eq("company_id", contactCompanyId)
+        .maybeSingle();
+      if (coRowErr) return { ok: false as const, error: coRowErr.message };
+      const resolvedCompanyName = String(coRow?.name ?? company_name).trim() || company_name;
+
+      const paramNorm = company_name.toLowerCase().replace(/\s+/g, " ").trim();
+      const actualNorm = resolvedCompanyName.toLowerCase().replace(/\s+/g, " ").trim();
+      const companyNameNote =
+        paramNorm !== actualNorm
+          ? `Draft saved on contact under company "${resolvedCompanyName}" (tool company_name was "${company_name}").`
+          : undefined;
+
+      const existingContactDrafts = Array.isArray(contactRow.email_drafts) ? [...contactRow.email_drafts] : [];
+      const personLabel = [contactRow.first_name, contactRow.last_name].filter(Boolean).join(" ").trim();
+      const contactDraftEntry = {
+        ...draftEntry,
+        label: (params.label?.trim() || personLabel || draftEntry.label) as string,
+      };
+      const { data: updatedRows, error: upCErr } = await supabase
+        .from("crm_contacts")
+        .update({ email_drafts: [...existingContactDrafts, contactDraftEntry] })
+        .eq("contact_id", rawContactId)
+        .select("contact_id");
+      if (upCErr) {
+        const msg = upCErr.message ?? "";
+        const hint =
+          /email_drafts|column|schema/i.test(msg)
+            ? " Apply migration 20260408120000_crm_contacts_email_drafts.sql (or equivalent) so email_drafts exists."
+            : "";
+        const perm =
+          /permission denied|RLS|row-level security|42501/i.test(msg)
+            ? " If you use a sales login, apply migration 20260409120000_crm_contacts_sales_can_update.sql so sales can update contacts."
+            : "";
+        return { ok: false as const, error: `${msg}${hint}${perm}` };
+      }
+      if (!updatedRows?.length) {
+        return {
+          ok: false as const,
+          error:
+            "CRM contact update affected 0 rows (RLS or missing row). Agents may only edit their own contacts. Sales accounts need DB policy allowing updates to crm_contacts — apply migration 20260409120000_crm_contacts_sales_can_update.sql.",
+        };
+      }
+
+      const droppedNote = droppedNameLikeId
+        ? "athlete_id looked like a person name (not a DB id) and was omitted; draft saved. Pass resolveAthletesByName → UUID to link."
+        : undefined;
+      const note = [companyNameNote, droppedNote].filter(Boolean).join(" ") || undefined;
+
+      return {
+        ok: true as const,
+        company_name: resolvedCompanyName,
+        company_id: contactCompanyId,
+        contact_id: rawContactId,
+        saved_to: "crm_contact" as const,
+        created: false as const,
+        athlete_id_saved: athleteIdOpt,
+        ...(note ? { note } : {}),
+      };
+    }
+
+    let companyCreated = false;
+    const { data: companyRows, error: coErr } = await supabase
+      .from("companies")
+      .select("company_id, name")
+      .ilike("name", company_name)
+      .limit(20);
+    if (coErr) return { ok: false as const, error: coErr.message };
+    const cRows = companyRows ?? [];
+    const exactCo = cRows.find((r: any) => String(r?.name ?? "").trim().toLowerCase() === company_name.toLowerCase());
+    const pickedCo = exactCo ?? cRows[0];
+
+    let company_id: string;
+    if (!pickedCo?.company_id) {
+      const { data: inserted, error: insErr } = await supabaseCompanies
+        .from("companies")
+        .insert({ name: company_name, industry: null })
+        .select("company_id")
+        .single();
+      if (insErr) return { ok: false as const, error: insErr.message };
+      company_id = inserted.company_id;
+      companyCreated = true;
+    } else {
+      company_id = String(pickedCo.company_id);
+    }
+
+    const { data: pipeRows, error: pipeSelErr } = await supabase
+      .from("crm_companies_pipeline")
+      .select("id, pipeline_stage, draft_messages")
+      .eq("company_id", company_id)
+      .eq("created_by_user_id", profile.user_id)
+      .order("updated_at", { ascending: false })
+      .limit(1);
+
+    if (pipeSelErr) return { ok: false as const, error: pipeSelErr.message };
+
+    const existingPipe = pipeRows && pipeRows.length ? (pipeRows[0] as any) : null;
+    const existingDrafts = Array.isArray(existingPipe?.draft_messages) ? [...existingPipe.draft_messages] : [];
+
+    let pipelineCreated = false;
+
+    if (!existingPipe?.id) {
+      const { data: newPipe, error: createPipeErr } = await supabase
+        .from("crm_companies_pipeline")
+        .insert({
+          company_id,
+          created_by_user_id: profile.user_id,
+          status: "in_progress",
+          pipeline_stage: "drafting",
+          draft_messages: [draftEntry],
+        })
+        .select("id, pipeline_stage")
+        .single();
+      if (createPipeErr) return { ok: false as const, error: createPipeErr.message };
+      pipelineCreated = true;
+      return {
+        ok: true as const,
+        company_name,
+        company_id,
+        pipeline_id: String(newPipe.id),
+        pipeline_stage: String(newPipe.pipeline_stage),
+        created: companyCreated || pipelineCreated,
+        athlete_id_saved: athleteIdOpt,
+        ...(droppedNameLikeId
+          ? {
+              note: "athlete_id looked like a person name (not a DB id) and was omitted; draft saved. Pass resolveAthletesByName → UUID to link.",
+            }
+          : {}),
+      };
+    }
+
+    const pipeline_id = String(existingPipe.id);
+    const prevStage = String(existingPipe.pipeline_stage ?? "target");
+    const nextStage =
+      prevStage === "target" || prevStage === "research" ? "drafting" : prevStage;
+
+    const updatedDrafts = [...existingDrafts, draftEntry];
+
+    const { error: updErr } = await supabase
+      .from("crm_companies_pipeline")
+      .update({
+        draft_messages: updatedDrafts,
+        pipeline_stage: nextStage,
+      })
+      .eq("id", pipeline_id);
+
+    if (updErr) return { ok: false as const, error: updErr.message };
+
+    return {
+      ok: true as const,
+      company_name,
+      company_id,
+      pipeline_id,
+      pipeline_stage: nextStage,
+      created: companyCreated || pipelineCreated,
+      athlete_id_saved: athleteIdOpt,
+      ...(droppedNameLikeId
+        ? {
+            note: "athlete_id looked like a person name (not a DB id) and was omitted; draft saved. Pass resolveAthletesByName → UUID to link.",
+          }
+        : {}),
+    };
+  };
+
   return {
     getDistinctAudienceInterests: async () => {
       /** Strict canonical IG "Interests" taxonomy only. Do not merge raw DB audience_name values — they often include legacy typos, sports roster strings, and non-taxonomy labels that pollute Flow 7 / email pickers. */
@@ -565,6 +779,30 @@ export async function createAITools(profile: Profile) {
         ? params.interest_names.map((s) => String(s ?? "").trim()).filter(Boolean)
         : [];
       return computeRosterAudienceSummary(supabase, profile, interest_names);
+    },
+
+    buildPitchAnglePickerOptions: async (params: {
+      suggested_angles?: Array<{ kind: string; value: string }>;
+      interest_names?: string[];
+      athlete_id?: string | null;
+      top_country_count?: number;
+      top_brand_count?: number;
+    }) => {
+      const athlete_id = params.athlete_id?.trim() || null;
+      if (athlete_id && !(await agentCanAccessAthlete(supabase, profile, athlete_id))) {
+        return { error: "Cannot access this athlete" };
+      }
+      return buildPitchAnglePickerOptionsImpl({
+        supabase,
+        profile,
+        suggested_angles: Array.isArray(params.suggested_angles) ? params.suggested_angles : [],
+        interest_names: Array.isArray(params.interest_names)
+          ? params.interest_names.map((name) => String(name ?? "").trim()).filter(Boolean)
+          : [],
+        athlete_id,
+        top_country_count: params.top_country_count,
+        top_brand_count: params.top_brand_count,
+      });
     },
 
     curatePitchInterests: async (params: {
@@ -603,6 +841,7 @@ export async function createAITools(profile: Profile) {
       pitch_type: PitchType;
       company_name: string;
       interest_names: string[];
+      pitch_angles?: PitchAngle[];
       recipient_name?: string;
       target_industry_or_category?: string | null;
       athlete_id?: string | null;
@@ -625,6 +864,39 @@ export async function createAITools(profile: Profile) {
       if (!interest_names.length) {
         return { error: "interest_names is required (use curatePitchInterests suggestions or user selections)" };
       }
+
+      const pitch_angles = Array.isArray(params.pitch_angles)
+        ? params.pitch_angles
+            .map((angle): PitchAngle | null => {
+              if (!angle || typeof angle !== "object") return null;
+              const kind = String((angle as PitchAngle).kind ?? "").trim();
+              switch (kind) {
+                case "interest": {
+                  const name = String((angle as { name?: string }).name ?? "").trim();
+                  return name ? { kind: "interest", name } : null;
+                }
+                case "age": {
+                  const cohort = String((angle as { cohort?: string }).cohort ?? "").trim();
+                  return cohort ? { kind: "age", cohort } : null;
+                }
+                case "gender": {
+                  const value = String((angle as { value?: string }).value ?? "").trim();
+                  return value ? { kind: "gender", value } : null;
+                }
+                case "country": {
+                  const name = String((angle as { name?: string }).name ?? "").trim();
+                  return name ? { kind: "country", name } : null;
+                }
+                case "brand_affinity": {
+                  const brand = String((angle as { brand?: string }).brand ?? "").trim();
+                  return brand ? { kind: "brand_affinity", brand } : null;
+                }
+                default:
+                  return null;
+              }
+            })
+            .filter((angle): angle is PitchAngle => angle != null)
+        : undefined;
 
       const toneSamples = await fetchPitchToneSamples(supabase, profile.user_id);
 
@@ -683,6 +955,7 @@ export async function createAITools(profile: Profile) {
         pitch_type,
         company_name,
         interest_names,
+        pitch_angles,
         recipient_name: params.recipient_name,
         target_industry_or_category: params.target_industry_or_category,
         athlete_id,
@@ -821,224 +1094,13 @@ export async function createAITools(profile: Profile) {
       };
     },
 
-    findAthletesByAudienceInterestAndSport: async (params: {
-      interest_names: string[];
-      sports: string[];
-    }) => {
-      // ── STEP 1: Get all athlete IDs this user can access ──
-      let accessibleAthleteIds: string[] = [];
-
-      if (profile.role === "admin" || profile.role === "sales") {
-        const { data: allAthletes } = await supabase.from("athletes").select("athlete_id");
-        accessibleAthleteIds = (allAthletes ?? []).map((a: any) => a.athlete_id);
-      } else {
-        const { data: linked } = await supabase
-          .from("athlete_agents")
-          .select("athlete_id")
-          .eq("user_id", profile.user_id);
-        accessibleAthleteIds = (linked ?? []).map((r: any) => r.athlete_id);
-      }
-
-      if (accessibleAthleteIds.length === 0) return { sports: [] };
-
-      // ── STEP 2: Filter accessible athletes by selected sports ──
-      const selectedSports = (params.sports ?? [])
-        .map((s: string) => String(s ?? "").trim())
-        .filter(Boolean);
-
-      const interestNames = (params.interest_names ?? [])
-        .map((s: string) => String(s ?? "").trim())
-        .filter(Boolean);
-
-      if (selectedSports.length === 0 || interestNames.length === 0) {
-        return { sports: [] };
-      }
-
-      const sportOrFilter = selectedSports
-        .map((s: string) => `sport.ilike.%${normalizeOrIlikeFragment(s)}%`)
-        .join(",");
-
-      const { data: athletesInSports } = await supabase
-        .from("athletes")
-        .select("athlete_id, first_name, last_name, sport")
-        .in("athlete_id", accessibleAthleteIds)
-        .or(sportOrFilter);
-
-      const athletesInSportsList = athletesInSports ?? [];
-      if (athletesInSportsList.length === 0) return { sports: [] };
-
-      const athletesInSportsIds = athletesInSportsList.map((a: any) => a.athlete_id);
-
-      const athleteById = new Map(athletesInSportsList.map((a: any) => [a.athlete_id, a]));
-
-      // ── STEP 3: Get audience rows for matching athletes ──
-      const { data: audienceRows } = await supabase
-        .from("athlete_audience_data")
-        .select("athlete_id, audience_name, ig_audience_percent, ig_audience_count")
-        .in("athlete_id", athletesInSportsIds)
-        .eq("audience_category", "Interests")
-        .in("audience_name", interestNames);
-
-      const rows = audienceRows ?? [];
-      if (rows.length === 0) return { sports: [] };
-
-      // ── STEP 4: Sum ig_audience_count per athlete ──
-      type AthleteScore = {
-        athlete_id: string;
-        total_ig_audience_count: number;
-        interests: {
-          audience_name: string;
-          ig_audience_percent: number;
-          ig_audience_count: number;
-        }[];
-      };
-
-      const scoreMap = new Map<string, AthleteScore>();
-
-      for (const row of rows) {
-        const id = row.athlete_id as string;
-        if (!scoreMap.has(id)) {
-          scoreMap.set(id, {
-            athlete_id: id,
-            total_ig_audience_count: 0,
-            interests: [],
-          });
-        }
-        const entry = scoreMap.get(id)!;
-        entry.total_ig_audience_count += Number(row.ig_audience_count ?? 0);
-        entry.interests.push({
-          audience_name: row.audience_name as string,
-          ig_audience_percent: Number(row.ig_audience_percent ?? 0),
-          ig_audience_count: Number(row.ig_audience_count ?? 0),
-        });
-      }
-
-      // ── STEP 5: Group by actual sport value, top 5 per sport ──
-      const sportGroupMap = new Map<string, AthleteScore[]>();
-
-      for (const [athlete_id, score] of scoreMap.entries()) {
-        const athlete = athleteById.get(athlete_id);
-        if (!athlete) continue;
-        const sport = athlete.sport as string;
-        if (!sportGroupMap.has(sport)) sportGroupMap.set(sport, []);
-        sportGroupMap.get(sport)!.push(score);
-      }
-
-      const result: {
-        sport: string;
-        athletes: {
-          athlete_id: string;
-          name: string;
-          total_ig_audience_count: number;
-          interests: {
-            audience_name: string;
-            ig_audience_percent: number;
-            ig_audience_pct_display: string;
-            ig_audience_count: number;
-          }[];
-        }[];
-      }[] = [];
-
-      const sortedSports = [...sportGroupMap.keys()].sort((a, b) => b.localeCompare(a));
-
-      for (const sport of sortedSports) {
-        const group = sportGroupMap.get(sport)!;
-
-        group.sort((a, b) => b.total_ig_audience_count - a.total_ig_audience_count);
-
-        const top5 = group.slice(0, 5);
-
-        result.push({
-          sport,
-          athletes: top5.map((score) => {
-            const athlete = athleteById.get(score.athlete_id)!;
-            return {
-              athlete_id: score.athlete_id,
-              name: [athlete.first_name, athlete.last_name].filter(Boolean).join(" "),
-              total_ig_audience_count: score.total_ig_audience_count,
-              interests: score.interests
-                .sort((a, b) => b.ig_audience_percent - a.ig_audience_percent)
-                .map((i) => ({
-                  audience_name: i.audience_name,
-                  ig_audience_percent: i.ig_audience_percent,
-                  ig_audience_pct_display: `${(i.ig_audience_percent * 100).toFixed(1)}%`,
-                  ig_audience_count: i.ig_audience_count,
-                })),
-            };
-          }),
-        });
-      }
-
-      return { sports: result };
-    },
-
-    searchAthletesByAudienceInterest: async (params: {
-      interest_name: string;
-      category?: "Brands" | "Interests";
-      sport?: string;
+    searchAthletesByAudienceMatch: async (params: {
+      interest_names?: string[];
+      sports?: string[];
+      interest_keywords?: string[];
+      min_total_followers?: number;
       limit?: number;
-    }) => {
-      const interestName = String(params.interest_name ?? "").trim();
-      if (!interestName) return [];
-
-      const categories = params.category ? [params.category] : (["Brands", "Interests"] as const);
-      const sourceLimit = 50;
-      const outputLimit = Math.max(1, Math.min(params.limit ?? 15, 50));
-
-      let query = supabase
-        .from("athlete_audience_data")
-        .select("athlete_id, audience_category, audience_name, ig_audience_percent")
-        .ilike("audience_name", `%${interestName}%`)
-        .in("audience_category", categories as any)
-        .order("ig_audience_percent", { ascending: false })
-        .limit(sourceLimit);
-
-      const { data: audienceRows } = await query;
-      const candidateRows: any[] = audienceRows ?? [];
-      if (!candidateRows.length) return [];
-
-      const athleteIds = [...new Set(candidateRows.map((r: any) => String(r.athlete_id ?? "")).filter(Boolean))];
-      const [athleteRes, socialRes] = await Promise.all([
-        supabase.from("athletes").select("athlete_id, first_name, last_name, sport").in("athlete_id", athleteIds),
-        supabase.from("athlete_social_data").select("athlete_id, total_followers, ig_followers").in("athlete_id", athleteIds),
-      ]);
-
-      const athleteById = new Map((athleteRes.data ?? []).map((a: any) => [String(a.athlete_id), a]));
-      const socialById = new Map((socialRes.data ?? []).map((s: any) => [String(s.athlete_id), s]));
-
-      const rowsForRole: any[] = [];
-      for (const row of candidateRows) {
-        const athleteId = String(row.athlete_id ?? "");
-        if (!athleteId) continue;
-        if (!(await agentCanAccessAthlete(supabase, profile, athleteId))) continue;
-        const athlete = athleteById.get(athleteId);
-        if (params.sport?.trim() && !String(athlete?.sport ?? "").toLowerCase().includes(params.sport.trim().toLowerCase())) continue;
-        rowsForRole.push(row);
-      }
-
-      return rowsForRole
-        .map((row: any) => {
-          const athleteId = String(row.athlete_id);
-          const athlete = athleteById.get(athleteId);
-          const social = socialById.get(athleteId);
-          const raw = Number(row.ig_audience_percent ?? 0);
-          return {
-            athlete_id: athleteId,
-            name: [athlete?.first_name, athlete?.last_name].filter(Boolean).join(" ").trim() || athleteId,
-            sport: athlete?.sport ?? null,
-            audience_name: row.audience_name,
-            audience_category: row.audience_category,
-            ig_audience_percent: audiencePercentPoints(raw),
-            ig_audience_pct_display: fmtPct(raw),
-            total_followers: social?.total_followers ?? null,
-            ig_followers: social?.ig_followers ?? null,
-            _sortPct: normalizeIgAudiencePercentToFraction(raw),
-          };
-        })
-        .sort((a, b) => b._sortPct - a._sortPct)
-        .map(({ _sortPct, ...rest }: any) => rest)
-        .slice(0, outputLimit);
-    },
+    }) => searchAthletesByAudienceMatchImpl(supabase, profile, params),
 
     listAthletesScoped: async (params?: { sport?: string }) => {
       let query = supabase.from("athletes").select("athlete_id, first_name, last_name, gender, sport, country, creatoriq_publisher_id");
@@ -1250,43 +1312,6 @@ export async function createAITools(profile: Profile) {
       }));
     },
 
-    getCompanyByName: async (params: { name: string }) => {
-      const nameQ = String(params.name ?? "").trim();
-      if (!nameQ) return null;
-
-      // Use fuzzy match so minor punctuation/casing differences don't break lookup.
-      const { data } = await supabase
-        .from("companies")
-        .select("*")
-        .ilike("name", `%${nameQ}%`)
-        .limit(10);
-
-      const rows = Array.isArray(data) ? data : [];
-      if (rows.length === 0) return null;
-
-      const exact = rows.find((r: any) => String(r?.name ?? "").trim().toLowerCase() === nameQ.toLowerCase());
-      return exact ?? rows[0];
-    },
-
-    getCompanySponsorships: async (params: { company_id: string }) => {
-      const { data } = await supabase
-        .from("contracts")
-        .select(`
-          *,
-          athletes (*)
-        `)
-        .eq("company_id", params.company_id)
-        .eq("status", "active");
-      return data || [];
-    },
-
-    getCompanyContacts: async (params: { company_id: string }) => {
-      const { data } = await supabase
-        .from("company_contacts")
-        .select("*")
-        .eq("company_id", params.company_id);
-      return data || [];
-    },
 
     pushCompanyToCrmPipeline: async (params: {
       company_name: string;
@@ -1462,224 +1487,51 @@ export async function createAITools(profile: Profile) {
       };
     },
 
+
     pushEmailToCrm: async (params: {
-      company_name: string;
-      /** When set, saves to this CRM contact's email_drafts (must belong to company_name). Omit to save on the pipeline card only. */
+      company_name?: string;
       contact_id?: string;
       athlete_id?: string;
-      email_subject: string;
-      email_body: string;
+      email_subject?: string;
+      email_body?: string;
       label?: string;
+      emails?: PushEmailToCrmSingleParams[];
     }) => {
-      const company_name = String(params.company_name ?? "").trim();
-      const email_subject = String(params.email_subject ?? "").trim();
-      const email_body = stripSponsorGapCopy(String(params.email_body ?? ""));
-      if (!company_name) return { ok: false as const, error: "company_name is required" };
-      if (!email_subject) return { ok: false as const, error: "email_subject is required" };
-      if (!email_body.trim()) return { ok: false as const, error: "email_body is required" };
-
-      const rawAthleteParam = params.athlete_id?.trim() || null;
-      const droppedNameLikeId = Boolean(rawAthleteParam && looksLikeHumanAthleteIdPlaceholder(rawAthleteParam));
-      let athleteIdOpt =
-        rawAthleteParam && !looksLikeHumanAthleteIdPlaceholder(rawAthleteParam) ? rawAthleteParam : null;
-      if (athleteIdOpt && !(await agentCanAccessAthlete(supabase, profile, athleteIdOpt))) {
-        return { ok: false as const, error: "Cannot access this athlete" };
-      }
-
-      const draftEntry = {
-        label: (params.label?.trim() || email_subject) as string,
-        subject: email_subject,
-        body: email_body,
-        athlete_id: athleteIdOpt,
-        created_at: new Date().toISOString(),
-      };
-
-      const rawContactId = params.contact_id != null ? String(params.contact_id).trim() : "";
-
-      /** Per-contact saves must use the contact row's company_id. String `company_name` resolution can hit a different companies row (duplicates, spelling), which previously caused false "contact does not belong to this company". */
-      if (rawContactId) {
-        const { data: contactRow, error: cErr } = await supabase
-          .from("crm_contacts")
-          .select("contact_id, company_id, first_name, last_name, email_drafts")
-          .eq("contact_id", rawContactId)
-          .maybeSingle();
-        if (cErr) {
-          const msg = cErr.message ?? "";
-          const hint =
-            /email_drafts|column|schema/i.test(msg)
-              ? " Ensure the Supabase migration adding crm_contacts.email_drafts has been applied."
-              : "";
-          return { ok: false as const, error: `${msg}${hint}` };
+      const emails = Array.isArray(params.emails) ? params.emails : [];
+      if (emails.length > 0) {
+        if (emails.length > 50) {
+          return { ok: false as const, error: "Too many emails (max 50 per call)" };
         }
-        if (!contactRow) {
-          return { ok: false as const, error: "contact_id not found or not accessible (check CRM contact exists and RLS)" };
-        }
-
-        const contactCompanyId = String(contactRow.company_id ?? "");
-        const { data: coRow, error: coRowErr } = await supabase
-          .from("companies")
-          .select("name")
-          .eq("company_id", contactCompanyId)
-          .maybeSingle();
-        if (coRowErr) return { ok: false as const, error: coRowErr.message };
-        const resolvedCompanyName = String(coRow?.name ?? company_name).trim() || company_name;
-
-        const paramNorm = company_name.toLowerCase().replace(/\s+/g, " ").trim();
-        const actualNorm = resolvedCompanyName.toLowerCase().replace(/\s+/g, " ").trim();
-        const companyNameNote =
-          paramNorm !== actualNorm
-            ? `Draft saved on contact under company "${resolvedCompanyName}" (tool company_name was "${company_name}").`
-            : undefined;
-
-        const existingContactDrafts = Array.isArray(contactRow.email_drafts) ? [...contactRow.email_drafts] : [];
-        const personLabel = [contactRow.first_name, contactRow.last_name].filter(Boolean).join(" ").trim();
-        const contactDraftEntry = {
-          ...draftEntry,
-          label: (params.label?.trim() || personLabel || draftEntry.label) as string,
-        };
-        const { data: updatedRows, error: upCErr } = await supabase
-          .from("crm_contacts")
-          .update({ email_drafts: [...existingContactDrafts, contactDraftEntry] })
-          .eq("contact_id", rawContactId)
-          .select("contact_id");
-        if (upCErr) {
-          const msg = upCErr.message ?? "";
-          const hint =
-            /email_drafts|column|schema/i.test(msg)
-              ? " Apply migration 20260408120000_crm_contacts_email_drafts.sql (or equivalent) so email_drafts exists."
-              : "";
-          const perm =
-            /permission denied|RLS|row-level security|42501/i.test(msg)
-              ? " If you use a sales login, apply migration 20260409120000_crm_contacts_sales_can_update.sql so sales can update contacts."
-              : "";
-          return { ok: false as const, error: `${msg}${hint}${perm}` };
-        }
-        if (!updatedRows?.length) {
-          return {
-            ok: false as const,
-            error:
-              "CRM contact update affected 0 rows (RLS or missing row). Agents may only edit their own contacts. Sales accounts need DB policy allowing updates to crm_contacts — apply migration 20260409120000_crm_contacts_sales_can_update.sql.",
-          };
-        }
-
-        const droppedNote = droppedNameLikeId
-          ? "athlete_id looked like a person name (not a DB id) and was omitted; draft saved. Pass resolveAthletesByName → UUID to link."
-          : undefined;
-        const note = [companyNameNote, droppedNote].filter(Boolean).join(" ") || undefined;
-
-        return {
-          ok: true as const,
-          company_name: resolvedCompanyName,
-          company_id: contactCompanyId,
-          contact_id: rawContactId,
-          saved_to: "crm_contact" as const,
-          created: false as const,
-          athlete_id_saved: athleteIdOpt,
-          ...(note ? { note } : {}),
-        };
-      }
-
-      let companyCreated = false;
-      const { data: companyRows, error: coErr } = await supabase
-        .from("companies")
-        .select("company_id, name")
-        .ilike("name", company_name)
-        .limit(20);
-      if (coErr) return { ok: false as const, error: coErr.message };
-      const cRows = companyRows ?? [];
-      const exactCo = cRows.find((r: any) => String(r?.name ?? "").trim().toLowerCase() === company_name.toLowerCase());
-      const pickedCo = exactCo ?? cRows[0];
-
-      let company_id: string;
-      if (!pickedCo?.company_id) {
-        const { data: inserted, error: insErr } = await supabaseCompanies
-          .from("companies")
-          .insert({ name: company_name, industry: null })
-          .select("company_id")
-          .single();
-        if (insErr) return { ok: false as const, error: insErr.message };
-        company_id = inserted.company_id;
-        companyCreated = true;
-      } else {
-        company_id = String(pickedCo.company_id);
-      }
-
-      const { data: pipeRows, error: pipeSelErr } = await supabase
-        .from("crm_companies_pipeline")
-        .select("id, pipeline_stage, draft_messages")
-        .eq("company_id", company_id)
-        .eq("created_by_user_id", profile.user_id)
-        .order("updated_at", { ascending: false })
-        .limit(1);
-
-      if (pipeSelErr) return { ok: false as const, error: pipeSelErr.message };
-
-      const existingPipe = pipeRows && pipeRows.length ? (pipeRows[0] as any) : null;
-      const existingDrafts = Array.isArray(existingPipe?.draft_messages) ? [...existingPipe.draft_messages] : [];
-
-      let pipelineCreated = false;
-
-      if (!existingPipe?.id) {
-        const { data: newPipe, error: createPipeErr } = await supabase
-          .from("crm_companies_pipeline")
-          .insert({
-            company_id,
-            created_by_user_id: profile.user_id,
-            status: "in_progress",
-            pipeline_stage: "drafting",
-            draft_messages: [draftEntry],
-          })
-          .select("id, pipeline_stage")
-          .single();
-        if (createPipeErr) return { ok: false as const, error: createPipeErr.message };
-        pipelineCreated = true;
-        return {
-          ok: true as const,
-          company_name,
-          company_id,
-          pipeline_id: String(newPipe.id),
-          pipeline_stage: String(newPipe.pipeline_stage),
-          created: companyCreated || pipelineCreated,
-          athlete_id_saved: athleteIdOpt,
-          ...(droppedNameLikeId
-            ? {
-                note: "athlete_id looked like a person name (not a DB id) and was omitted; draft saved. Pass resolveAthletesByName → UUID to link.",
-              }
-            : {}),
-        };
-      }
-
-      const pipeline_id = String(existingPipe.id);
-      const prevStage = String(existingPipe.pipeline_stage ?? "target");
-      const nextStage =
-        prevStage === "target" || prevStage === "research" ? "drafting" : prevStage;
-
-      const updatedDrafts = [...existingDrafts, draftEntry];
-
-      const { error: updErr } = await supabase
-        .from("crm_companies_pipeline")
-        .update({
-          draft_messages: updatedDrafts,
-          pipeline_stage: nextStage,
-        })
-        .eq("id", pipeline_id);
-
-      if (updErr) return { ok: false as const, error: updErr.message };
-
-      return {
-        ok: true as const,
-        company_name,
-        company_id,
-        pipeline_id,
-        pipeline_stage: nextStage,
-        created: companyCreated || pipelineCreated,
-        athlete_id_saved: athleteIdOpt,
-        ...(droppedNameLikeId
-          ? {
-              note: "athlete_id looked like a person name (not a DB id) and was omitted; draft saved. Pass resolveAthletesByName → UUID to link.",
+        const results: Array<{ company_name: string; ok: boolean; error?: string }> = [];
+        for (const entry of emails) {
+          const company_name = String(entry?.company_name ?? "").trim() || "(unknown)";
+          try {
+            const result = await pushSingleEmailToCrm(entry);
+            if (result.ok) {
+              results.push({
+                company_name: String(result.company_name ?? company_name),
+                ok: true,
+              });
+            } else {
+              results.push({ company_name, ok: false, error: result.error });
             }
-          : {}),
-      };
+          } catch (e: any) {
+            results.push({
+              company_name,
+              ok: false,
+              error: e?.message ?? "Tool execution failed",
+            });
+          }
+        }
+        const succeeded = results.filter((r) => r.ok).length;
+        const failed = results.length - succeeded;
+        return {
+          ok: failed === 0,
+          results,
+          summary: { total: results.length, succeeded, failed },
+        };
+      }
+      return pushSingleEmailToCrm(params as PushEmailToCrmSingleParams);
     },
 
     getAthleteSocialStats: async (params: { athlete_id: string }) => {
@@ -1699,46 +1551,35 @@ export async function createAITools(profile: Profile) {
       return fetchAudienceByCategory(params.athlete_id, params.category, params.limit);
     },
 
-    getAudienceGender: async (params: { athlete_id: string; limit?: number }) => {
-      return fetchAudienceByCategory(params.athlete_id, "Gender", params.limit);
-    },
-
-    getAudienceAge: async (params: { athlete_id: string; limit?: number }) => {
-      return fetchAudienceByCategory(params.athlete_id, "Combined_Age", params.limit);
-    },
-
-    getAudienceEthnicity: async (params: { athlete_id: string; limit?: number }) => {
-      return fetchAudienceByCategory(params.athlete_id, "Ethnicity", params.limit);
-    },
-
-    getAudienceCountries: async (params: { athlete_id: string; limit?: number }) => {
-      return fetchAudienceByCategory(params.athlete_id, "Countries", params.limit);
-    },
-
-    getAudienceBrands: async (params: { athlete_id: string; limit?: number }) => {
-      return fetchAudienceByCategory(params.athlete_id, "Brands", params.limit);
-    },
-
-    getAudienceInterests: async (params: { athlete_id: string; limit?: number }) => {
-      return fetchAudienceByCategory(params.athlete_id, "Interests", params.limit);
-    },
-
     getAthleteFullAudienceProfile: async (params: { athlete_id: string }) => {
       const athlete_id = params.athlete_id;
       if (!(await agentCanAccessAthlete(supabase, profile, athlete_id))) {
         return null;
       }
-      const profileData = await getAthleteAudienceProfile(supabase, athlete_id);
+      const [profileData, athleteRes] = await Promise.all([
+        getAthleteAudienceProfile(supabase, athlete_id),
+        supabase.from("athletes").select("athlete_id, first_name, last_name").eq("athlete_id", athlete_id).maybeSingle(),
+      ]);
       const pct2 = (n: number | null | undefined) => (n == null ? null : Number((n * 100).toFixed(2)));
-      const mapRows = (rows: any[], limit?: number) =>
-        (limit ? rows.slice(0, limit) : rows).map((r: any) => ({
+      const mapNameRows = (rows: Array<{ audience_name: string; ig_audience_percent: number; ig_audience_count: number }>) =>
+        rows.map((r) => ({
           name: r.audience_name,
           ig_audience_percent: audiencePercentPoints(Number(r.ig_audience_percent ?? 0)),
-          pct_display: fmtPct(Number(r.ig_audience_percent ?? 0)),
           ig_audience_count: Number(r.ig_audience_count ?? 0),
         }));
+      const normalizeGenderValue = (label: string) =>
+        String(label ?? "")
+          .trim()
+          .toLowerCase()
+          .replace(/\s+/g, "_");
+      const athlete = athleteRes.data;
+      const athlete_name = athlete
+        ? `${String(athlete.first_name ?? "").trim()} ${String(athlete.last_name ?? "").trim()}`.trim()
+        : null;
 
       return {
+        athlete_id,
+        athlete_name,
         social: profileData.social
           ? {
               total_followers: profileData.social.total_followers,
@@ -1751,329 +1592,21 @@ export async function createAITools(profile: Profile) {
               tt_er: pct2(profileData.social.avg_er_tt_20p),
             }
           : null,
-        top_interests: mapRows(profileData.interests, 5),
-        top_brands: mapRows(profileData.brands, 5),
-        gender: mapRows(profileData.gender),
-        age: mapRows(profileData.age),
-        top_countries: mapRows(profileData.countries, 5),
-        top_states: mapRows(profileData.states, 5),
+        interests: mapNameRows(profileData.interests),
+        gender: profileData.gender.map((r) => ({
+          value: normalizeGenderValue(r.audience_name),
+          ig_audience_percent: audiencePercentPoints(Number(r.ig_audience_percent ?? 0)),
+          ig_audience_count: Number(r.ig_audience_count ?? 0),
+        })),
+        age: profileData.age.map((r) => ({
+          cohort: r.audience_name,
+          ig_audience_percent: audiencePercentPoints(Number(r.ig_audience_percent ?? 0)),
+          ig_audience_count: Number(r.ig_audience_count ?? 0),
+        })),
+        ethnicity: mapNameRows(profileData.ethnicity),
+        countries: mapNameRows(profileData.countries),
+        brands: mapNameRows(profileData.brands),
       };
-    },
-
-    searchAthletesByInterestKeywordsWithFollowing: async (params: {
-      interest_keywords: string[];
-      topPerKeyword?: number;
-    }) => {
-      const normalizeLabel = (label: string) => label.trim().replace(/\s+/g, " ").toLowerCase();
-      const canonicalizeKeyword = (keyword: string): string | null => {
-        const canonical = canonicalInterestByNormalized[normalizeLabel(keyword)];
-        return canonical ?? null;
-      };
-
-      // Only use approved (canonical) interest keywords; ignore anything else.
-      // This prevents the model from accidentally searching/mirroring non-approved labels.
-      const inputKeywords = Array.isArray(params.interest_keywords) ? params.interest_keywords : [];
-      const keywords: string[] = [];
-      const seen = new Set<string>();
-      const pushKeyword = (k: string) => {
-        const kk = k.trim();
-        if (!kk) return;
-        const key = kk.toLowerCase();
-        if (seen.has(key)) return;
-        seen.add(key);
-        keywords.push(kk);
-      };
-
-      for (const k of inputKeywords) {
-        const canonical = canonicalizeKeyword(String(k ?? ""));
-        if (!canonical) continue;
-        // Deterministic related interests expansion.
-        if (canonical === "Healthy Lifestyle") {
-          pushKeyword("Healthy Lifestyle");
-          pushKeyword("Fitness & Yoga");
-          pushKeyword("Sports");
-          pushKeyword("Activewear");
-        } else {
-          pushKeyword(canonical);
-        }
-      }
-
-      const topPerKeyword = Math.max(1, Math.min(params.topPerKeyword ?? 5, 25));
-      if (keywords.length === 0) return { searched_interests: [], results: [] as any[] };
-
-      // For each keyword, query all matching interest rows and pick best per athlete (max percent).
-      const allResults: any[] = [];
-
-      for (const keyword of keywords) {
-        const { data } = await supabase
-          .from("athlete_audience_data")
-          .select("athlete_id,audience_name,ig_audience_percent,ig_audience_count")
-          .eq("audience_category", "Interests")
-          .ilike("audience_name", `%${keyword}%`)
-          .order("ig_audience_percent", { ascending: false })
-          .limit(5000);
-
-        const rows: any[] = data ?? [];
-
-        const bestByAthlete = new Map<string, any>();
-        for (const r of rows) {
-          const athlete_id = r.athlete_id as string;
-          const audienceCanonical = canonicalInterestByNormalized[normalizeLabel(String(r.audience_name ?? ""))];
-          if (!audienceCanonical) continue; // exclude non-approved interest labels
-
-          const pct =
-            r.ig_audience_percent == null ? null : normalizeIgAudiencePercentToFraction(Number(r.ig_audience_percent));
-          if (pct == null || Number.isNaN(pct)) continue;
-
-          const current = bestByAthlete.get(athlete_id);
-          const currentPct =
-            current?.ig_audience_percent == null
-              ? null
-              : normalizeIgAudiencePercentToFraction(Number(current.ig_audience_percent));
-          if (!current || pct > (currentPct ?? -Infinity)) {
-            bestByAthlete.set(athlete_id, { ...r, audience_name: audienceCanonical });
-          }
-        }
-
-        const candidateAthleteIds = Array.from(bestByAthlete.keys());
-
-        // Access filtering (agents only).
-        const accessibleAthleteIds: string[] = [];
-        for (const athlete_id of candidateAthleteIds) {
-          if (await agentCanAccessAthlete(supabase, profile, athlete_id)) accessibleAthleteIds.push(athlete_id);
-        }
-
-        if (accessibleAthleteIds.length === 0) continue;
-
-        const { data: athleteRows } = await supabase
-          .from("athletes")
-          .select("athlete_id, first_name, last_name, sport")
-          .in("athlete_id", accessibleAthleteIds);
-
-        const { data: socialRows } = await supabase
-          .from("athlete_social_data")
-          .select("athlete_id,total_followers,ig_followers,tt_followers,fb_followers,x_followers")
-          .in("athlete_id", accessibleAthleteIds);
-
-        const athleteById = new Map<string, any>(Array.isArray(athleteRows) ? athleteRows.map((a: any) => [a.athlete_id, a]) : []);
-        const socialById = new Map<string, any>(Array.isArray(socialRows) ? socialRows.map((s: any) => [s.athlete_id, s]) : []);
-
-        const assembled: any[] = [];
-        for (const athlete_id of accessibleAthleteIds) {
-          const best = bestByAthlete.get(athlete_id);
-          if (!best) continue;
-
-          const athlete = athleteById.get(athlete_id);
-          const social = socialById.get(athlete_id);
-
-          const total_followers =
-            social?.total_followers ??
-            (social ? (social.ig_followers ?? 0) + (social.tt_followers ?? 0) + (social.fb_followers ?? 0) + (social.x_followers ?? 0) : null);
-
-          if (total_followers == null) {
-            // Still allow ranking; keep null following.
-          }
-
-          assembled.push({
-            athlete_id,
-            athlete_name: athlete
-              ? [athlete.first_name, athlete.last_name].filter(Boolean).join(" ").trim() || athlete_id
-              : athlete_id,
-            sport: athlete?.sport ?? null,
-            searched_interest_keyword: keyword,
-            interest_name: best.audience_name ?? null,
-            interest_pct:
-              best.ig_audience_percent == null ? null : audiencePercentPoints(Number(best.ig_audience_percent)),
-            interest_count: best.ig_audience_count ?? null,
-            following_total: total_followers ?? null,
-          });
-        }
-
-        assembled.sort((a, b) => Number(b.interest_pct ?? -Infinity) - Number(a.interest_pct ?? -Infinity));
-        allResults.push(...assembled.slice(0, topPerKeyword).map((r) => ({ ...r, rank_for_keyword: null })));
-      }
-
-      // assign rank per keyword (stable)
-      const grouped: Record<string, any[]> = {};
-      for (const r of allResults) {
-        const k = String(r.searched_interest_keyword ?? "");
-        if (!grouped[k]) grouped[k] = [];
-        grouped[k].push(r);
-      }
-      for (const k of Object.keys(grouped)) {
-        grouped[k].sort((a, b) => Number(b.interest_pct ?? -Infinity) - Number(a.interest_pct ?? -Infinity));
-        grouped[k] = grouped[k].map((r, i) => ({ ...r, rank_for_keyword: i + 1 }));
-      }
-
-      const results = Object.values(grouped).flat();
-      return { searched_interests: keywords, results };
-    },
-
-    /**
-     * Sport-aware version of interest search.
-     * Returns top N athletes per sport per interest keyword, including separate interest percentages and follower totals.
-     *
-     * Also expands certain interest keywords to include "related" approved interests deterministically.
-     * Example: "Healthy Lifestyle" expands to include Fitness & Yoga, Sports, Activewear.
-     */
-    searchAthletesBySportsAndInterestKeywordsWithFollowing: async (params: {
-      sports: string[];
-      interest_keywords: string[];
-      topPerSportPerInterest?: number;
-    }) => {
-      const sportsInput = Array.isArray(params.sports) ? params.sports.map((s) => String(s ?? "").trim()).filter(Boolean) : [];
-      const inputKeywords = Array.isArray(params.interest_keywords)
-        ? params.interest_keywords.map((k) => String(k ?? "").trim()).filter(Boolean)
-        : [];
-
-      const topPerSportPerInterest = Math.max(1, Math.min(params.topPerSportPerInterest ?? 5, 25));
-      if (sportsInput.length === 0 || inputKeywords.length === 0) {
-        return { searched_interests: [], results: [] as any[] };
-      }
-
-      function normalizeLabel(label: string) {
-        return label.trim().replace(/\s+/g, " ").toLowerCase();
-      }
-
-      function normalizeSportQuery(s: string) {
-        const t = s.toLowerCase();
-        if (t.includes("surf")) return "surf";
-        if (t.includes("skate")) return "skate";
-        if (t.includes("snow")) return "snow";
-        return t;
-      }
-
-      function expandKeywords(keywords: string[]): string[] {
-        const expanded: string[] = [];
-        const seen = new Set<string>();
-        const push = (k: string) => {
-          const kk = k.trim();
-          if (!kk) return;
-          const key = kk.toLowerCase();
-          if (seen.has(key)) return;
-          seen.add(key);
-          expanded.push(kk);
-        };
-
-        for (const k of keywords) {
-          const canonical = canonicalInterestByNormalized[normalizeLabel(k)];
-          if (canonical) {
-            push(canonical);
-            if (canonical === "Healthy Lifestyle") {
-              push("Fitness & Yoga");
-              push("Sports");
-              push("Activewear");
-            }
-          }
-        }
-        return expanded;
-      }
-
-      const expandedKeywords = expandKeywords(inputKeywords);
-
-      const allResults: any[] = [];
-
-      // Pre-fetch social metrics for all athletes across sports? Simpler: fetch per sport id set.
-      for (const sportRaw of sportsInput) {
-        const sportQuery = normalizeSportQuery(sportRaw);
-
-        let athleteQuery = supabase
-          .from("athletes")
-          .select("athlete_id, first_name, last_name, sport")
-          .limit(4000);
-
-        if (profile.role === "agent") {
-          athleteQuery = athleteQuery.eq("current_agent_id", profile.user_id);
-        }
-        if (sportQuery) {
-          athleteQuery = athleteQuery.ilike("sport", `%${sportQuery}%`);
-        }
-
-        const { data: candidateAthletes } = await athleteQuery;
-        const candidateIds: string[] = Array.isArray(candidateAthletes)
-          ? candidateAthletes.map((a: any) => a.athlete_id).filter(Boolean)
-          : [];
-
-        // Correctness filter for agents (handles athlete_agents access).
-        const accessibleIds: string[] = [];
-        for (const athlete_id of candidateIds) {
-          if (await agentCanAccessAthlete(supabase, profile, athlete_id)) accessibleIds.push(athlete_id);
-        }
-        if (accessibleIds.length === 0) continue;
-
-        const { data: socialRows } = await supabase
-          .from("athlete_social_data")
-          .select("athlete_id, total_followers, ig_followers, tt_followers, fb_followers, x_followers")
-          .in("athlete_id", accessibleIds);
-        const socialById = new Map<string, any>(Array.isArray(socialRows) ? socialRows.map((s: any) => [s.athlete_id, s]) : []);
-
-        const athleteById = new Map<string, any>(Array.isArray(candidateAthletes) ? candidateAthletes.map((a: any) => [a.athlete_id, a]) : []);
-
-        for (const keyword of expandedKeywords) {
-          const { data: interestRows } = await supabase
-            .from("athlete_audience_data")
-            .select("athlete_id, audience_name, ig_audience_percent, ig_audience_count")
-            .eq("audience_category", "Interests")
-            .in("athlete_id", accessibleIds)
-            .ilike("audience_name", `%${keyword}%`)
-            .order("ig_audience_percent", { ascending: false })
-            .limit(8000);
-
-          const rows: any[] = interestRows ?? [];
-          const bestByAthlete = new Map<string, any>();
-          for (const r of rows) {
-            const id = r.athlete_id as string;
-            const audienceCanonical = canonicalInterestByNormalized[normalizeLabel(String(r.audience_name ?? ""))];
-            if (!audienceCanonical) continue; // exclude non-approved interest labels
-            const pct =
-              r.ig_audience_percent == null ? null : normalizeIgAudiencePercentToFraction(Number(r.ig_audience_percent));
-            if (pct == null || Number.isNaN(pct)) continue;
-            const current = bestByAthlete.get(id);
-            const currentPct =
-              current?.ig_audience_percent == null
-                ? null
-                : normalizeIgAudiencePercentToFraction(Number(current.ig_audience_percent));
-            if (!current || pct > (currentPct ?? -Infinity)) {
-              bestByAthlete.set(id, { ...r, audience_name: audienceCanonical });
-            }
-          }
-
-          const assembled: any[] = [];
-          for (const [athlete_id, best] of bestByAthlete.entries()) {
-            const athlete = athleteById.get(athlete_id);
-            const social = socialById.get(athlete_id);
-            const total_followers =
-              social?.total_followers ??
-              (social ? (social.ig_followers ?? 0) + (social.tt_followers ?? 0) + (social.fb_followers ?? 0) + (social.x_followers ?? 0) : null);
-
-            if (total_followers == null) continue; // keep output clean; followers are part of user requirement
-
-            assembled.push({
-              sport: athlete?.sport ?? null,
-              athlete_id,
-              athlete_name: athlete ? [athlete.first_name, athlete.last_name].filter(Boolean).join(" ").trim() || athlete_id : athlete_id,
-              searched_interest_keyword: keyword,
-              interest_name: best.audience_name ?? null,
-              interest_pct:
-                best.ig_audience_percent == null ? null : audiencePercentPoints(Number(best.ig_audience_percent)),
-              interest_count: best.ig_audience_count ?? null,
-              following_total: total_followers,
-            });
-          }
-
-          assembled.sort((a, b) => Number(b.interest_pct ?? -Infinity) - Number(a.interest_pct ?? -Infinity));
-          const top = assembled.slice(0, topPerSportPerInterest);
-          top.forEach((r, idx) => {
-            allResults.push({
-              ...r,
-              rank_for_sport_interest: idx + 1,
-              sport_query: sportRaw,
-            });
-          });
-        }
-      }
-
-      return { searched_interests: expandedKeywords, results: allResults };
     },
 
     getSponsorshipTargets: async (params: {
@@ -2318,12 +1851,6 @@ export async function createAITools(profile: Profile) {
       return { category_names };
     },
 
-    /** Taxonomy categories for a sport (endemic + non-endemic). Resolves roster sport aliases. Use to determine missing sponsor categories when prospecting. */
-    getTaxonomyForSport: async (params: { sport: string }) => {
-      const { endemic, nonEndemic } = await getTaxonomyBySport(params.sport?.trim() || null);
-      return { endemic, nonEndemic };
-    },
-
     /**
      * Resolve athlete candidates from a free-form name string.
      * Useful when the user references a previous list by name ("their interest%, following...").
@@ -2380,106 +1907,6 @@ export async function createAITools(profile: Profile) {
       return Promise.all(uniqueNames.map(resolveOne));
     },
 
-    /**
-     * Return IG audience interest metrics for a list of athletes for a given interest keyword.
-     * interest_pct => ig_audience_percent
-     * interest_count => ig_audience_count
-     */
-    getAthletesAudienceInterestMetrics: async (params: { athlete_ids: string[]; interest_query: string }) => {
-      const athleteIds = (params.athlete_ids ?? []).filter(Boolean);
-      const interest_query = (params.interest_query ?? "").trim();
-      if (!athleteIds.length || !interest_query) return [];
-
-      const accessibleIds: string[] = [];
-      for (const athlete_id of athleteIds) {
-        if (await agentCanAccessAthlete(supabase, profile, athlete_id)) accessibleIds.push(athlete_id);
-      }
-      if (!accessibleIds.length) return [];
-
-      const { data } = await supabase
-        .from("athlete_audience_data")
-        .select("athlete_id, audience_name, ig_audience_percent, ig_audience_count")
-        .in("athlete_id", accessibleIds)
-        .eq("audience_category", "Interests")
-        .ilike("audience_name", `%${interest_query}%`);
-
-      const rows: any[] = data ?? [];
-
-      // Choose the best-matching row per athlete by highest ig_audience_percent.
-      const bestByAthlete = new Map<string, any>();
-      for (const r of rows) {
-        const id = r.athlete_id as string;
-        const pct =
-          r.ig_audience_percent == null ? -Infinity : normalizeIgAudiencePercentToFraction(Number(r.ig_audience_percent));
-        const current = bestByAthlete.get(id);
-        const currentPct =
-          current?.ig_audience_percent == null
-            ? -Infinity
-            : normalizeIgAudiencePercentToFraction(Number(current.ig_audience_percent));
-        if (!current || pct > currentPct) {
-          bestByAthlete.set(id, r);
-        }
-      }
-
-      return athleteIds.map((athlete_id) => {
-        const r = bestByAthlete.get(athlete_id);
-        return {
-          athlete_id,
-          interest_name: r?.audience_name ?? null,
-          interest_pct:
-            r?.ig_audience_percent == null ? null : audiencePercentPoints(Number(r.ig_audience_percent)),
-          interest_count: r?.ig_audience_count ?? null,
-        };
-      });
-    },
-
-    /**
-     * Return overall follower counts for a list of athletes.
-     * following_total => total_followers (fallback to sum of per-platform followers if total_followers is null).
-     */
-    getAthletesSocialFollowing: async (params: { athlete_ids: string[] }) => {
-      const athleteIds = (params.athlete_ids ?? []).filter(Boolean);
-      if (!athleteIds.length) return [];
-
-      const accessibleIds: string[] = [];
-      for (const athlete_id of athleteIds) {
-        if (await agentCanAccessAthlete(supabase, profile, athlete_id)) accessibleIds.push(athlete_id);
-      }
-      if (!accessibleIds.length) return [];
-
-      const { data } = await supabase
-        .from("athlete_social_data")
-        .select("athlete_id, total_followers, ig_followers, tt_followers, fb_followers, x_followers")
-        .in("athlete_id", accessibleIds);
-
-      const rows: any[] = data ?? [];
-      const byId = new Map<string, any>(rows.map((r) => [r.athlete_id, r]));
-
-      return athleteIds.map((athlete_id) => {
-        const r = byId.get(athlete_id);
-        if (!r) {
-          return {
-            athlete_id,
-            following_total: null,
-            ig_followers: null,
-            tt_followers: null,
-            fb_followers: null,
-            x_followers: null,
-          };
-        }
-        const perPlatformSum =
-          (r.ig_followers ?? 0) + (r.tt_followers ?? 0) + (r.fb_followers ?? 0) + (r.x_followers ?? 0);
-        return {
-          athlete_id,
-          following_total: r.total_followers ?? perPlatformSum,
-          ig_followers: r.ig_followers ?? null,
-          tt_followers: r.tt_followers ?? null,
-          fb_followers: r.fb_followers ?? null,
-          x_followers: r.x_followers ?? null,
-        };
-      });
-    },
-
     /** High-level structured intelligence for an athlete. Use this as the primary payload for downstream reasoning agents. */
     getAthleteIntelligence: async (params: { athlete_id: string }) => {
       const athlete_id = params.athlete_id;
@@ -2488,251 +1915,6 @@ export async function createAITools(profile: Profile) {
       }
       const payload = await buildAthleteIntelligencePayload(athlete_id);
       return payload;
-    },
-
-    generateGroupOutreachEmail: async (params: {
-      recipient_name: string;
-      brand_name: string;
-      athletes: Array<{
-        name: string;
-        sport: string;
-        audience_interested: number;
-        interest_names: string[];
-      }>;
-    }) => {
-      const validated = validateGroupOutreachEmailInput(params);
-      if (!validated.ok) {
-        return { error: validated.error };
-      }
-      return {
-        subject: "Quick intro: The·Team x {{brand_name}}",
-        body_markdown: renderGroupOutreachEmailMarkdown(validated.data),
-      };
-    },
-    generateSingleAthleteOutreachEmail: async (params: {
-      recipient_name: string;
-      brand_name: string;
-      athlete_name: string;
-      athlete_sport: string;
-      audience_insights: string[];
-      open_category_reason: string;
-      athlete_id?: string;
-      target_industry_or_category?: string | null;
-      interest_names?: string[];
-      accolades?: string[];
-      past_partnerships?: string;
-      company_description?: string;
-      cta?: string;
-    }) => {
-      const validated = validateSingleAthleteOutreachEmailInput(params);
-      if (!validated.ok) {
-        return { error: validated.error };
-      }
-
-      const athlete_id = params.athlete_id?.trim() || null;
-      const interest_names =
-        Array.isArray(params.interest_names) && params.interest_names.length
-          ? params.interest_names.map((s) => String(s ?? "").trim()).filter(Boolean)
-          : [];
-
-      if (athlete_id) {
-        const curation = await curatePitchInterests({
-          supabase,
-          profile,
-          pitch_type: "single_athlete",
-          company_name: validated.data.brand_name,
-          target_industry_or_category: params.target_industry_or_category,
-          athlete_id,
-        });
-        const interests = interest_names.length
-          ? interest_names
-          : curation.suggested_interests.map((s) => s.interest_name);
-        if (interests.length) {
-          const composed = await composePitchEmail({
-            supabase,
-            profile,
-            pitch_type: "single_athlete",
-            company_name: validated.data.brand_name,
-            interest_names: interests,
-            recipient_name: validated.data.recipient_name,
-            athlete_id,
-            target_industry_or_category: params.target_industry_or_category,
-            past_partnerships: params.past_partnerships,
-            company_description: params.company_description,
-            open_category_reason: validated.data.open_category_reason,
-            cta: validated.data.cta,
-          });
-          return {
-            subject: composed.subject,
-            body_markdown: composed.body_markdown,
-            used_interests: composed.used_interests,
-          };
-        }
-      }
-
-      const template = await getActiveEmailTemplate(supabase as any, "one_to_one");
-      const vars = {
-        recipient_name: validated.data.recipient_name || "[Recipient Name]",
-        athlete_name: validated.data.athlete_name,
-        company_name: validated.data.brand_name,
-        athlete_sport: normalizeSportForPitch(validated.data.athlete_sport),
-        intro_line: `I wanted to introduce ${validated.data.athlete_name}, a ${normalizeSportForPitch(validated.data.athlete_sport)} athlete who could be a strong fit for ${validated.data.brand_name}.`,
-        proof_points: bulletizeProofPoints(
-          [
-            ...validated.data.audience_insights,
-            ...((params.accolades ?? []).map((row) => String(row ?? "").trim()).filter(Boolean).slice(0, 2)),
-            String(params.company_description ?? "").trim(),
-          ],
-          3
-        ),
-        fit_rationale: "",
-        past_partnership_line: String(params.past_partnerships ?? "").trim()
-          ? `I recently noticed ${String(params.past_partnerships ?? "").trim()}`
-          : "",
-        cta: validated.data.cta,
-      };
-      const draft = buildDraftFromTemplate({
-        mode: "one_to_one",
-        template,
-        vars,
-      });
-      return {
-        subject: draft.subject || `Potential Collaboration with ${validated.data.athlete_name}`,
-        body_markdown: draft.body || renderSingleAthleteOutreachEmailMarkdown(validated.data),
-      };
-    },
-    generateCombinedAthleteOutreachEmail: async (params: {
-      recipient_name: string;
-      brand_name: string;
-      athletes: Array<{
-        athlete_name: string;
-        athlete_sport: string;
-        audience_insights: string[];
-        open_category_reason: string;
-      }>;
-      cta?: string;
-    }) => {
-      const validated = validateCombinedAthleteOutreachEmailInput(params);
-      if (!validated.ok) {
-        return { error: validated.error };
-      }
-      return {
-        subject: `Potential Collaboration with ${validated.data.athletes
-          .map((a) => a.athlete_name)
-          .join(", ")}`,
-        body_markdown: renderCombinedAthleteOutreachEmailMarkdown(validated.data),
-      };
-    },
-    generateGeneralOutreachEmail: async (params: {
-      recipient_name?: string;
-      company_name: string;
-      lead_athletes?: Array<{
-        athlete_name: string;
-        athlete_sport?: string;
-        athlete_id?: string;
-      }>;
-      proof_points: string[];
-      cta?: string;
-      high_level?: boolean;
-      target_industry_or_category?: string | null;
-      interest_names?: string[];
-      past_partnerships?: string | null;
-      company_description?: string | null;
-    }) => {
-      const validated = validateGeneralOutreachEmailInput(params);
-      if (!validated.ok) {
-        return { error: validated.error };
-      }
-
-      const pitch_type = validated.data.high_level ? "roster_aggregate" : "roster_athlete_led";
-      const curation = await curatePitchInterests({
-        supabase,
-        profile,
-        pitch_type,
-        company_name: validated.data.company_name,
-        target_industry_or_category: params.target_industry_or_category,
-        athlete_id: params.lead_athletes?.[0]?.athlete_id,
-      });
-      const interest_names =
-        Array.isArray(params.interest_names) && params.interest_names.length
-          ? params.interest_names.map((s) => String(s ?? "").trim()).filter(Boolean)
-          : curation.suggested_interests.map((s) => s.interest_name);
-
-      if (interest_names.length) {
-        const spotlight = await Promise.all(
-          (params.lead_athletes ?? []).slice(0, 3).map(async (row) => {
-            const aid = row.athlete_id?.trim();
-            if (aid) {
-              const { data } = await supabase
-                .from("athletes")
-                .select("athlete_id, first_name, last_name, sport, accolades")
-                .eq("athlete_id", aid)
-                .maybeSingle();
-              if (data) {
-                return {
-                  athlete_id: aid,
-                  athlete_name: `${data.first_name ?? ""} ${data.last_name ?? ""}`.trim() || row.athlete_name,
-                  athlete_sport: String(data.sport ?? row.athlete_sport ?? ""),
-                  accolades: Array.isArray(data.accolades)
-                    ? data.accolades.map((a: unknown) => String(a ?? "").trim())
-                    : [],
-                };
-              }
-            }
-            return {
-              athlete_id: aid ?? row.athlete_name,
-              athlete_name: row.athlete_name,
-              athlete_sport: String(row.athlete_sport ?? ""),
-            };
-          })
-        );
-
-        const composed = await composePitchEmail({
-          supabase,
-          profile,
-          pitch_type,
-          company_name: validated.data.company_name,
-          interest_names,
-          recipient_name: validated.data.recipient_name,
-          target_industry_or_category: params.target_industry_or_category,
-          spotlight_athletes: spotlight.length ? spotlight : undefined,
-          athlete_id: params.lead_athletes?.[0]?.athlete_id,
-          past_partnerships: params.past_partnerships,
-          company_description: params.company_description,
-          cta: validated.data.cta,
-        });
-        return {
-          subject: composed.subject,
-          body_markdown: composed.body_markdown,
-          used_interests: composed.used_interests,
-        };
-      }
-
-      const mode = validated.data.high_level ? "general_high_level" : "general_athlete_led";
-      const template = await getActiveEmailTemplate(supabase as any, mode);
-      const leadAthletes = validated.data.lead_athletes.map((row) => row.athlete_name).join(", ");
-      const draft = buildDraftFromTemplate({
-        mode,
-        template,
-        vars: {
-          recipient_name: validated.data.recipient_name,
-          company_name: validated.data.company_name,
-          lead_athletes: leadAthletes || "The Team athletes",
-          intro_line: validated.data.high_level
-            ? `I wanted to share a quick high-level partnership concept for ${validated.data.company_name}.`
-            : `I wanted to share a quick athlete-led partnership concept for ${validated.data.company_name}, featuring ${leadAthletes || "our athletes"}.`,
-          proof_points: bulletizeProofPoints(validated.data.proof_points, 3),
-          cta: validated.data.cta,
-        },
-      });
-      return {
-        subject:
-          draft.subject ||
-          (validated.data.high_level
-            ? `Partnership opportunities with ${validated.data.company_name}`
-            : `Athlete partnership concept for ${validated.data.company_name}`),
-        body_markdown: draft.body || renderGeneralOutreachEmailMarkdown(validated.data),
-      };
     },
 
     /**

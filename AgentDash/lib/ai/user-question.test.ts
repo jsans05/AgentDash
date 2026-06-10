@@ -55,6 +55,20 @@ test("buildAskUserQuestionToolResult returns selections", () => {
   assert.equal(result.skipped, false);
 });
 
+test("parseAskUserQuestionToolArgs preserves categorized options", () => {
+  const prompt = parseAskUserQuestionToolArgs({
+    question: "Pick audience signals",
+    options: [
+      { id: "interest:Sports", label: "Sports", category: "Interests" },
+      { id: "age:25-34", label: "25-34", category: "Age" },
+    ],
+    allow_multiple: true,
+    allow_other: false,
+  });
+  assert.equal(prompt.options[0]?.category, "Interests");
+  assert.equal(prompt.options[1]?.category, "Age");
+});
+
 test("formatInteractionUserSummary for skip", () => {
   const prompt = parseAskUserQuestionToolArgs({
     question: "Sports?",

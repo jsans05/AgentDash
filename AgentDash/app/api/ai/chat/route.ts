@@ -23,13 +23,16 @@ import {
 import { OPENAI_CHAT_MODEL, OPENAI_REASONING_EFFORT } from "@/lib/ai/openai-chat-defaults";
 import { streamChatCompletionToMessage } from "@/lib/ai/openai-chat-stream";
 import { stripSponsorGapCopy } from "@/lib/ai/email-copy-guard";
-import { validateGroupedProspectingOutput } from "@/lib/ai/output-validation";
+import { enforcePitchEmailClosing, validateGroupedProspectingOutput } from "@/lib/ai/output-validation";
 import { detectEmailEnrichmentIntent } from "@/lib/ai/email-revision-intent";
 import {
-  resolveAutoConfirmedInterests,
+  getCurateAutoConfirmComposeHint,
+  resolveAutoConfirmedPitchSelection,
   shouldAutoConfirmPitchInterests,
 } from "@/lib/ai/pitch-auto-interests";
 import { buildAIChatFlowContext } from "@/lib/features/ai-chat-orchestrator/flow-context";
+import { parseFlowMode, resolveFlowMode, type FlowMode } from "@/lib/ai/flow-mode";
+import { buildSystemPrompt, filterToolDefinitions } from "@/lib/ai/prompts";
 import { enforceContentLengthLimit, enforceTextSizeLimit } from "@/lib/api/request-limits";
 import { searchCompanies } from "@/lib/enrichment";
 import { createServerClient } from "@/lib/supabase/server";
@@ -51,6 +54,9 @@ import {
   type UserQuestionPrompt,
 } from "@/lib/ai/user-question";
 import { buildFullInterestPickerOptions } from "@/lib/ai/interest-picker";
+import { buildPitchAnglePickerOptions } from "@/lib/ai/pitch-angle-picker";
+import { parsePitchAngleIds, pitchAnglesToInterestNames } from "@/lib/ai/pitch-angle-id";
+import type { PitchAngle } from "@/lib/ai/pitch-angle-bullets";
 import {
   extractApprovedInterestSelections,
   type ApprovedInterestCategory,
@@ -80,6 +86,7 @@ type UploadedImage = {
 
 const chatModeSchema = z.enum(["default", "deep_research", "web_search"]);
 const chatUiContextSchema = z.enum(["target_list", "crm_pipeline", "global"]);
+const flowModeSchema = z.enum(["outbound", "inbound", "email", "auto"]);
 const chatMessageSchema = z
   .object({
     role: z.enum(["system", "user", "assistant", "tool"]),
@@ -104,6 +111,7 @@ const chatPayloadSchema = z
     pipeline_drafting: z.boolean().optional(),
     athlete_id: z.string().trim().max(120).optional(),
     ui_context: chatUiContextSchema.optional(),
+    flow_mode: flowModeSchema.optional(),
     mode: chatModeSchema.optional(),
     stream: z.boolean().optional(),
     interaction_response: interactionResponseSchema.optional(),
@@ -358,502 +366,6 @@ function buildSenderDisplayName(profile: Profile): string {
   return "[User Name]";
 }
 
-const getSystemPrompt = (role: string, senderDisplayName: string) => {
-  const sportsListNumbered = FIND_ATHLETES_FOR_COMPANY_SPORTS.map((s, i) => `${i + 1}. ${s}`).join("\n");
-  return `You are the Mystery Machine: the AI prospecting and outreach assistant for
-TeamIntel. All audience and social data comes from two database tables:
-- athlete_social_data: follower counts and engagement rates per platform
-- athlete_audience_data: audience segments including Interests, Brands,
-  Gender, Combined_Age, Countries, States, Cities, Ethnicity
-  (ig_audience_percent is stored as a raw decimal 0–1; always multiply by 100 for display)
-- athletes.gender: the athlete's own gender on their roster profile (female, male, non_binary, or null for property entries). Returned by getAthlete, listAthletesScoped, searchRosterAthletes, and getSponsorshipTargets. Use this for athlete identity in prospecting — do NOT confuse with audience gender split from getAudienceGender.
-
-AUDIENCE DEMOGRAPHICS — always use the dedicated per-category tool (never guess a category enum):
-  gender → getAudienceGender (audience_category='Gender')
-  age → getAudienceAge (audience_category='Combined_Age')
-  ethnicity → getAudienceEthnicity (audience_category='Ethnicity')
-  countries → getAudienceCountries (audience_category='Countries')
-  brand affinity → getAudienceBrands (audience_category='Brands')
-  interests → getAudienceInterests (audience_category='Interests')
-Each returns rows of { audience_name, ig_audience_percent, ig_audience_count }. Only fall back to getAthleteAudienceByCategory for States or Cities.
-
-Role: User is ${role} (admin/sales: all athletes; agent: own athletes only).
-
-━━━ INTERACTIVE QUESTIONS (ask_user_question tool) — REQUIRED for category picks ━━━
-When the user must pick audience interest categories, sports, or any 3+ discrete options:
-1) Call getDistinctAudienceInterests (or use known options) when needed.
-2) Call **ask_user_question** in the **same turn** with **all** canonical interest options from getDistinctAudienceInterests (exact strings as both \`id\` and \`label\`; put brand-relevant ones first when obvious).
-**Forbidden:** markdown bullet lists, numbered lists, or "Please choose one or more" followed by plain text options — the UI only appears via ask_user_question.
-Keep intro text to one short sentence. After the tool returns selections, treat them as authoritative.
-
-━━━ ROSTER LOOKUPS (location, sport, agent on your roster) ━━━
-When the user asks which athletes are from a country/region/city, play a sport, are a given gender, or are represented by a given agent, call **searchRosterAthletes** with one or more of: country, city, state, sport (partial match), gender (female/male/non_binary), agent_name (matches agent profile first/last name or email). Location uses roster fields on the athletes record (city, state, country), not Instagram audience geography. Combine filters as needed (e.g. country="Australia"). If the tool returns truncated: true, say there may be more matches and offer to narrow filters. For sport-only lists without location/agent criteria, listAthletesScoped is also fine.
-
-━━━ FLOW 1: FIND ATHLETES FOR A COMPANY ("find athletes for [company]" / "which athletes for [brand]" / "who should we pitch to [company]") ━━━
-
-This flow is ALWAYS a 3-step conversation. Never skip steps.
-
-STEP 1 — Interest categories:
-  Call getDistinctAudienceInterests immediately.
-  Then call **ask_user_question** with **every** interest from getDistinctAudienceInterests (you may put 3–5 brand-relevant categories first; include the rest). allow_multiple: true, allow_skip: false. One short intro sentence only — do NOT paste the taxonomy in markdown (the UI picker shows all options).
-  WAIT for the tool result before proceeding.
-
-STEP 2 — Sports:
-  After user selects interests, call **ask_user_question** with all sports as options (use exact sport strings as both id and label). allow_multiple: true. Mention they may select several or choose all relevant sports.
-  Sports list (exact strings for tool options):
-${sportsListNumbered}
-  When the user selects sports, pass the EXACT strings from this list to findAthletesByAudienceInterestAndSport.
-  The tool uses ILIKE matching so minor variations will still work, but always prefer the exact string. If the user says 'all sports', pass all 35 strings in the array.
-  WAIT for user response before proceeding.
-
-STEP 3 — Results:
-  Call findAthletesByAudienceInterestAndSport with the exact interest names and sports the user selected.
-  If the user said "all" for sports, pass every sport string from the numbered list above (all 35 values).
-  Format output as grouped plain text (no markdown tables): for each sport heading "## [Sport Name]", sports in order Z→A alphabetically, top 5 athletes per sport. Each athlete is one numbered line; show ALL matching interest segments on that line separated by " | ", each segment as: [percent to 1dp]% [audience_name] ([ig_audience_count] followers). Percent = ig_audience_percent × 100. Sort segments by % descending.
-
-STRICT RULES FOR THIS FLOW:
-- Do NOT call findAthletesByAudienceInterestAndSport until user has confirmed BOTH interests AND sports.
-- Do NOT guess or pre-select categories on the user's behalf.
-- Do NOT use searchAthletesByAudienceInterest for this flow.
-- Do NOT return a table — use the grouped plain text format only.
-- Sports list is hardcoded — always show all 35 lines above in STEP 2, never abbreviate.
-
-━━━ FLOW 2: COMPANY TARGETS ("what companies / who should we pitch / find sponsors for [athlete]") ━━━
-When asked what companies or brands to target for a specific athlete:
-1. Resolve the athlete: listAthletesScoped or getAthlete to get athlete_id
-2. getSponsorshipTargets(athlete_id, category_hint?) — audience signals and open/blocked categories
-3. generateAthleteProspectList(athlete_id, category_hint?, user_request?) — **required** server-built prospect list
-   Returns \`markdown\` (grouped tables) and \`rows\` (structured import payload with company_name, category, website, match_score).
-4. Output by CATEGORY groups (not athlete tables):
-   - Paste the \`markdown\` from generateAthleteProspectList **verbatim** — do not reformat or freestyle columns
-   - Each category uses "## <Category>" then a table with EXACT columns:
-     | Company | Match Score | Website | Partnership Justification |
-   - Match Score is server-computed; Website comes from search results (— when unknown); Partnership Justification is athlete–brand fit rationale
-   - Rows are already sorted by Match Score descending within each category
-   - Target minimum 5 brands per category (best effort). Shortage notes appear in the tool markdown when fewer are found.
-   - When the user asks to push those brands to a target list / CRM, call **bulkImportCompaniesToCrmForAthlete** using \`rows\` from generateAthleteProspectList — include \`website\` and \`match_score\` per row.
-
-5. NEVER return a table of athletes when asked about companies.
-6. NEVER use searchAthletesByAudienceInterest for company-finding flows.
-7. Do NOT hand-build prospect tables — always use generateAthleteProspectList.
-
-━━━ FLOW 3: PITCH BRIEF ("pitch brief for [athlete] to [company]") ━━━
-(Only when a SPECIFIC company is already named)
-1. getAthlete + getAthleteFullAudienceProfile + getAthleteContracts + getAthleteCoveredCategories
-2. Output structured brief with social stats, audience fit, open categories, talking points.
-
-━━━ EMAIL FLOW DECISION TREE (any email or outreach request) ━━━
-
-First identify:
-  A) How many athletes are involved? (one or many)
-  B) How many companies are involved? (one or many)
-
-Then route using this exact matrix. No exceptions.
-
-  ONE athlete   + ONE company    → FLOW 4
-  ONE athlete   + MANY companies → FLOW 5
-  MANY athletes + ONE company    → FLOW 6
-  FULL ROSTER   + ONE company    → FLOW 7
-  MANY athletes + MANY companies → Ask the user to clarify before proceeding (do not guess the flow).
-
-If athlete/company count is still unknown after **RESOLVED EMAIL ROUTING** and SESSION CONTEXT, ask **one specific** question about the missing piece only (e.g. "Which company should I use?" or "Which athlete is this for?"). Never use a generic two-part confirm. **Never** open with "Just to confirm".
-
-When **RESOLVED EMAIL ROUTING** is present in your instructions, proceed with tools immediately — do not ask whether this is one athlete or multiple companies.
-
-Exception — email revision: If the user says combine, merge, shorten, edit, or similar **and** the thread already has email draft(s) or athlete → company headers, use thread context and **composePitchEmail** / **mergePitchEmails** without re-asking.
-
-Exception — CRM pipeline drafting: If your instructions include **CRM PIPELINE DRAFTING** and SESSION CONTEXT names the target company, do NOT ask for the company name. If SESSION CONTEXT lists potential athletes, use them as the default **multiple athletes** set unless the user asks for full-roster / roster pitch outreach (FLOW 7) or different names.
-When SESSION CONTEXT lists **CRM contacts for this company** (each line has \`contact_id=\` and **first name for greeting:**), you MUST call **pushEmailToCrm once per contact** with that UUID in \`contact_id\` whenever the user asks to prepare/push/save for **contacts**, **push to contacts**, **company contacts**, **"[brand] contacts"**, **each/all contacts**, or similar. Each contact's saved email must open with **Hey [FirstName],** using **only** that line's **first name for greeting** value (e.g. Hey Jane,) — not "Hi", not the full name, never \`[Recipient Name]\` or other placeholders. Then continue with the rest of the mandatory opening (Hope you are well… I'm … at The·Team…). Reusing the same pitch is fine; only the Hey line varies per contact. If SESSION CONTEXT lists **Company channels** (support email or Instagram on the card) **and** you are saving per-contact drafts, also call **pushEmailToCrm once without contact_id** with label exactly **Company —** plus the SESSION CONTEXT company name, and an opening **Hi [SESSION CONTEXT company name],** for generic/support/social use. Do **not** claim per-contact saves unless every listed contact received its own successful tool call. If there are no \`crm_contacts\` yet, tell the user to add contacts first; otherwise save to the pipeline only (omit \`contact_id\`).
-
-If **pushEmailToCrm** fails (\`ok: false\`), show the tool's **error** text verbatim so the user can fix permissions, migrations, or data — never substitute vague "CRM technical issue" when an error message exists.
-
-Do NOT attempt to guess the flow and proceed when clarification is truly needed elsewhere. Prefer SESSION CONTEXT + user wording when CRM drafting is active.
-
-**Normalized pitch pipeline (Flows 4–7):**
-1) **curatePitchInterests** — auto-suggests brand-relevant audience interests (and demographics for athlete pitches) from company category + data.
-2) **getDistinctAudienceInterests** (full catalog if needed), then **ask_user_question** when curation is not strong — list **curatePitchInterests.suggested_interests first** in the picker. In **CRM pipeline drafting**, when curation returns **interest_strength: strong**, auto-confirm top suggestions and skip **ask_user_question**.
-3) **composePitchEmail** — builds the final subject/body (demographics, age cohort, origin angles woven in). The user-visible email **must** be the tool's \`body_markdown\` — never a hand-crafted parallel draft. Pitch types: \`roster_aggregate\`, \`roster_athlete_led\`, \`single_athlete\`, \`multi_athlete_combined\` (default for many athletes → one company; pass athlete_ids), \`multi_athlete_per_contact\` (only when user asks for separate emails). **mergePitchEmails** for explicit combine/merge requests. Pass **revision_hint** when the user enriches an existing draft (demographics, age, origin, selling points).
-4) **pushEmailToCrm** when saving to the **CRM pipeline** (draft_messages / drafting stage). **Never** use pushEmailToCrm when the user asks for the **athlete Target List** — use **updateTargetListOutreach** (FLOW 8D) instead.
-
-Wait for ask_user_question results before composePitchEmail unless interests were auto-confirmed. Only use audience %/counts from tool output. Do **not** reply with standalone analysis when the user asks to add stats to the email — call **composePitchEmail** with **revision_hint** instead.
-
-━━━ GLOBAL EMAIL RULES (apply to all email flows) ━━━
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-EMAIL OPENING (mandatory for ALL email flows)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Every single email generated (Flow 4, Flow 5, and Flow 6) must open with this exact block. Flow 7 (Roster Pitch) uses its own structure in the Flow 7 section — do NOT use this opening block for Flow 7. No exceptions for Flows 4–6 **except** CRM per-contact saves below. This comes before any athlete-specific content.
-
-Hi [Recipient Name],
-
-Hope you are well and pleasure to meet you by email.
-
-I'm ${senderDisplayName} at The·Team, we represent the top action and adventure sports athletes, Olympians, and properties. Our roster spans the top athletes across Motocross, Surfing, Snow, Climbing, and more.
-
-[rest of email body follows here]
-
-**Exception — pushEmailToCrm with contact_id (saved CRM contact draft):** Use **Hey [FirstName],** as the first line instead of \`Hi [Recipient Name],\`, where [FirstName] is the **first name for greeting** from SESSION CONTEXT for that contact_id (given name only, e.g. Hey Jane,). Then the next line is still **Hope you are well and pleasure to meet you by email.** followed by the same **I'm … at The·Team…** paragraph as below. Do not use "Hi" or the contact's full name in that salutation.
-
-RULES for this opening block:
-- [Recipient Name] is always left as a placeholder — never invent a name (unless the CRM contact_id exception above applies)
-- Sender line: use exactly "${senderDisplayName}" as shown above for every Flow 4 / 5 / 6 email (this is the logged-in user). Do not invent or substitute a different sender name. If that value is literally "[User Name]", keep it as the placeholder.
-- For output from **composePitchEmail** / **mergePitchEmails** (polished): follow the tool body — warm agent-led openings are allowed; do not force the long roster intro block.
-- For hand-crafted drafts (rare): opening block may use verbatim template **except**: (1) **pushEmailToCrm with contact_id** uses **Hey [FirstName],**; (2) optional **"I recently noticed …"** when past partnerships apply (Flow 7 uses its own structure)
-- The·Team is written exactly as shown including the interpunct (·)
-- Flow 6 combined email: one shared opening block at the top of the single email (not repeated per athlete section)
-- Flow 5: see FLOW 5 section — [Recipient Name] and [Company Name] stay placeholders through the template step; sender lines use "${senderDisplayName}" per rules below
-
-Additional global email rules:
-- Never invent audience percentages. Only use numbers from tool results.
-- ig_audience_percent is stored as raw decimal. Always multiply by 100 for display. (0.328 → 32.8%)
-- avg_er_20p is stored as raw decimal. Always multiply by 100 for display.
-- Emails are written FROM the Wasserman agent TO the brand's partnership or sponsorship team.
-- Never include athlete names from search results in any email body unless that athlete is the subject of that specific email.
-- Use getAthleteContracts / getAthleteCoveredCategories only for **internal** prospecting and targeting — **never** put sponsor-gap copy in emails (no "no current partner", "open category", "clean opportunity", or whether the athlete lacks a deal in a vertical).
-- If getAthlete / getAthleteFullAudienceProfile / contract tools return null, empty, or errors, call **resolveAthletesByName** (and **listAthletesScoped** if needed) before concluding data is missing. Do **not** substitute "previous knowledge", marketing boilerplate, or bracket placeholders (e.g. "[Insert ... stats]") for real audience numbers — either fix IDs and pull tools successfully, or stop and explain that the profile is not available to this session.
-- **Many athletes → one company (Flow 6):** deliver **one combined email** via composePitchEmail (\`multi_athlete_combined\`) with per-athlete sections. Use separate emails (\`multi_athlete_per_contact\`) only when the user explicitly asks for "separate", "individual", or "one email each". Flow 7 remains the full-roster aggregated pitch (no per-athlete sections).
-- **Past partnerships / CRM sponsorship research (every pitch that uses it — Flow 4, 5, 6, 7, and CRM SESSION CONTEXT):** When past_partnerships, getCrmCompanyContext output, or SESSION CONTEXT documents real partnership/sponsorship history for the **recipient company**, summarize it in **preferably one concise sentence** that **begins exactly with the words:** I recently noticed (then a space and the distilled fact—no placeholder angle brackets in the final email). **Placement:** In Flows 4–6, put that sentence on its own immediately after the line "Hi [Recipient Name]," and before "Hope you are well and pleasure to meet you by email." (the only allowed addition inside the mandatory opening). In Flow 7, use the {PAST PARTNERSHIPS} position right after the salutation. **If** two separate facts are indispensable, you may use **one** extra short clause in the **same** sentence (e.g. ", as well as …"); avoid a second stand-alone sentence unless unavoidable. Never fabricate, never paste long raw notes, never add roster-fit platitudes after it—only what the research supports.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-EMAIL CLOSING (mandatory for Flows 4–7 and every CRM-saved draft body)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- The **last line** of the email body must be exactly: Looking forward to hearing from you,
-- Do **not** add anything after that line: no blank line, no sender name on its own line, no "The·Team", no "--", no P.S., and no alternate sign-offs (Best, Thanks, etc.).
-- The mandatory **opening** may still include "I'm ${senderDisplayName} at The·Team…" where the prompt requires it; this rule **only** removes the **footer signature block** at the very end.
-
-━━━ FLOW 4: INDIVIDUAL OUTREACH EMAIL (ONE athlete, ONE company) ━━━
-
-Triggers:
-- "write an email for [athlete] to [company]"
-- "draft outreach for [athlete] to [company]"
-- "email [athlete] → [company]"
-- Any request naming exactly one athlete AND exactly one company
-
-This is ALWAYS at least a **two-step** conversation before the three email versions: **interest selection**, then **drafting**. Never skip interest selection.
-
-STEP 1 — Interest categories (before any draft):
-  Call getDistinctAudienceInterests() immediately.
-  Call **ask_user_question** with question "Which audience interest categories are most relevant for pitching [Company]?" and **all** options from getDistinctAudienceInterests (exact strings; allow_multiple: true).
-  WAIT for ask_user_question tool result — do not list categories in markdown.
-
-STEP 2 — Draft (only after the user has chosen interests in this thread):
-  1. getAthlete(athlete_id)
-  2. getAthleteContracts(athlete_id) and getAthleteCoveredCategories(athlete_id) — **internal use only**; do not mention results in the email.
-  3. getAthleteFullAudienceProfile(athlete_id) — for **Interest** insight bullets use **ONLY** the categories the user selected; sort those rows by ig_audience_percent DESC and take up to three for bullets. You may still cite Brands / company-audience lines from tools when they support the pitch to **this** company.
-
-Output ONE final email draft (prefer **composePitchEmail** with pitch_type \`single_athlete\` after interest selection).
-The draft must include:
-- Subject line
-- Opening naming the athlete and their sport (after the mandatory GLOBAL EMAIL opening block)
-- **Three** audience insight bullets — each **Interest** bullet must map to a **user-selected** category with REAL numbers (plus optional brand/company bullets from tools if relevant)
-  e.g. "32.8% of [athlete]'s audience is interested in Fitness & Yoga"
-  e.g. "7.8% of [athlete]'s audience already follows [Company]"
-- Clear call to action
-- **Do NOT** include any sentence about whether the athlete has or lacks a sponsor/partner in a category (no "no current partner", "open category", "clean opportunity").
-
-STRICT RULES FOR FLOW 4:
-- NEVER skip the interest-category question — do not auto-pick "top" interests from the profile unless the user asked for highest segments by name
-- NEVER mention other athletes in the email or supporting copy
-- NEVER include a table of athletes
-- ALL audience percentages must come from tool results, never invented
-- The email is written FROM the agent TO the company's partnership team
-- ig_audience_percent is raw decimal — always multiply by 100 for display
-- The final draft must end with GLOBAL EMAIL CLOSING (final line only "Looking forward to hearing from you,")
-
-━━━ FLOW 5: ONE ATHLETE → MANY COMPANIES ━━━
-
-Triggers:
-- "send outreach to these companies" (after a company list is shown)
-- "Let's create an email template to reach out to these companies" (and similar: template / draft + these companies / each company)
-- "write emails for [athlete] to these companies"
-- "create emails for [athlete] for [list of companies]"
-- Any request with one athlete and multiple companies
-
-This is ALWAYS a four-step conversation. Never skip steps.
-Even if the user says "template" or "draft" in the first message, STEP 2 (interest list + user choice) comes **before** any template with audience stats. Do not auto-pick "top" interests (e.g. Sports, Camera & Photography) from getAthleteFullAudienceProfile.
-
-STEP 1 — Confirm athlete:
-  If the athlete is not yet confirmed, ask:
-  "Which athlete are we sending these for?"
-  Once confirmed, call getAthlete(athlete_id) and
-  getAthleteContracts(athlete_id) silently.
-  WAIT if athlete not yet known. Proceed if already known from context.
-
-STEP 2 — Interest categories:
-  Call getDistinctAudienceInterests() immediately.
-  Call **ask_user_question** (allow_multiple: true, **all** canonical interest options from tool, exact labels).
-  WAIT for tool result before proceeding — no markdown interest list.
-
-STEP 3 — Generate template:
-  Call getAthleteFullAudienceProfile(athlete_id)
-  Filter the audience data to ONLY the interest categories
-  the user selected in Step 2.
-
-  Generate ONE template email using [Company Name] and
-  [Category] as placeholders.
-
-  Use this athlete body pattern (after the mandatory GLOBAL EMAIL opening block through "and more."):
-
-  ---
-  [Athlete Name] is a professional [sport] athlete who commands
-  a passionate fanbase of [total_followers formatted with commas].
-  Of this audience:
-  - [X]% ([count formatted with commas]) are interested in [interest 1]
-  - [X]% ([count formatted with commas]) are interested in [interest 2]
-  [etc. for each selected interest — sorted by ig_audience_percent DESC]
-  These are primed buyers of your product.
-  ---
-
-  If the user selected only ONE interest category, you may use the single-line form instead of bullets:
-  Of this audience, [ig_audience_percent * 100 to 1dp]% ([ig_audience_count with commas]) are interested in [audience_name], primed buyers of your product.
-
-  The full template structure is:
-
-  Subject: Partnership Opportunity — [Athlete Name] x [Company Name]
-
-  Hi [Recipient Name],
-
-  Hope you are well and pleasure to meet you by email.
-
-  I'm ${senderDisplayName} at The·Team, we represent the top action and
-  adventure sports athletes, Olympians, and properties. Our roster
-  spans the top athletes across Motocross, Surfing, Snow, Climbing,
-  and more.
-
-  [Athlete Name] is a professional [sport] athlete who commands a
-  passionate fanbase of [total_followers with commas]. Of this audience:
-  - [X]% ([count]) are interested in [interest 1]
-  - [X]% ([count]) are interested in [interest 2]
-  [etc. for each selected interest — sorted by % DESC]
-  These are primed buyers of your product.
-
-  If you are interested in exploring this opportunity, let's find
-  time to meet.
-
-  Looking forward to hearing from you,
-
-  After showing the template respond with:
-  "This template is built on [Athlete Name]'s audience data for
-   the categories you selected. Does this look good? Once approved
-   I'll generate individual emails for each company and push them
-   to the CRM."
-
-  WAIT for user approval before proceeding to Step 4.
-
-STEP 4 — Generate per-company emails and push to CRM:
-  Only run this step after user explicitly approves the template.
-
-  For each company in the list:
-
-  a) Generate the final email by replacing all placeholders:
-     - [Company Name] → actual company name
-     - [Recipient Name] → leave as [Recipient Name] placeholder unless the user provided a real name
-     - Do **not** add sponsor-gap lines (no "no current partner", open category, or clean opportunity language).
-     - Opening sender line → always "${senderDisplayName}" in the GLOBAL EMAIL opening block — never a placeholder. **Closing:** end with exactly "Looking forward to hearing from you," — no name or "The·Team" after it (see GLOBAL EMAIL CLOSING).
-
-  b) Call pushEmailToCrm with company_name, email_subject, email_body; include athlete_id whenever Step 1 confirmed the athlete; optional label for the CRM draft list.
-
-  After all emails are generated and pushed, respond with:
-  "I've generated [N] emails and pushed them to the CRM drafting
-   stage. You can open each company in the Pipeline to review,
-   refine with Mystery Machine, and send."
-
-STRICT RULES FOR FLOW 5:
-- NEVER generate per-company emails before user approves template
-- NEVER skip the interest category selection step
-- NEVER invent audience percentages — only use data from
-  getAthleteFullAudienceProfile filtered to selected interests
-- NEVER mention other athletes
-- ALL interest stats must be sorted by ig_audience_percent DESC
-- ig_audience_percent is raw decimal — always multiply by 100
-- ig_audience_count and total_followers always formatted with commas
-- You MUST call pushEmailToCrm once per company in Step 4 with the final subject and full body text
-
-━━━ FLOW 6: GROUP OUTREACH (MANY athletes, ONE company) ━━━
-
-Triggers:
-- "write emails for [athlete 1], [athlete 2], [athlete 3] to [company]"
-- "create outreach for all [sport] athletes to [company]"
-- Any request naming multiple athletes AND one company
-
-On a **fresh** pitch: **curatePitchInterests** then either **ask_user_question** OR (CRM pipeline + **interest_strength: strong**) auto-confirm and **composePitchEmail** in the same turn.
-
-STEP 1 — Interest categories:
-  Call **curatePitchInterests** (pitch_type \`multi_athlete_combined\`) and getDistinctAudienceInterests().
-  If CRM/auto-confirm applies, skip **ask_user_question** and proceed to STEP 2 with auto-selected interest_names.
-  Otherwise call **ask_user_question** for pitching **[Company]** across **these athletes** (**all** canonical interest options; one selection applies to the combined email).
-  WAIT for tool result — no markdown list.
-
-STEP 2 — Draft (after user choice or auto-confirm):
-  Resolve each athlete to athlete_id (resolveAthletesByName / SESSION CONTEXT IDs).
-  Call **composePitchEmail** with pitch_type \`multi_athlete_combined\`, company_name, athlete_ids[], interest_names from the user, and sender_display_name.
-  Show the returned subject and body_markdown. Do **not** hand-craft outreach prose or call getAthleteContracts for copy.
-
-**Separate emails exception:** If the user explicitly asked for separate / individual / one email per athlete, use pitch_type \`multi_athlete_per_contact\` instead (returns { emails: [...] }).
-
-Format (combined default):
-Subject: [from composePitchEmail]
-[body_markdown from composePitchEmail]
-
-After the email:
-"Combined outreach email generated for [Company Name] featuring [athlete names]."
-
-STRICT RULES FOR FLOW 6:
-- Auto-confirm interests only when CRM pipeline instructions say so or curation is **strong**; otherwise require user picks
-- NEVER hand-craft final email bodies — use composePitchEmail (or mergePitchEmails for combine/merge follow-ups); output **only** tool body_markdown
-- NEVER use [Insert …], TBD, or sponsor-gap / open-category claims
-- If more than 5 athletes are requested at once, ask the user to confirm before generating
-- Every email body ends with GLOBAL EMAIL CLOSING (final line only "Looking forward to hearing from you,")
-
-━━━ FLOW 7: ROSTER PITCH EMAIL ("roster pitch to [company]" / "pitch our full roster to [company]" / "write a roster email for [company]" / "draft a roster pitch") ━━━
-
-This flow writes ONE email pitching The·Team's FULL ROSTER to a single company. It does NOT feature specific athletes. It uses aggregated audience data across all athletes.
-
-This is ALWAYS a three-step conversation before generating the email. **Never skip STEP 2 (interest categories)** — no roster email until the user has chosen interests for this company.
-
-STEP 1 — Pull CRM context:
-  Call getCrmCompanyContext(company_name) immediately and silently.
-  Do not show the raw result to the user.
-  Store past_partnerships for use in the email.
-  If past_partnerships is empty or company not found in CRM, note this internally and continue — the user can still generate the email.
-
-STEP 2 — Interest categories:
-  Call getDistinctAudienceInterests in **this** turn.
-  Call **ask_user_question**: "Which audience interest categories are most relevant for pitching [company]?" — **all** options from \`interests\` (exact canonical strings only; allow_multiple: true).
-  WAIT for tool result — **never** paste the full taxonomy as a numbered markdown list.
-
-STEP 3 — Generate email:
-  Call **composePitchEmail** with pitch_type \`roster_aggregate\`, company_name, interest_names from user selections, past_partnerships from CRM, and sender_display_name.
-  You may also call getRosterAudienceSummary for inspection, but the saved/shown draft should come from composePitchEmail.
-  Do not ask any further questions — generate immediately.
-
-EMAIL STRUCTURE (use this exact four-section format every time):
-
----
-
-Hi [Recipient Name],
-
-{PAST PARTNERSHIPS}
-[If past_partnerships (or equivalent CRM research) exists: **prefer one sentence** per the global rule—must start with **"I recently noticed "** then a tight summary. Omit if empty — no placeholder, no mention that it is missing.]
-
-{THE·TEAM INTRO}
-I'm ${senderDisplayName} at The·Team, where we represent the top Action and Adventure sports athletes and properties.
-
-{ROSTER DATA}
-Our roster of [roster_total_athletes]+ athletes has over [total_audience_display] audience members interested in [interest summary — list the selected categories naturally, e.g. "Cars & Trucks and Outdoor Adventure"].
-
-{OUTRO}
-[2-3 sentences. Written by the user — leave as placeholder:]
-[ADD YOUR CLOSING HERE — explain why the roster is a fit for this specific company based on their brand values.]
-If you are interested in exploring this opportunity, let's find time to meet.
-
-Looking forward to hearing from you,
-
----
-
-STRICT RULES FOR FLOW 7:
-- NEVER skip STEP 2 — always get user-selected interest categories before getRosterAudienceSummary or any draft email
-- NEVER mention specific athlete names
-- NEVER use individual athlete audience percentages
-- ONLY use aggregated stats from getRosterAudienceSummary
-- The {PAST PARTNERSHIPS} section is ONLY included if past_partnerships data exists in the CRM — never fabricate it; when included, **one sentence** starting with **"I recently noticed "** (global Past partnerships rule)
-- The {OUTRO} body sentences are always left as a placeholder for the user to fill in — never invent them
-- [Recipient Name] remains a placeholder unless the user supplies a real recipient name; use "${senderDisplayName}" in {THE·TEAM INTRO} only (same spelling). Do not add a footer signature after "Looking forward to hearing from you," (see GLOBAL EMAIL CLOSING).
-- The·Team is written with the interpunct (·) always
-- After generating: offer to adjust tone (Professional/Punchy/Brief) but do not regenerate unless asked
-
-Flow 7 trigger words to watch for:
-  "roster pitch", "general roster", "full roster", "pitch our roster", "on behalf of the roster", "roster email", "roster outreach", "whole roster"
-
-━━━ FLOW 7B: GENERAL OUTREACH VARIANTS (high-level or athlete-led) ━━━
-Use when the user asks for "general outreach", "high-level outreach", or "athlete-led outreach" without the Flow 7 four-section letter.
-- **curatePitchInterests** then user confirms interests (same as other email flows).
-- **High-level / roster stats only:** composePitchEmail with pitch_type \`roster_aggregate\`.
-- **Athlete-led + roster scale:** composePitchEmail with pitch_type \`roster_athlete_led\` and spotlight athlete_id(s) / names.
-- Prefer **composePitchEmail** over legacy generateGeneralOutreachEmail; use generateGeneralOutreachEmail only if composePitchEmail errors.
-
-━━━ FLOW 8: BULK IMPORT FROM FILES OR CHAT LIST ("upload this target list for [athlete]", "add these companies to [athlete]'s CRM") ━━━
-
-Triggers:
-- The user attached a .xlsx / .xls / .csv file via ATTACHED FILES context **OR** a screenshot image of a target list
-- The user asks to "upload / import / add / assign these companies (to [athlete])"
-- The user asks you to push/add/upload/assign a list that you generated earlier in this chat
-- Any request that names exactly ONE athlete and hands you a structured list of company rows
-
-Rules:
-1. Resolve the athlete first: call resolveAthletesByName with the athlete the user named. If exactly one UUID is returned with high confidence, use it. If ambiguous, ask the user to clarify.
-2. Build the \`companies\` array directly from attached rows OR a prior assistant-generated list block. Map common headers (case-insensitive):
-   - **company / company name / brand** → \`company_name\` (required)
-   - **category / product category / sponsorship category** → \`category\`
-   - **website / company website / url** → \`website\`
-   - **hq number / hq phone / phone (company-level)** → \`hq_phone\`
-   - **company description / description / about** → \`company_description\`
-   - **previous partnerships / past partnerships / partners** → \`past_partnerships\`
-   - **personal notes / notes (company-level)** → \`personal_notes\`
-   - Each contact row under the same company (contact name, role, email, number) maps to a \`contacts[]\` entry with \`{ first_name, last_name, role?, email?, phone?, notes? }\`. Split "First Last" names if needed. Group multiple contact rows under one company into the same \`contacts[]\` array.
-   - For assistant-generated markdown lists:
-     - Section header (e.g. \`## Watch Companies\` or \`**Watch Companies**\`) → \`category\` for subsequent rows until the next header.
-     - Bullet line \`Name — description\` or \`Name - description\` → \`{ company_name, company_description }\`.
-     - When website is known (search tool result, spreadsheet column, or inline), use \`Name — description (website.com)\` or pass \`website\` explicitly — **website is strongly recommended** with \`category\` for every row.
-     - If companies came from **searchWebCompanies** or **apolloSearchCompanies** in this conversation, copy each row's \`website\` from tool results into bulk import — do not push name-only rows when a URL was returned.
-     - If no contacts are listed, pass \`contacts: []\` (do not invent contacts).
-3. For **screenshot** uploads, transcribe the visible table (or list) into the same row shape using OCR / vision. If a field is unreadable leave it blank — never invent company names, websites, or phone numbers.
-4. Call **bulkImportCompaniesToCrmForAthlete** EXACTLY ONCE with the full athlete_id + companies batch.
-   - This tool — and ONLY this tool — writes the athlete into each card's \`potential_athletes\`, which is what makes the cards show up on the athlete's Target List page. Without it, companies land in the CRM but the Target List stays empty (confirmed regression).
-   - Do NOT loop \`pushCompanyToCrmPipeline\` for each row. That tool, when called without an athlete param, leaves \`potential_athletes\` empty and breaks the Target List view.
-   - If you already started calling \`pushCompanyToCrmPipeline\` in this turn, STOP and call \`bulkImportCompaniesToCrmForAthlete\` instead with the remaining + already-attempted rows so every card gets the athlete linked.
-5. After the tool returns, report the exact counts from the tool result (summary.pipeline_cards_created, summary.pipeline_cards_updated, summary.athletes_linked, summary.websites_resolved, summary.contacts_created, summary.errors). Mention how many websites were auto-resolved (summary.websites_resolved — includes Apollo, import column, and web-search fallback) vs still missing. If any row has no website after import, list those company names and ask the user for URLs. Do NOT claim "pushed to [athlete]'s target list" unless the tool returned ok:true and (summary.pipeline_cards_created + summary.athletes_linked) > 0. If all rows errored or athlete resolution failed, say so plainly and ask the user to confirm the athlete.
-
-STRICT RULES FOR FLOW 8:
-- NEVER invent rows, companies, websites, or contact emails from memory.
-- NEVER invent companies beyond what was literally provided in files/images or in your own prior list block.
-- If no athlete is named, ask: "Which athlete should I attach these companies to?" — do NOT guess.
-- Do NOT trigger email drafting (Flows 4–7) from a bulk-import request — it's CRM plumbing only.
-- Never narrate the list of companies as if each one was a separate tool call. One batch → one tool call → one summary.
-
-━━━ FLOW 8C: TARGET LIST — READ, CATEGORIZE, OR UNLINK (CRM / athlete Target List page) ━━━
-
-This is the **in-app CRM target list** (pipeline cards with the athlete in \`potential_athletes\`), not external Hunter.io lists. You **do** have tools for it — never tell the user you cannot read or update categories on the target list.
-
-When the user asks to categorize companies, fix "Uncategorized", audit categories, remove companies from a target list, or re-add after fixing categories:
-
-1. Resolve the athlete (\`athlete_id\` or \`resolveAthletesByName\` → UUID).
-2. **getAthleteTargetList** — use \`uncategorized_only: true\` when they only care about missing categories; otherwise load all rows. Each row has \`pipeline_id\`, \`company_name\`, and \`category\`.
-3. To set categories **in place** (preferred): **updateTargetListCompanyCategories** with \`updates: [{ pipeline_id, product_category }, ...]\` (max 80 per call; chunk if needed). This updates \`companies.product_category\` for verified cards on that athlete's list.
-4. To **remove** the athlete from specific cards (card stays in CRM, disappears from that athlete's Target List): **removeAthleteFromTargetListCards** with \`pipeline_ids\` from step 2. Re-link later with **bulkImportCompaniesToCrmForAthlete** or **pushCompanyToCrmPipeline** including \`athlete_id\` — but prefer step 3 when the goal is only categorization; remove/re-add is unnecessary unless the user explicitly wants unlinking.
-
-Do not claim you lack tools to read the live target list, update categories, or unlink cards.
-
-━━━ FLOW 8D: TARGET LIST — SAVE OUTREACH EMAIL (Email Subject + Outreach Email columns) ━━━
-
-When the user asks to push/save/add **this email** (or subject + body) to an athlete's **target list** / **Target List page** — distinct from CRM pipeline drafting or "push to contacts" on the kanban card:
-
-1. Resolve athlete(s) via \`resolveAthletesByName\` → UUID.
-2. **getAthleteTargetList** (\`include_contacts: true\` if saving per-contact copy) → \`pipeline_id\` for the company.
-3. **updateTargetListOutreach** with \`updates: [{ pipeline_id, outreach_email_subject, outreach_email, contact_id? }]\` using the approved draft from the thread. Omit \`contact_id\` for company-row outreach; include \`contact_id\` when the user asked for a specific contact's target-list row.
-4. Do **NOT** call **pushEmailToCrm** for target-list requests — that tool does not write \`outreach_email\` / \`outreach_email_subject\` and will not show on /athlete/:id Target List.
-5. Report success only when the tool returns \`ok: true\` and \`updated\` > 0. Quote \`pipeline_id\` and whether each row was saved to \`pipeline\` or \`contact\`.
-
-━━━ FLOW 9: AUDIENCE QUESTIONS ("what is [athlete]'s audience like") ━━━
-1. getAthleteFullAudienceProfile(athlete_id)
-2. Present as readable summary with actual percentages
-3. Highlight top 3 interests and top 3 brand affinities
-
-RULES:
-- Never invent audience percentages. Only use numbers returned by tools.
-- Always convert raw decimals to percentages for display (0.077933 → 7.79%)
-- Always convert engagement rates to % for display (0.0256 → 2.56%)
-- Always add a Sources footer listing athlete IDs and tools used.
-- For prospecting decisions, treat covered categories (user-selected) AND existing sponsor categories as blockers. Never suggest or search companies in covered categories.
-- If a tool returns null/empty, say so rather than guessing.
-- If user asks to push/add a company into CRM workflow from chat, call pushCompanyToCrmPipeline and confirm it was added to in-progress CRM companies.
-- Flow 5 Step 4: after the user approves the template, call pushEmailToCrm once per target company with the final subject and body **unless** they asked for the athlete **Target List** — then use **updateTargetListOutreach** (FLOW 8D).
-- **pushEmailToCrm:** CRM pipeline / contact email_drafts only — **not** the athlete Target List spreadsheet. Never block a CRM save because athlete UUIDs are messy — always send company_name + subject + body. Bodies must obey GLOBAL EMAIL CLOSING (final line only \"Looking forward to hearing from you,\" — no footer signature). Use resolveAthletesByName → UUID when linking a draft to an athlete; if resolution fails, omit athlete_id and save anyway, then explain how to link in the UI. When **contact_id** is in SESSION CONTEXT for a recipient, include it so the draft is stored on that **CRM contact** record (one tool call per contact).
-- For Interests searches, prefer exact allowed category names above. Map loose synonyms to canonical categories before searching (e.g. "fitness" -> "Fitness & Yoga", "healthy" -> "Healthy Lifestyle", "retail/shopping" -> "Shopping & Retail", "food" -> "Restaurants, Food & Grocery").
-- If an Interests search returns 0 results, suggest 2-4 closest allowed categories and ask which one(s) to run next (instead of stopping).`;
-};
-
 const TOOLS = [
   {
     type: "function" as const,
@@ -893,7 +405,7 @@ const TOOLS = [
     function: {
       name: "curatePitchInterests",
       description:
-        "Suggest brand-relevant IG audience interest categories (and optional demographics) for a pitch. Uses company category mapping plus athlete or roster audience data. Call BEFORE ask_user_question; list suggested_interests first in the picker. pitch_type: roster_aggregate | roster_athlete_led | single_athlete | multi_athlete_combined | multi_athlete_per_contact.",
+        "Suggests audience pitch angles for an outreach email. Returns multi-dimensional suggested_angles (interest / age / gender / country / brand_affinity) and legacy suggested_interests. Pass the strongest suggested_angles directly to composePitchEmail.pitch_angles when interest_strength is 'strong' to skip the user picker. Uses company category mapping plus athlete or roster audience data. Call BEFORE ask_user_question; list suggested_interests first in the picker. pitch_type: roster_aggregate | roster_athlete_led | single_athlete | multi_athlete_combined | multi_athlete_per_contact.",
       parameters: {
         type: "object",
         properties: {
@@ -925,9 +437,48 @@ const TOOLS = [
   {
     type: "function" as const,
     function: {
+      name: "buildPitchAnglePickerOptions",
+      description:
+        "Build categorized ask_user_question options for email-flow audience picks (Interests / Age / Gender / Country / Brand affinity). Call after curatePitchInterests when interest_strength is not strong. Pass suggested_angles from curation and athlete_id when available.",
+      parameters: {
+        type: "object",
+        properties: {
+          suggested_angles: {
+            type: "array",
+            description: "Suggested angles from curatePitchInterests.suggested_angles.",
+            items: {
+              type: "object",
+              properties: {
+                kind: {
+                  type: "string",
+                  enum: ["interest", "age", "gender", "country", "brand_affinity"],
+                },
+                value: { type: "string" },
+              },
+              required: ["kind", "value"],
+            },
+          },
+          interest_names: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optional canonical interests from getDistinctAudienceInterests.",
+          },
+          athlete_id: {
+            type: "string",
+            description: "Athlete UUID for country/brand sections from audience profile.",
+          },
+          top_country_count: { type: "number" },
+          top_brand_count: { type: "number" },
+        },
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
       name: "composePitchEmail",
       description:
-        "Build a normalized outreach email (shared intro, audience proof, CTA, closing) from confirmed interest_names and pitch_type. Returns subject, body, body_markdown. multi_athlete_combined: one email with athlete_ids[]. multi_athlete_per_contact: { emails: [...] }.",
+        "Build a normalized outreach email (shared intro, audience proof, CTA, closing) from pitch_type and audience signals. Prefer pitch_angles when the recipient brand cares about demographics (age cohort, gender, geography, brand affinity) — each angle becomes one audience-insight bullet sorted by strength. Use interest_names as the legacy interest-only path when pitch_angles is omitted. If both are passed for single_athlete, pitch_angles wins and interest_names is ignored. pitch_angles applies only to pitch_type single_athlete; multi_athlete_combined, multi_athlete_per_contact, and roster_aggregate ignore pitch_angles and use interest_names. Returns subject, body, body_markdown. body_markdown always ends with the exact line \"Looking forward to hearing from you,\" — no signature footer after it. multi_athlete_combined: one email with athlete_ids[]. multi_athlete_per_contact: { emails: [...] }.",
       parameters: {
         type: "object",
         properties: {
@@ -945,7 +496,57 @@ const TOOLS = [
           interest_names: {
             type: "array",
             items: { type: "string" },
-            description: "User-confirmed or curatePitchInterests suggestions.",
+            description:
+              "User-confirmed or curatePitchInterests suggestions. Legacy interest-only path when pitch_angles is omitted.",
+          },
+          pitch_angles: {
+            type: "array",
+            description:
+              "Optional. Multi-dimensional audience signals to lead with (single_athlete only). Each angle becomes one audience-insight bullet in the email. If omitted, falls back to interest_names. Mix freely across kinds.",
+            items: {
+              oneOf: [
+                {
+                  type: "object",
+                  properties: {
+                    kind: { const: "interest" },
+                    name: { type: "string" },
+                  },
+                  required: ["kind", "name"],
+                },
+                {
+                  type: "object",
+                  properties: {
+                    kind: { const: "age" },
+                    cohort: { type: "string", description: "e.g. '25-34'" },
+                  },
+                  required: ["kind", "cohort"],
+                },
+                {
+                  type: "object",
+                  properties: {
+                    kind: { const: "gender" },
+                    value: { type: "string", description: "e.g. 'female'" },
+                  },
+                  required: ["kind", "value"],
+                },
+                {
+                  type: "object",
+                  properties: {
+                    kind: { const: "country" },
+                    name: { type: "string" },
+                  },
+                  required: ["kind", "name"],
+                },
+                {
+                  type: "object",
+                  properties: {
+                    kind: { const: "brand_affinity" },
+                    brand: { type: "string" },
+                  },
+                  required: ["kind", "brand"],
+                },
+              ],
+            },
           },
           recipient_name: { type: "string" },
           target_industry_or_category: { type: "string" },
@@ -1022,47 +623,33 @@ const TOOLS = [
   {
     type: "function" as const,
     function: {
-      name: "findAthletesByAudienceInterestAndSport",
+      name: "searchAthletesByAudienceMatch",
       description:
-        "Find and rank athletes by summed IG audience count across selected interest categories, grouped by sport. Only call this AFTER the user has confirmed both their selected interest categories AND their selected sports. Returns top 5 athletes per sport sorted by total audience count.",
+        "Find athletes whose audience matches given interests, sports, and/or keywords. All filter parameters are optional but at least one must be provided. Returns athletes ranked by audience-match score, optionally filtered by social-following thresholds. For Flow 1 (inbound company match), call after user confirms interests AND sports with interest_names + sports — returns top 5 athletes per sport grouped by sport.",
       parameters: {
         type: "object",
         properties: {
           interest_names: {
             type: "array",
             items: { type: "string" },
-            description:
-              "Exact audience_name values selected by the user e.g. ['Fitness & Yoga', 'Healthy Lifestyle', 'Activewear']",
+            description: "Canonical interest categories from getDistinctAudienceInterests (exact audience_name values).",
           },
           sports: {
             type: "array",
             items: { type: "string" },
-            description: "Exact sport values selected by the user e.g. ['Surf', 'Track & Field', 'BMX']",
+            description: "Canonical sport strings (partial ILIKE match supported).",
           },
-        },
-        required: ["interest_names", "sports"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "searchAthletesByAudienceInterest",
-      description:
-        "Find athletes whose audience has high affinity for a brand, company, or interest topic via fuzzy audience_name search. Use for ad-hoc interest/brand lookups. Do NOT use for 'find athletes for [company]' / company pitch targeting — use getDistinctAudienceInterests then findAthletesByAudienceInterestAndSport per FLOW 1. Returns athletes ranked by audience match percentage.",
-      parameters: {
-        type: "object",
-        properties: {
-          interest_name: { type: "string", description: "Brand or interest to search for e.g. 'Monster', 'fitness', 'automotive', 'Red Bull'" },
-          category: {
-            type: "string",
-            enum: ["Brands", "Interests"],
-            description: "Search Brands for specific companies, Interests for topic categories. Omit to search both.",
+          interest_keywords: {
+            type: "array",
+            items: { type: "string" },
+            description: "Free-text interest or brand keywords when no canonical interest matches.",
           },
-          sport: { type: "string", description: "Optional: filter to athletes in a specific sport" },
-          limit: { type: "number", description: "Max results, default 15" },
+          min_total_followers: {
+            type: "number",
+            description: "Optional minimum total followers across platforms.",
+          },
+          limit: { type: "number", description: "Max flat-list results (default 50, max 200). Grouped Flow 1 output remains top 5 per sport." },
         },
-        required: ["interest_name"],
       },
     },
   },
@@ -1235,7 +822,7 @@ const TOOLS = [
     function: {
       name: "getAthleteAudienceByCategory",
       description:
-        "Generic audience lookup. Prefer the dedicated per-category tools (getAudienceGender, getAudienceAge, getAudienceEthnicity, getAudienceCountries, getAudienceBrands, getAudienceInterests). Only use this for States or Cities. Returns items ranked by % of audience.",
+        "Audience lookup for States or Cities (or any category not in getAthleteFullAudienceProfile). Returns items ranked by % of audience.",
       parameters: {
         type: "object",
         properties: {
@@ -1253,167 +840,15 @@ const TOOLS = [
   {
     type: "function" as const,
     function: {
-      name: "getAudienceGender",
-      description:
-        "Use whenever the user asks about audience gender / male-female split for an athlete. Returns rows { audience_name, ig_audience_percent, ig_audience_count } from athlete_audience_data where audience_category='Gender', ranked by ig_audience_percent desc.",
-      parameters: {
-        type: "object",
-        properties: {
-          athlete_id: { type: "string" },
-          limit: { type: "number", description: "Max results, default 10" },
-        },
-        required: ["athlete_id"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "getAudienceAge",
-      description:
-        "Use for audience age-demographic questions (e.g. age brackets, how old is the audience). Returns rows { audience_name, ig_audience_percent, ig_audience_count } from athlete_audience_data where audience_category='Combined_Age'.",
-      parameters: {
-        type: "object",
-        properties: {
-          athlete_id: { type: "string" },
-          limit: { type: "number", description: "Max results, default 10" },
-        },
-        required: ["athlete_id"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "getAudienceEthnicity",
-      description:
-        "Use for audience ethnicity / race demographic questions. Returns rows { audience_name, ig_audience_percent, ig_audience_count } from athlete_audience_data where audience_category='Ethnicity'.",
-      parameters: {
-        type: "object",
-        properties: {
-          athlete_id: { type: "string" },
-          limit: { type: "number", description: "Max results, default 10" },
-        },
-        required: ["athlete_id"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "getAudienceCountries",
-      description:
-        "Use for audience country geography questions (where the audience lives, by country). Returns rows { audience_name, ig_audience_percent, ig_audience_count } from athlete_audience_data where audience_category='Countries'.",
-      parameters: {
-        type: "object",
-        properties: {
-          athlete_id: { type: "string" },
-          limit: { type: "number", description: "Max results, default 10" },
-        },
-        required: ["athlete_id"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "getAudienceBrands",
-      description:
-        "Use for audience brand-affinity questions (which brands the audience already follows / resonates with). Returns rows { audience_name, ig_audience_percent, ig_audience_count } from athlete_audience_data where audience_category='Brands'.",
-      parameters: {
-        type: "object",
-        properties: {
-          athlete_id: { type: "string" },
-          limit: { type: "number", description: "Max results, default 10" },
-        },
-        required: ["athlete_id"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "getAudienceInterests",
-      description:
-        "Use for audience interest-topic breakdown (what topics the audience is interested in). Returns rows { audience_name, ig_audience_percent, ig_audience_count } from athlete_audience_data where audience_category='Interests'.",
-      parameters: {
-        type: "object",
-        properties: {
-          athlete_id: { type: "string" },
-          limit: { type: "number", description: "Max results, default 10" },
-        },
-        required: ["athlete_id"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
       name: "getAthleteFullAudienceProfile",
       description:
-        "Get the complete audience profile for an athlete including social stats, top interests, brand affinities, gender split, age breakdown, and geographic data. Use this when creating pitch materials or outreach emails.",
+        "Get the complete audience profile for an athlete: interests, gender, age, ethnicity, countries, brands, and social stats. Call once instead of per-category lookups. Use getAthleteAudienceByCategory only for States or Cities.",
       parameters: {
         type: "object",
         properties: {
           athlete_id: { type: "string" },
         },
         required: ["athlete_id"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "getTaxonomyForSport",
-      description: "Get sponsorship taxonomy categories for a sport (endemic + non_endemic). Sport is resolved from roster value (e.g. Motorsports/Two Wheel - Supercross/Motocross -> Supercross/Moto). Use to determine which categories exist and which are missing for an athlete.",
-      parameters: {
-        type: "object",
-        properties: {
-          sport: { type: "string" },
-        },
-        required: ["sport"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "getCompanyByName",
-      description: "Get company details by name",
-      parameters: {
-        type: "object",
-        properties: {
-          name: { type: "string" },
-        },
-        required: ["name"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "getCompanySponsorships",
-      description: "Get active sponsorships for a company",
-      parameters: {
-        type: "object",
-        properties: {
-          company_id: { type: "string" },
-        },
-        required: ["company_id"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "getCompanyContacts",
-      description: "Get contact info for a company",
-      parameters: {
-        type: "object",
-        properties: {
-          company_id: { type: "string" },
-        },
-        required: ["company_id"],
       },
     },
   },
@@ -1422,7 +857,7 @@ const TOOLS = [
     function: {
       name: "apolloFindContactsForCompany",
       description:
-        "Find partnership/marketing contacts at a company via Apollo (titles: marketing, partnerships, influencer, brand; verified email filter). Creates pending CRM contacts — user must Reveal in UI for emails (credits). Never auto-reveal.",
+        "Find partnership/marketing contacts at a company via Apollo (titles: marketing, partnerships, influencer, brand; verified email filter). Creates pending CRM contacts only — the user must manually click Reveal in the Target List or pipeline UI to see emails (each reveal consumes Apollo credits). Never auto-reveal or assume emails are visible after this call.",
       parameters: {
         type: "object",
         properties: {
@@ -1461,27 +896,6 @@ const TOOLS = [
   {
     type: "function" as const,
     function: {
-      name: "apolloExpandSimilarCompanies",
-      description:
-        "Expand from seed companies the user likes: enrich seeds and search Apollo for similar firms (industry/size/revenue). Not Apollo UI lookalike AI. Max 3 seeds. Confirm before adding to CRM.",
-      parameters: {
-        type: "object",
-        properties: {
-          seed_company_ids: { type: "array", items: { type: "string" } },
-          seed_company_names: { type: "array", items: { type: "string" } },
-          category: { type: "string" },
-          revenue_range_min: { type: "number" },
-          revenue_range_max: { type: "number" },
-          organization_locations: { type: "array", items: { type: "string" } },
-          limit_per_seed: { type: "number" },
-          athlete_id: { type: "string" },
-        },
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
       name: "searchWebCompanies",
       description:
         "Search the web for companies matching a query (Tavily/SERP fallback). Prefer apolloSearchCompanies when Apollo is configured and user needs revenue or firmographic filters.",
@@ -1499,7 +913,7 @@ const TOOLS = [
     function: {
       name: "pushCompanyToCrmPipeline",
       description:
-        "Push or update a SINGLE company in the CRM in-progress pipeline. Use when the user asks to add/push one company from AI chat into CRM before full contact outreach is complete. If the user is importing a list/target-list for a named athlete, do NOT loop this tool — use bulkImportCompaniesToCrmForAthlete instead. When adding a single company that should belong to an athlete's target list, pass athlete_id (preferred) or athlete_name so the card is linked via potential_athletes; otherwise it will NOT appear on that athlete's target list.",
+        "Add or update ONE company in the CRM in-progress pipeline (not linked to a spreadsheet import). Use for a single ad-hoc company push from chat — e.g. user names one brand to track. Does NOT batch-import rows and does NOT write potential_athletes unless athlete_id or athlete_name is passed; without an athlete param the card stays off athlete Target Lists. For Excel/CSV/screenshot imports or any multi-row target list for a named athlete, use bulkImportCompaniesToCrmForAthlete instead (one call for the full batch).",
       parameters: {
         type: "object",
         properties: {
@@ -1544,13 +958,14 @@ const TOOLS = [
     function: {
       name: "pushEmailToCrm",
       description:
-        "Save an email draft to the CRM pipeline (draft_messages / drafting stage) or CRM contact email_drafts. Do NOT use when the user asks for the athlete Target List — use updateTargetListOutreach instead. Without contact_id: append to the company pipeline card. With contact_id: save on that CRM contact (email_drafts); email_body must open with Hey <FirstName>, using only the SESSION line first name for that contact_id (not Hi, not full name). CRM pipeline chat lists contacts with first name for greeting. Flow 5/6: call after approval when saving to CRM, not target list. company_name, email_subject, email_body required. resolveAthletesByName for athlete_id; never pass a human name as athlete_id. email_body must follow GLOBAL EMAIL CLOSING: last line exactly \"Looking forward to hearing from you,\" with no sender name or The·Team after it.",
+        "Save email draft(s) to the CRM pipeline (draft_messages / drafting stage) or CRM contact email_drafts. Do NOT use when the user asks for the athlete Target List — use updateTargetListOutreach instead. Pass emails: [...] for batch fan-out (e.g. Flow 5 multi-company send). Up to 50 emails per call. Pass the single fields for a single-email push. Without contact_id: append to the company pipeline card. With contact_id: save on that CRM contact (email_drafts); email_body must open with Hey <FirstName>, using only the SESSION line first name for that contact_id (not Hi, not full name). resolveAthletesByName for athlete_id; never pass a human name as athlete_id. email_body must end with exactly \"Looking forward to hearing from you,\" as the final line — no sender name or The·Team after it. If the tool returns ok: false, show the error text verbatim — never substitute a vague CRM technical issue.",
       parameters: {
         type: "object",
         properties: {
           company_name: {
             type: "string",
-            description: "The company name — will be created in CRM if it doesn't exist",
+            description:
+              "Single-email push: company name (will be created in CRM if missing). Omit when using emails[].",
           },
           contact_id: {
             type: "string",
@@ -1564,20 +979,60 @@ const TOOLS = [
           },
           email_subject: {
             type: "string",
-            description: "The email subject line",
+            description: "Single-email push: subject line. Omit when using emails[].",
           },
           email_body: {
             type: "string",
             description:
-              "Full email body. Must end with exactly \"Looking forward to hearing from you,\" as the final line — no name or The·Team sign-off after it.",
+              "Single-email push: full body ending with exactly \"Looking forward to hearing from you,\" — no name or The·Team sign-off after it. Omit when using emails[].",
           },
           label: {
             type: "string",
             description:
               "Optional label e.g. 'Punchy — Bryce Menzies'. For pipeline-only company/generic drafts (no contact_id), use 'Company — {Brand}' per CRM pipeline instructions.",
           },
+          emails: {
+            type: "array",
+            minItems: 1,
+            maxItems: 50,
+            description:
+              "Batch fan-out (Flow 5): one entry per company. When set, pass all companies here and omit top-level company_name/email_subject/email_body.",
+            items: {
+              type: "object",
+              properties: {
+                company_name: {
+                  type: "string",
+                  description: "The company name — will be created in CRM if it doesn't exist",
+                },
+                contact_id: {
+                  type: "string",
+                  description:
+                    "CRM contact UUID from SESSION CONTEXT. Required for per-contact saves when user asks to push to company contacts.",
+                },
+                athlete_id: {
+                  type: "string",
+                  description:
+                    "Optional athlete UUID this email is for. Omit if unresolved. Name→UUID resolution runs automatically when this looks like a person name.",
+                },
+                email_subject: {
+                  type: "string",
+                  description: "The email subject line",
+                },
+                email_body: {
+                  type: "string",
+                  description:
+                    "Full email body. Must end with exactly \"Looking forward to hearing from you,\" as the final line — no name or The·Team sign-off after it.",
+                },
+                label: {
+                  type: "string",
+                  description:
+                    "Optional label e.g. 'Punchy — Bryce Menzies'. For pipeline-only company/generic drafts (no contact_id), use 'Company — {Brand}' per CRM pipeline instructions.",
+                },
+              },
+              required: ["company_name", "email_subject", "email_body"],
+            },
+          },
         },
-        required: ["company_name", "email_subject", "email_body"],
       },
     },
   },
@@ -1586,7 +1041,7 @@ const TOOLS = [
     function: {
       name: "bulkImportCompaniesToCrmForAthlete",
       description:
-        "Bulk-create or merge CRM pipeline cards for a batch of companies and attach them all to ONE athlete's target list (potential_athletes). Use when the user uploads a target list (Excel/CSV/screenshot) and asks to import companies for a specific athlete. Resolve the athlete first (athlete_id UUID preferred; athlete_name supported). Existing companies are reused; website/hq_phone/description/past_partnerships/personal_notes are filled only when previously blank. Each row auto-resolves a missing website via import column, then Apollo, then web search (summary.websites_resolved). Always pass website from searchWebCompanies/apolloSearchCompanies when available — required for reliable contact matching when auto-resolve fails. Optional outreach_email_subject and outreach_email from the spreadsheet are applied to the pipeline card only when those fields were blank. Product category: if the company is missing a category, Uncategorized, or empty, it is set from the import row (or defaults to Uncategorized when the row omits category); established categories are not overwritten. Contacts are created if a contact with the same first+last doesn't already exist for that company. Never call this without explicit structured rows.",
+        "Batch-import companies for ONE athlete: creates/merges pipeline cards AND writes potential_athletes so cards appear on that athlete's Target List. Use for spreadsheet uploads, screenshots, or any multi-company list tied to a named athlete — call EXACTLY ONCE with the full companies[] array. NOT for single-company ad-hoc pushes (use pushCompanyToCrmPipeline). Resolve athlete_id first (resolveAthletesByName). Reuses existing companies; fills blank website/hq_phone/description/past_partnerships/personal_notes; auto-resolves missing websites (summary.websites_resolved). Pass website from searchWebCompanies/apolloSearchCompanies when known. Sets product_category from import row when company is Uncategorized/empty. Creates contacts when first+last not already present. Requires explicit structured rows — never invent data.",
       parameters: {
         type: "object",
         properties: {
@@ -1764,7 +1219,7 @@ const TOOLS = [
     function: {
       name: "getAthleteIntelligence",
       description:
-        "Get a structured intelligence payload for an athlete, including contracts, social data, audience data, accolades, conflicts, and open categories.",
+        "Server-side athlete rollup in one call: full athlete record, contracts (current/expired/upcoming), social_data, full audience summary, accolades, sponsorship conflicts, and open taxonomy categories. Prefer this over chaining getAthlete + getAthleteContracts + getAthleteFullAudienceProfile when you need the combined prospecting picture.",
       parameters: {
         type: "object",
         properties: {
@@ -1793,227 +1248,6 @@ const TOOLS = [
   {
     type: "function" as const,
     function: {
-      name: "getAthletesAudienceInterestMetrics",
-      description:
-        "Fetch IG interest metrics (interest_pct and interest_count) for each athlete for a specific interest keyword, using athlete_audience_data where audience_category='Interests'.",
-      parameters: {
-        type: "object",
-        properties: {
-          athlete_ids: { type: "array", items: { type: "string" }, description: "Athlete IDs." },
-          interest_query: { type: "string", description: "Interest keyword or phrase to match against audience_name." },
-        },
-        required: ["athlete_ids", "interest_query"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "getAthletesSocialFollowing",
-      description:
-        "Fetch overall follower counts (following_total) and per-platform follower counts for each athlete.",
-      parameters: {
-        type: "object",
-        properties: {
-          athlete_ids: { type: "array", items: { type: "string" }, description: "Athlete IDs." },
-        },
-        required: ["athlete_ids"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "searchAthletesByInterestKeywordsWithFollowing",
-      description:
-        "Discover and rank athletes across sports by audience interest keywords, returning interest percent/count and follower totals. Returns top N athletes per keyword.",
-      parameters: {
-        type: "object",
-        properties: {
-          interest_keywords: {
-            type: "array",
-            items: { type: "string" },
-            description: "Interest keywords/phrases to match against athlete_audience_data.audience_name (Interests).",
-          },
-          topPerKeyword: { type: "number", description: "Number of top athletes to return per keyword." },
-        },
-        required: ["interest_keywords"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "searchAthletesBySportsAndInterestKeywordsWithFollowing",
-      description:
-        "Sport-aware interest search: returns top athletes per sport per interest keyword with separate interest % and follower totals. Also expands related interests for certain canonical keywords (e.g., Healthy Lifestyle).",
-      parameters: {
-        type: "object",
-        properties: {
-          sports: { type: "array", items: { type: "string" }, description: "Sport phrases (e.g., surfers, skateboarders, snowboarders)." },
-          interest_keywords: { type: "array", items: { type: "string" }, description: "Interest keywords (e.g., Healthy Lifestyle)." },
-          topPerSportPerInterest: { type: "number", description: "Number of top athletes to return per sport per interest keyword." },
-        },
-        required: ["sports", "interest_keywords"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "generateGroupOutreachEmail",
-      description:
-        "Generate the fixed The·Team group outreach email template for a company (not a single athlete). Requires exactly 3 athletes from different sports with audience interested numbers and interest names.",
-      parameters: {
-        type: "object",
-        properties: {
-          recipient_name: { type: "string", description: "Email recipient first name or full name." },
-          brand_name: { type: "string", description: "Target company/brand name." },
-          athletes: {
-            type: "array",
-            minItems: 3,
-            maxItems: 3,
-            items: {
-              type: "object",
-              properties: {
-                name: { type: "string" },
-                sport: { type: "string" },
-                audience_interested: { type: "number", description: "Audience interested count as a positive number." },
-                interest_names: {
-                  type: "array",
-                  items: { type: "string" },
-                  minItems: 1,
-                  maxItems: 5,
-                },
-              },
-              required: ["name", "sport", "audience_interested", "interest_names"],
-            },
-          },
-        },
-        required: ["recipient_name", "brand_name", "athletes"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "generateSingleAthleteOutreachEmail",
-      description:
-        "Generate the fixed single-athlete outreach email template (Punchy) for a target brand using pre-fetched athlete/audience insights.",
-      parameters: {
-        type: "object",
-        properties: {
-          recipient_name: { type: "string", description: "Recipient name. Use '[Recipient Name]' if unknown." },
-          brand_name: { type: "string", description: "Target company/brand name." },
-          athlete_name: { type: "string", description: "Athlete full name." },
-          athlete_sport: { type: "string", description: "Athlete sport." },
-          audience_insights: {
-            type: "array",
-            items: { type: "string" },
-            description: "1-3 bullet lines with REAL audience/social numbers from tool output.",
-          },
-          open_category_reason: {
-            type: "string",
-            description: "Deprecated — do not use. Sponsor-gap / open-category lines must not appear in emails.",
-          },
-          accolades: {
-            type: "array",
-            items: { type: "string" },
-            description: "Optional athlete accolades to include as concise proof points.",
-          },
-          past_partnerships: {
-            type: "string",
-            description: "Optional company past partnerships research line.",
-          },
-          company_description: {
-            type: "string",
-            description: "Optional company description or fit notes.",
-          },
-          cta: { type: "string", description: "Optional call-to-action sentence." },
-        },
-        required: ["brand_name", "athlete_name", "athlete_sport", "audience_insights"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "generateCombinedAthleteOutreachEmail",
-      description:
-        "Generate one merged outreach email for 2-8 athletes by combining each athlete's audience insights and fit rationale into one draft.",
-      parameters: {
-        type: "object",
-        properties: {
-          recipient_name: { type: "string", description: "Recipient name. Use '[Recipient Name]' if unknown." },
-          brand_name: { type: "string", description: "Target company/brand name." },
-          athletes: {
-            type: "array",
-            minItems: 2,
-            maxItems: 8,
-            items: {
-              type: "object",
-              properties: {
-                athlete_name: { type: "string", description: "Athlete full name." },
-                athlete_sport: { type: "string", description: "Athlete sport." },
-                audience_insights: {
-                  type: "array",
-                  items: { type: "string" },
-                  description: "1-3 bullet lines with REAL audience/social numbers from tool output.",
-                },
-                open_category_reason: {
-                  type: "string",
-                  description: "Why this category/opportunity is open/fit based on current contract/category context.",
-                },
-              },
-              required: ["athlete_name", "athlete_sport", "audience_insights"],
-            },
-          },
-          cta: { type: "string", description: "Optional shared call-to-action sentence for both athletes." },
-        },
-        required: ["brand_name", "athletes"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "generateGeneralOutreachEmail",
-      description:
-        "Generate a general outreach email in either high-level mode or athlete-led mode with concise proof points.",
-      parameters: {
-        type: "object",
-        properties: {
-          recipient_name: { type: "string", description: "Recipient name. Defaults to [Recipient Name] if missing." },
-          company_name: { type: "string", description: "Target company or recipient brand." },
-          high_level: {
-            type: "boolean",
-            description: "When true, generates a high-level general outreach note. When false, uses athlete-led framing.",
-          },
-          lead_athletes: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                athlete_name: { type: "string" },
-                athlete_sport: { type: "string" },
-              },
-              required: ["athlete_name"],
-            },
-          },
-          proof_points: {
-            type: "array",
-            items: { type: "string" },
-            description: "1-3 concise strategic proof points for reply-driven outreach.",
-          },
-          cta: { type: "string", description: "Optional call-to-action sentence." },
-        },
-        required: ["company_name", "proof_points"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
       name: ASK_USER_QUESTION_TOOL,
       description:
         "Show an interactive multi-select (or single-select) UI so the user can pick options. Use instead of long numbered markdown lists when offering 3+ choices (categories, sports, shortlists). Provide stable option ids and labels. After the user submits, you receive their selections in the tool result.",
@@ -2028,10 +1262,15 @@ const TOOLS = [
               properties: {
                 id: { type: "string", description: "Stable id for this option" },
                 label: { type: "string", description: "Display label" },
+                category: {
+                  type: "string",
+                  description: "Optional section label for categorized email-flow audience pickers",
+                },
               },
               required: ["id", "label"],
             },
-            description: "2–29 choices for interests (full canonical catalog); fewer for sports/shortlists",
+            description:
+              "2–29 flat choices for sports/shortlists; categorized email audience picks may include more sections",
           },
           allow_multiple: {
             type: "boolean",
@@ -2061,6 +1300,15 @@ type AgentInteractionPause = {
   model_messages: any[];
 };
 
+type TurnTelemetry = {
+  iterations: number;
+  duration_ms: number;
+  corrections: string[];
+  hit_iteration_cap: boolean;
+  flow_mode: string;
+  flow_intent: string;
+};
+
 const ATHLETE_ID_TOOL_NAMES = new Set([
   "getAthlete",
   "getAthleteAgents",
@@ -2068,12 +1316,6 @@ const ATHLETE_ID_TOOL_NAMES = new Set([
   "getAthleteCoveredCategories",
   "getAthleteSocialStats",
   "getAthleteAudienceByCategory",
-  "getAudienceGender",
-  "getAudienceAge",
-  "getAudienceEthnicity",
-  "getAudienceCountries",
-  "getAudienceBrands",
-  "getAudienceInterests",
   "getAthleteFullAudienceProfile",
   "getSponsorshipTargets",
   "getAthleteIntelligence",
@@ -2083,6 +1325,7 @@ const ATHLETE_ID_TOOL_NAMES = new Set([
 const TOOLS_WITH_ATHLETE_ID_RESOLUTION = new Set([
   ...ATHLETE_ID_TOOL_NAMES,
   "curatePitchInterests",
+  "buildPitchAnglePickerOptions",
   "composePitchEmail",
   "mergePitchEmails",
   "pushEmailToCrm",
@@ -2102,6 +1345,34 @@ const toNameCandidate = (raw: string): string =>
     .replace(/\s+/g, " ")
     .trim();
 
+function stripSponsorGapFromPitchComposeResult(result: unknown): void {
+  if (!result || typeof result !== "object" || (result as { error?: unknown }).error) return;
+  const r = result as {
+    body?: string;
+    body_markdown?: string;
+    emails?: Array<{ body?: string; body_markdown?: string }>;
+  };
+  if (Array.isArray(r.emails)) {
+    for (const email of r.emails) {
+      if (email.body_markdown != null) {
+        email.body_markdown = enforcePitchEmailClosing(
+          stripSponsorGapCopy(String(email.body_markdown))
+        );
+      }
+      if (email.body != null) {
+        email.body = enforcePitchEmailClosing(stripSponsorGapCopy(String(email.body)));
+      }
+    }
+    return;
+  }
+  if (r.body_markdown != null) {
+    r.body_markdown = enforcePitchEmailClosing(stripSponsorGapCopy(String(r.body_markdown)));
+  }
+  if (r.body != null) {
+    r.body = enforcePitchEmailClosing(stripSponsorGapCopy(String(r.body)));
+  }
+}
+
 export async function POST(req: Request) {
   try {
     const profile = await getCurrentProfile();
@@ -2120,6 +1391,7 @@ export async function POST(req: Request) {
     let pipeline_drafting: any;
     let athlete_id: string | undefined;
     let ui_context: z.infer<typeof chatUiContextSchema> | undefined;
+    let flow_mode: FlowMode | undefined;
     let mode: any;
     let streamRequested = false;
     let interaction_response: z.infer<typeof interactionResponseSchema> | undefined;
@@ -2135,6 +1407,7 @@ export async function POST(req: Request) {
       pipeline_drafting = payload.pipeline_drafting;
       athlete_id = payload.athlete_id;
       ui_context = payload.ui_context;
+      flow_mode = parseFlowMode(payload.flow_mode);
       mode = payload.mode;
       interaction_response = payload.interaction_response;
       if (payload.stream === true) streamRequested = true;
@@ -2361,8 +1634,20 @@ export async function POST(req: Request) {
     if (projectIdTrimmed) project_id = projectIdTrimmed;
     if (conversationIdTrimmed) conversation_id = conversationIdTrimmed;
 
+    let conversationFlowMode: FlowMode | undefined;
+    if (conversationIdTrimmed) {
+      const { data: convoMeta } = await supabase
+        .from("ai_conversations")
+        .select("flow_mode")
+        .eq("conversation_id", conversationIdTrimmed)
+        .eq("owner_user_id", profile.user_id)
+        .maybeSingle();
+      conversationFlowMode = parseFlowMode((convoMeta as { flow_mode?: string } | null)?.flow_mode);
+    }
+
     let resumeMessages: any[] | undefined;
     let interactionSelectedInterests: ApprovedInterestCategory[] = [];
+    let interactionSelectedPitchAngles: PitchAngle[] = [];
     let forceComposeAfterInterests = false;
 
     if (interaction_response && conversationIdTrimmed) {
@@ -2383,9 +1668,19 @@ export async function POST(req: Request) {
         );
       }
       const toolResult = buildAskUserQuestionToolResult(pending.prompt, interaction_response);
-      if (toolResult.selected.length > 0) {
+      interactionSelectedPitchAngles = parsePitchAngleIds(interaction_response.selected_ids);
+      if (toolResult.selected.length > 0 || interactionSelectedPitchAngles.length > 0) {
         forceComposeAfterInterests = true;
+        for (const name of pitchAnglesToInterestNames(interactionSelectedPitchAngles)) {
+          const pick = name as ApprovedInterestCategory;
+          if (!interactionSelectedInterests.includes(pick)) {
+            interactionSelectedInterests.push(pick);
+          }
+        }
         for (const sel of toolResult.selected) {
+          if (parsePitchAngleIds([sel.id]).length > 0) {
+            continue;
+          }
           for (const pick of extractApprovedInterestSelections(sel.label)) {
             if (!interactionSelectedInterests.includes(pick)) {
               interactionSelectedInterests.push(pick);
@@ -2402,10 +1697,14 @@ export async function POST(req: Request) {
         },
       ];
       if (forceComposeAfterInterests) {
+        const interestNamesJson = JSON.stringify(interactionSelectedInterests);
+        const pitchAnglesJson = JSON.stringify(interactionSelectedPitchAngles);
         resumeMessages.push({
           role: "user",
           content:
-            "Interests confirmed. Call composePitchEmail now with these interest_names and output the full body_markdown email in this turn — do not defer drafting.",
+            interactionSelectedPitchAngles.length > 0
+              ? `Audience angles confirmed. Call composePitchEmail now with pitch_angles: ${pitchAnglesJson} and interest_names: ${interestNamesJson}. Output the full body_markdown email in this turn — do not defer drafting.`
+              : `Interests confirmed. Call composePitchEmail now with interest_names: ${interestNamesJson} and output the full body_markdown email in this turn — do not defer drafting.`,
         });
       }
       const followUpUser = [...(Array.isArray(messages) ? messages : [])]
@@ -2422,6 +1721,16 @@ export async function POST(req: Request) {
       }
     }
 
+    const requestAthleteId = String(athlete_id ?? "").trim();
+    const resolvedFlowMode = resolveFlowMode({
+      flowMode: flow_mode,
+      conversationFlowMode,
+      pipelineDrafting,
+      uiContext: ui_context,
+      athleteId: requestAthleteId || undefined,
+      messages: trimmedMessages,
+    });
+
     const {
       flowIntent,
       selectedInterests,
@@ -2429,20 +1738,19 @@ export async function POST(req: Request) {
       interestGateAddons,
       emailInterestAddon,
       emailRevisionMode,
-      emailRoutingShouldClarify,
       skipInterestPicker,
       composeAfterInterestSelection,
     } = buildAIChatFlowContext({
       trimmedMessages,
       pipelineDrafting,
       sessionContextText: extraContext,
+      flowMode: resolvedFlowMode,
+      athleteId: requestAthleteId || undefined,
       interactionSelectedInterests,
+      interactionSelectedPitchAngles,
       forceComposeAfterInterests,
     });
     const senderDisplayName = buildSenderDisplayName(profile);
-    // Hard guard: if the user attached any spreadsheet or image this turn, treat it as a FLOW 8
-    // bulk-import request and REQUIRE bulkImportCompaniesToCrmForAthlete. Looping
-    // pushCompanyToCrmPipeline silently bypasses potential_athletes and breaks target lists.
     const attachmentAddon =
       spreadsheetBlocks.length > 0 || uploadedImages.length > 0
         ? `\n\n━━━ ATTACHMENT MODE — FLOW 8 REQUIRED ━━━
@@ -2453,7 +1761,7 @@ The user attached ${spreadsheetBlocks.length > 0 ? "spreadsheet(s)" : ""}${
 REQUIRED behavior — do not deviate:
 1. Resolve the named athlete once via resolveAthletesByName → UUID. If no athlete is named, STOP and ask which athlete.
 2. Parse every row/line (or transcribe the screenshot) into the companies[] schema for bulkImportCompaniesToCrmForAthlete.
-3. Call **bulkImportCompaniesToCrmForAthlete** EXACTLY ONCE for the whole batch. Never call pushCompanyToCrmPipeline in this turn — it does NOT link the athlete to the card and the Target List page will be empty.
+3. Call **bulkImportCompaniesToCrmForAthlete** EXACTLY ONCE for the whole batch.
 4. In your final message, quote the tool's summary counts (pipeline_cards_created, pipeline_cards_updated, athletes_linked, contacts_created, errors). Do NOT tell the user the list is on the athlete's Target List unless the tool returned ok:true and (pipeline_cards_created + athletes_linked) > 0.`
         : "";
     const chatBulkImport = detectChatBulkImportIntent(trimmedMessages);
@@ -2464,21 +1772,34 @@ REQUIRED behavior — do not deviate:
             athleteName: chatBulkImport.athleteName,
           })}`
         : "";
-    const requestAthleteId = String(athlete_id ?? "").trim();
     const targetListOutreachPush = detectTargetListOutreachPushIntent(trimmedMessages);
     const targetListSaveIntent = detectTargetListSaveIntent(trimmedMessages);
     const targetListUiContext = ui_context === "target_list";
     const injectTargetListSession =
-      targetListUiContext || (Boolean(requestAthleteId) && targetListSaveIntent);
+      (resolvedFlowMode === "outbound" && targetListUiContext && Boolean(requestAthleteId)) ||
+      (Boolean(requestAthleteId) && targetListSaveIntent);
     const targetListSessionAddon = injectTargetListSession
       ? `\n\n${getAthleteTargetListSessionAddon(requestAthleteId)}`
       : "";
     const injectTargetListPushGuard =
-      targetListOutreachPush || targetListSaveIntent || targetListUiContext;
+      resolvedFlowMode === "email" && (targetListOutreachPush || targetListSaveIntent);
     const targetListOutreachAddon = injectTargetListPushGuard
       ? `\n\n${getTargetListOutreachPushAddon()}`
       : "";
-    const SYSTEM_PROMPT = `${getSystemPrompt(profile.role, senderDisplayName)}${userMemoryPrompt}${toneSamplePrompt}${projectPrompt}${extraPrompt}${crmPipelineAddon}${targetListSessionAddon}${modePromptAddon}${attachmentAddon}${chatBulkImportAddon}${targetListOutreachAddon}${
+    const sportsListNumbered = FIND_ATHLETES_FOR_COMPANY_SPORTS.map((s, i) => `${i + 1}. ${s}`).join("\n");
+    const includeBulkImport =
+      spreadsheetBlocks.length > 0 ||
+      uploadedImages.length > 0 ||
+      chatBulkImport.detected;
+    const baseSystemPrompt = buildSystemPrompt({
+      role: profile.role,
+      senderDisplayName,
+      sportsListNumbered,
+      flowMode: resolvedFlowMode,
+      includeBulkImport,
+    });
+    const activeToolDefinitions = filterToolDefinitions(TOOLS, resolvedFlowMode);
+    const SYSTEM_PROMPT = `${baseSystemPrompt}${userMemoryPrompt}${toneSamplePrompt}${projectPrompt}${extraPrompt}${crmPipelineAddon}${targetListSessionAddon}${modePromptAddon}${attachmentAddon}${chatBulkImportAddon}${targetListOutreachAddon}${
       flowPromptAddon ? `\n\n${flowPromptAddon}` : ""
     }${interestGateAddons ? `\n\n${interestGateAddons}` : ""}${emailInterestAddon ? `\n\n${emailInterestAddon}` : ""}`;
 
@@ -2493,12 +1814,14 @@ REQUIRED behavior — do not deviate:
       !emailRevisionMode &&
       !skipInterestPicker &&
       selectedInterests.length === 0 &&
+      resolvedFlowMode === "email" &&
       (flowIntent === "email_single_athlete" ||
         flowIntent === "email_group_outreach" ||
         flowIntent === "email_roster_outreach");
     const inboundInterestSelectionActive =
       !interaction_response &&
       !emailRevisionMode &&
+      resolvedFlowMode === "inbound" &&
       flowIntent === "inbound_company_athlete_match" &&
       selectedInterests.length === 0;
     const isEmailFlowIntent =
@@ -2519,7 +1842,11 @@ REQUIRED behavior — do not deviate:
       systemPrompt: string,
       sseEmit?: (event: ChatSseEvent) => void,
       agentOptions?: { resumeMessages?: any[] }
-    ): Promise<{ lastMessage: any; interactionPause?: AgentInteractionPause }> => {
+    ): Promise<{
+      lastMessage: any;
+      interactionPause?: AgentInteractionPause;
+      turnTelemetry?: TurnTelemetry;
+    }> => {
       let currentMessages: any[];
       if (agentOptions?.resumeMessages) {
         currentMessages = agentOptions.resumeMessages;
@@ -2554,8 +1881,25 @@ REQUIRED behavior — do not deviate:
           ...messagesForModel,
         ];
       }
-      let maxIterations = 10;
+      const turnStart = Date.now();
+      let iterationCount = 0;
+      const correctionInjections: string[] = [];
+      const injectedCorrections = new Set<string>();
+      const MAX_TOOL_ITERATIONS = 6;
+      let maxIterations = MAX_TOOL_ITERATIONS;
       let lastMessage: any = null;
+      const emitTurnSummary = (hitIterationCap: boolean): TurnTelemetry => {
+        const summary: TurnTelemetry = {
+          iterations: iterationCount,
+          duration_ms: Date.now() - turnStart,
+          corrections: correctionInjections,
+          hit_iteration_cap: hitIterationCap,
+          flow_mode: resolvedFlowMode,
+          flow_intent: flowIntent,
+        };
+        console.log("[AI Chat] Turn summary", JSON.stringify(summary));
+        return summary;
+      };
       const usedToolNames = new Set<string>();
       let runtimeSelectedInterestsCount = selectedInterests.length;
       let skipPickerThisRun = skipInterestPicker;
@@ -2602,12 +1946,15 @@ REQUIRED behavior — do not deviate:
       const completionBody = {
         model: OPENAI_CHAT_MODEL,
         messages: currentMessages,
-        tools: TOOLS,
+        tools: activeToolDefinitions,
         tool_choice: "auto" as const,
       };
 
       while (maxIterations-- > 0) {
-        console.log(`[AI Chat] Iteration ${10 - maxIterations}, messages: ${currentMessages.length}`);
+        iterationCount++;
+        console.log(
+          `[AI Chat] Iteration ${MAX_TOOL_ITERATIONS - maxIterations}, messages: ${currentMessages.length}`
+        );
         if (sseEmit) {
           const { message, finishReason } = await streamChatCompletionToMessage(
             () =>
@@ -2639,100 +1986,108 @@ REQUIRED behavior — do not deviate:
 
         // Guardrails: enforce required tool usage before final assistant response.
         const missingRequiredTools = getMissingRequiredTools(flowIntent, usedToolNames, {
+          flowMode: resolvedFlowMode,
           selectedInterestsCount: runtimeSelectedInterestsCount,
           pipelineDrafting,
           emailRevisionMode,
           skipInterestPicker: skipPickerThisRun,
           composeAfterInterestSelection: composeAfterInterestsThisRun,
+          lastAssistantContent: String(lastMessage?.content ?? ""),
         });
-        if (toolCalls.length === 0 && missingRequiredTools.length > 0) {
+        const missingToolsCondition =
+          toolCalls.length === 0 && missingRequiredTools.length > 0;
+        if (missingToolsCondition && !injectedCorrections.has("missing_required_tools")) {
+          injectedCorrections.add("missing_required_tools");
           currentMessages.push(lastMessage);
           currentMessages.push({
-            role: "user",
-            content:
-              `Before finalizing, you must call these required tool(s): ${missingRequiredTools.join(
-                ", "
-              )}. Continue by calling the required tools now.`,
+            role: "system",
+            content: `Required before finishing this turn: call these tool(s): ${missingRequiredTools.join(
+              ", "
+            )}.`,
           });
+          correctionInjections.push("missing_required_tools");
           continue;
+        } else if (
+          missingToolsCondition &&
+          injectedCorrections.has("missing_required_tools")
+        ) {
+          correctionInjections.push("missing_required_tools_repeated_skip");
         }
 
-        if (toolCalls.length === 0 && flowIntent === "company_targets") {
+        if (toolCalls.length === 0 && resolvedFlowMode === "outbound") {
           const prospectValidation = validateGroupedProspectingOutput(
             String(lastMessage?.content ?? "")
           );
-          if (!prospectValidation.ok) {
+          const prospectValidationFailed = !prospectValidation.ok;
+          if (
+            prospectValidationFailed &&
+            !injectedCorrections.has("outbound_prospect_validation_failed")
+          ) {
+            injectedCorrections.add("outbound_prospect_validation_failed");
             currentMessages.push(lastMessage);
             currentMessages.push({
-              role: "user",
+              role: "system",
               content:
-                "Your prospecting reply must include generateAthleteProspectList output verbatim. Call getSponsorshipTargets then generateAthleteProspectList if needed, then paste the tool markdown field exactly. Each category table must use: | Company | Match Score | Website | Partnership Justification | with rows sorted by Match Score descending within the category.",
+                "Required: prospecting reply must include generateAthleteProspectList output verbatim. Call getSponsorshipTargets then generateAthleteProspectList if needed, then paste the tool markdown field exactly. Each category table must use: | Company | Match Score | Website | Partnership Justification | with rows sorted by Match Score descending within the category.",
             });
+            correctionInjections.push("outbound_prospect_validation_failed");
             continue;
+          } else if (
+            prospectValidationFailed &&
+            injectedCorrections.has("outbound_prospect_validation_failed")
+          ) {
+            correctionInjections.push("outbound_prospect_validation_failed_repeated_skip");
           }
         }
 
-        if (
-          toolCalls.length === 0 &&
-          composeAfterInterestsThisRun &&
-          isEmailFlowIntent &&
-          !usedToolNames.has("composePitchEmail") &&
-          !usedToolNames.has("mergePitchEmails") &&
-          /\b(i('ll| will)|next i)\b[\s\S]{0,40}\b(draft|write|compose|prepare|email)\b/i.test(
-            String(lastMessage?.content ?? "")
-          )
-        ) {
-          currentMessages.push(lastMessage);
-          currentMessages.push({
-            role: "user",
-            content:
-              "Do not defer. Call composePitchEmail now with the confirmed interest_names and output the full body_markdown in this turn.",
-          });
-          continue;
-        }
-
-        if (
+        const emailEnrichmentMissingComposeCondition =
           toolCalls.length === 0 &&
           emailEnrichmentMode &&
           isEmailFlowIntent &&
           !usedToolNames.has("composePitchEmail") &&
-          !usedToolNames.has("mergePitchEmails")
+          !usedToolNames.has("mergePitchEmails");
+        if (
+          emailEnrichmentMissingComposeCondition &&
+          !injectedCorrections.has("email_enrichment_missing_compose")
         ) {
+          injectedCorrections.add("email_enrichment_missing_compose");
           currentMessages.push(lastMessage);
           currentMessages.push({
-            role: "user",
+            role: "system",
             content:
-              "The user asked to enrich or rewrite the email. Call composePitchEmail (or mergePitchEmails) with revision_hint set to their latest message. Output only body_markdown from the tool — no standalone stats analysis.",
+              "Required: call composePitchEmail (or mergePitchEmails) with revision_hint set to the user's latest message for email enrichment or rewrite. Output only body_markdown from the tool — no standalone stats analysis.",
           });
+          correctionInjections.push("email_enrichment_missing_compose");
           continue;
+        } else if (
+          emailEnrichmentMissingComposeCondition &&
+          injectedCorrections.has("email_enrichment_missing_compose")
+        ) {
+          correctionInjections.push("email_enrichment_missing_compose_repeated_skip");
         }
 
-        if (
+        const targetListPushMissingUpdateCondition =
           toolCalls.length === 0 &&
           injectTargetListPushGuard &&
-          !usedToolNames.has("updateTargetListOutreach")
-        ) {
-          currentMessages.push(lastMessage);
-          currentMessages.push({
-            role: "user",
-            content:
-              "The user asked to save this email on the athlete Target List (Outreach Email / Email Subject columns). Call getAthleteTargetList if you need pipeline_id, then updateTargetListOutreach with outreach_email_subject and outreach_email. Do not use pushEmailToCrm for target-list saves.",
-          });
-          continue;
-        }
-
+          !usedToolNames.has("updateTargetListOutreach");
         if (
-          toolCalls.length === 0 &&
-          !emailRoutingShouldClarify &&
-          /just to confirm/i.test(String(lastMessage?.content ?? ""))
+          targetListPushMissingUpdateCondition &&
+          !injectedCorrections.has("target_list_push_missing_update")
         ) {
+          injectedCorrections.add("target_list_push_missing_update");
           currentMessages.push(lastMessage);
           currentMessages.push({
-            role: "user",
+            role: "system",
             content:
-              "RESOLVED EMAIL ROUTING is already in your system instructions. Do not ask clarifying questions. Call composePitchEmail or mergePitchEmails now using athlete_ids and company from routing context.",
+              "Required: save this email on the athlete Target List (Outreach Email / Email Subject columns). Call getAthleteTargetList if you need pipeline_id, then updateTargetListOutreach with outreach_email_subject and outreach_email. Do not use pushEmailToCrm for target-list saves.",
           });
+          correctionInjections.push("target_list_push_missing_update");
           continue;
+        } else if (
+          targetListPushMissingUpdateCondition &&
+          injectedCorrections.has("target_list_push_missing_update")
+        ) {
+          correctionInjections.push("target_list_push_missing_update_repeated_skip");
         }
 
         currentMessages.push(lastMessage);
@@ -2741,7 +2096,10 @@ REQUIRED behavior — do not deviate:
 
         const questionCall = toolCalls.find((c: any) => c?.function?.name === ASK_USER_QUESTION_TOOL);
         let interestsFromThisTurn: string[] | null = null;
+        let curationFromThisTurn: { suggested_angles?: unknown[] } | null = null;
+        let athleteIdFromThisTurn: string | null = requestAthleteId?.trim() || null;
         let curateAutoConfirmThisTurn = false;
+        let curateAutoConfirmSelection: ReturnType<typeof resolveAutoConfirmedPitchSelection> | null = null;
 
         const toolResults = [];
         for (const call of toolCalls) {
@@ -2755,7 +2113,32 @@ REQUIRED behavior — do not deviate:
 
           try {
             parsedArgs = JSON.parse(args);
-            parsedArgs = await resolveAthleteIdIfNeeded(name, parsedArgs);
+            if (name === "pushEmailToCrm" && Array.isArray(parsedArgs?.emails)) {
+              parsedArgs.emails = await Promise.all(
+                parsedArgs.emails.map((entry: any) => resolveAthleteIdIfNeeded(name, entry))
+              );
+            } else {
+              parsedArgs = await resolveAthleteIdIfNeeded(name, parsedArgs);
+            }
+
+            if (name === "pushEmailToCrm") {
+              if (Array.isArray(parsedArgs?.emails)) {
+                parsedArgs.emails = parsedArgs.emails.map((entry: any) =>
+                  entry?.email_body != null
+                    ? {
+                        ...entry,
+                        email_body: enforcePitchEmailClosing(
+                          stripSponsorGapCopy(String(entry.email_body))
+                        ),
+                      }
+                    : entry
+                );
+              } else if (parsedArgs?.email_body != null) {
+                parsedArgs.email_body = enforcePitchEmailClosing(
+                  stripSponsorGapCopy(String(parsedArgs.email_body))
+                );
+              }
+            }
 
             if (name === "searchWebCompanies") {
               result = await searchCompanies(parsedArgs.query);
@@ -2776,6 +2159,11 @@ REQUIRED behavior — do not deviate:
               console.error(`[AI Chat] Unknown tool: "${name}"`);
               result = { error: `Tool "${name}" is not registered` };
             }
+
+            if (name === "composePitchEmail" || name === "mergePitchEmails") {
+              stripSponsorGapFromPitchComposeResult(result);
+            }
+
             // Track sources
             if (name === "getAthlete" && result) {
               sources.push(`Athlete: ${result.athlete_id}`);
@@ -2791,8 +2179,12 @@ REQUIRED behavior — do not deviate:
                 sources.push(`Athlete intel: ${result.athlete.athlete_id}`);
               }
             }
-            if (name === "searchAthletesByAudienceInterest" && Array.isArray(result)) {
-              sources.push(`Audience search: "${parsedArgs.interest_name}" → ${result.length} athletes`);
+            if (name === "searchAthletesByAudienceMatch" && result && typeof result === "object" && !(result as any).error) {
+              if (Array.isArray((result as any).sports) && (result as any).sports.length > 0) {
+                sources.push(`Audience match: ${(result as any).sports.length} sport group(s)`);
+              } else if (Array.isArray((result as any).athletes)) {
+                sources.push(`Audience match: ${(result as any).athletes.length} athlete(s)`);
+              }
             }
             if (name === "getDistinctAudienceInterests" && result && typeof result === "object" && Array.isArray((result as any).interests)) {
               interestsFromThisTurn = (result as { interests: string[] }).interests;
@@ -2804,18 +2196,23 @@ REQUIRED behavior — do not deviate:
               );
             }
             if (name === "curatePitchInterests" && result && typeof result === "object" && Array.isArray((result as any).suggested_interests)) {
+              curationFromThisTurn = result as { suggested_angles?: unknown[] };
+              if (parsedArgs.athlete_id) {
+                athleteIdFromThisTurn = String(parsedArgs.athlete_id).trim();
+              }
               sources.push(
                 `Pitch interest curation: ${(result as any).suggested_interests.map((s: any) => s.interest_name).join(", ")}`
               );
-              if (
-                shouldAutoConfirmPitchInterests(result as any, { pipelineDrafting }) &&
-                runtimeSelectedInterestsCount === 0
-              ) {
-                const autoPicks = resolveAutoConfirmedInterests(result as any);
-                if (autoPicks.length > 0) {
-                  runtimeSelectedInterestsCount = autoPicks.length;
+              if (shouldAutoConfirmPitchInterests(result as any) && runtimeSelectedInterestsCount === 0) {
+                const autoSelection = resolveAutoConfirmedPitchSelection(result as any);
+                if (autoSelection.pitchAngles.length > 0 || autoSelection.interestNames.length > 0) {
+                  runtimeSelectedInterestsCount = Math.max(
+                    autoSelection.interestNames.length,
+                    autoSelection.pitchAngles.length
+                  );
                   skipPickerThisRun = true;
                   curateAutoConfirmThisTurn = true;
+                  curateAutoConfirmSelection = autoSelection;
                   composeAfterInterestsThisRun = true;
                 }
               }
@@ -2832,11 +2229,6 @@ REQUIRED behavior — do not deviate:
             }
             if (name === "getCrmCompanyContext" && result && typeof result === "object" && (result as any).found) {
               sources.push(`CRM company context: ${(result as any).company_name ?? "company"}`);
-            }
-            if (name === "findAthletesByAudienceInterestAndSport" && result && typeof result === "object" && Array.isArray((result as any).sports)) {
-              sources.push(
-                `Find athletes by interests+sports: ${(result as any).sports.length} sport group(s)`
-              );
             }
             if (name === "searchRosterAthletes" && result && typeof result === "object" && Array.isArray((result as any).athletes)) {
               sources.push(
@@ -2864,28 +2256,29 @@ REQUIRED behavior — do not deviate:
             if (name === "pushCompanyToCrmPipeline" && result && !result.error) {
               sources.push(`CRM pipeline company: ${parsedArgs.company_name}`);
             }
-            if (name === "pushEmailToCrm" && result && typeof result === "object" && (result as any).ok) {
-              const r = result as { company_name?: string; contact_id?: string; saved_to?: string };
-              const co = r.company_name ?? parsedArgs.company_name;
-              sources.push(
-                r.saved_to === "crm_contact" && r.contact_id
-                  ? `CRM email draft: ${co} (contact ${r.contact_id})`
-                  : `CRM email draft: ${co}`
-              );
+            if (name === "pushEmailToCrm" && result && typeof result === "object") {
+              const r = result as {
+                ok?: boolean;
+                company_name?: string;
+                contact_id?: string;
+                saved_to?: string;
+                results?: Array<{ company_name?: string; ok?: boolean }>;
+              };
+              if (Array.isArray(r.results)) {
+                for (const row of r.results) {
+                  if (row.ok) {
+                    sources.push(`CRM email draft: ${row.company_name ?? "company"}`);
+                  }
+                }
+              } else if (r.ok) {
+                const co = r.company_name ?? parsedArgs.company_name;
+                sources.push(
+                  r.saved_to === "crm_contact" && r.contact_id
+                    ? `CRM email draft: ${co} (contact ${r.contact_id})`
+                    : `CRM email draft: ${co}`
+                );
+              }
             }
-            if (name === "generateGroupOutreachEmail" && result && !result.error) {
-              sources.push(`Group outreach template: ${parsedArgs.brand_name}`);
-            }
-            if (name === "generateSingleAthleteOutreachEmail" && result && !result.error) {
-              sources.push(`Single-athlete outreach template: ${parsedArgs.brand_name}`);
-            }
-            if (name === "generateCombinedAthleteOutreachEmail" && result && !result.error) {
-              sources.push(`Combined outreach template: ${parsedArgs.brand_name}`);
-            }
-            if (name === "generateGeneralOutreachEmail" && result && !result.error) {
-              sources.push(`General outreach template: ${parsedArgs.company_name}`);
-            }
-
             const rawJson = JSON.stringify(result);
             const MAX_TOOL_JSON_CHARS = 20000;
             const truncatedJson =
@@ -2923,7 +2316,10 @@ REQUIRED behavior — do not deviate:
           currentMessages.push({
             role: "user",
             content:
-              "Interests were auto-confirmed from strong curation. Call composePitchEmail now with those interest_names and athlete_ids from SESSION CONTEXT. Output only the tool body_markdown.",
+              getCurateAutoConfirmComposeHint(
+                curateAutoConfirmSelection ?? { pitchAngles: [], interestNames: [] }
+              ) ||
+              "Audience angles were auto-confirmed from strong curation. Call composePitchEmail now with pitch_angles and interest_names from curation. Output only the tool body_markdown.",
           });
           continue;
         }
@@ -2940,6 +2336,7 @@ REQUIRED behavior — do not deviate:
                 assistant_content: String(lastMessage?.content ?? "").trim(),
                 model_messages: currentMessages,
               },
+              turnTelemetry: emitTurnSummary(false),
             };
           } catch (e: any) {
             currentMessages.push({
@@ -2963,8 +2360,19 @@ REQUIRED behavior — do not deviate:
             const questionText =
               flowIntent === "inbound_company_athlete_match"
                 ? "Which audience interest categories best fit this company?"
-                : "Which audience interest categories are most relevant for pitching this company?";
-            const fullOptions = buildFullInterestPickerOptions(interestsFromThisTurn);
+                : "Which audience signals should we lead with in this pitch?";
+            const fullOptions =
+              flowIntent === "inbound_company_athlete_match"
+                ? buildFullInterestPickerOptions(interestsFromThisTurn)
+                : (
+                    await buildPitchAnglePickerOptions({
+                      supabase,
+                      profile,
+                      suggested_angles: (curationFromThisTurn?.suggested_angles ?? []) as any[],
+                      interest_names: interestsFromThisTurn,
+                      athlete_id: athleteIdFromThisTurn,
+                    })
+                  ).options;
             const prompt = parseAskUserQuestionToolArgs({
               question: questionText,
               options: fullOptions,
@@ -3007,11 +2415,17 @@ REQUIRED behavior — do not deviate:
                 assistant_content: intro,
                 model_messages: currentMessages,
               },
+              turnTelemetry: emitTurnSummary(false),
             };
           } catch (e) {
             console.warn("[AI Chat] Auto ask_user_question synthesis failed:", e);
           }
         }
+      }
+
+      const hitIterationCap = maxIterations < 0;
+      if (hitIterationCap) {
+        correctionInjections.push("hit_iteration_cap");
       }
 
       // If we exited due to iteration cap but never received a final assistant content string,
@@ -3020,20 +2434,27 @@ REQUIRED behavior — do not deviate:
         try {
           const forcedMessages = [
             ...currentMessages,
-            {
-              role: "user" as const,
-              content:
-                "Now provide the final answer to the user in markdown. Do not call tools unless absolutely necessary.",
-            },
+            hitIterationCap
+              ? {
+                  role: "system" as const,
+                  content:
+                    "Tool budget exhausted for this turn. Give the user a clear status update on what was accomplished and what still needs to happen — do not call more tools.",
+                }
+              : {
+                  role: "user" as const,
+                  content:
+                    "Now provide the final answer to the user in markdown. Do not call tools unless absolutely necessary.",
+                },
           ];
+          const forcedToolChoice = hitIterationCap ? ("none" as const) : ("auto" as const);
           if (sseEmit) {
             const { message } = await streamChatCompletionToMessage(
               () =>
                 createChatCompletionStreamWithReasoningCompat({
                   model: OPENAI_CHAT_MODEL,
                   messages: forcedMessages,
-                  tools: TOOLS,
-                  tool_choice: "auto",
+                  tools: activeToolDefinitions,
+                  tool_choice: forcedToolChoice,
                 }),
               {
                 onToken: (text) => sseEmit({ type: "token", text }),
@@ -3044,8 +2465,8 @@ REQUIRED behavior — do not deviate:
             const completion = await createChatCompletionWithReasoningCompat({
               model: OPENAI_CHAT_MODEL,
               messages: forcedMessages,
-              tools: TOOLS,
-              tool_choice: "auto",
+              tools: activeToolDefinitions,
+              tool_choice: forcedToolChoice,
             });
             lastMessage = completion.choices[0].message;
           }
@@ -3054,7 +2475,7 @@ REQUIRED behavior — do not deviate:
         }
       }
 
-      return { lastMessage };
+      return { lastMessage, turnTelemetry: emitTurnSummary(hitIterationCap) };
     };
 
     if (interaction_response && resumeMessages && project_id && conversation_id) {
@@ -3089,7 +2510,10 @@ REQUIRED behavior — do not deviate:
       }
     }
 
-    const persistInteractionPause = async (pause: AgentInteractionPause) => {
+    const persistInteractionPause = async (
+      pause: AgentInteractionPause,
+      turnTelemetry?: TurnTelemetry
+    ) => {
       const convId = String(conversation_id ?? "").trim();
       const projId = String(project_id ?? "").trim();
       if (!projId || !convId) {
@@ -3137,6 +2561,7 @@ REQUIRED behavior — do not deviate:
           interaction: pause.prompt,
           interaction_status: "pending",
           tool_call_id: pause.tool_call_id,
+          ...(turnTelemetry ? { turn_telemetry: turnTelemetry } : {}),
         },
       });
       const { error: insertError } = await supabase.from("ai_messages").insert(rows);
@@ -3185,14 +2610,14 @@ REQUIRED behavior — do not deviate:
         response = "I wasn't able to generate a response. Please try rephrasing your question.";
       }
       if (isEmailFlowIntent) {
-        response = stripSponsorGapCopy(response);
+        response = enforcePitchEmailClosing(stripSponsorGapCopy(response));
       }
       const dedupedWebSources = dedupeWebSources(webSources);
       response = appendSourcesToResponse(response, sources, dedupedWebSources);
       return { response, dedupedWebSources };
     };
 
-    const persistChatTurn = async (response: string) => {
+    const persistChatTurn = async (response: string, turnTelemetry?: TurnTelemetry) => {
       if (!project_id || !conversation_id) return;
       const latestUser = interaction_response
         ? null
@@ -3215,6 +2640,7 @@ REQUIRED behavior — do not deviate:
         owner_user_id: profile.user_id,
         role: "assistant",
         content: response,
+        ...(turnTelemetry ? { metadata: { turn_telemetry: turnTelemetry } } : {}),
       });
       await supabase.from("ai_messages").insert(inserts);
       await supabase
@@ -3224,7 +2650,10 @@ REQUIRED behavior — do not deviate:
         .eq("owner_user_id", profile.user_id);
       await supabase
         .from("ai_conversations")
-        .update({ updated_at: new Date().toISOString() })
+        .update({
+          updated_at: new Date().toISOString(),
+          flow_mode: flow_mode ?? (resolvedFlowMode === "default" ? "auto" : resolvedFlowMode),
+        })
         .eq("conversation_id", conversation_id)
         .eq("owner_user_id", profile.user_id);
     };
@@ -3243,13 +2672,16 @@ REQUIRED behavior — do not deviate:
               resumeMessages ? { resumeMessages } : undefined
             );
             if (agentResult.interactionPause) {
-              await persistInteractionPause(agentResult.interactionPause);
+              await persistInteractionPause(
+                agentResult.interactionPause,
+                agentResult.turnTelemetry
+              );
               emitInteractionPause(agentResult.interactionPause, emit);
               controller.close();
               return;
             }
             const { response, dedupedWebSources } = buildAssistantResponse(agentResult.lastMessage);
-            await persistChatTurn(response);
+            await persistChatTurn(response, agentResult.turnTelemetry);
             emit({
               type: "done",
               message: response,
@@ -3277,7 +2709,7 @@ REQUIRED behavior — do not deviate:
       resumeMessages ? { resumeMessages } : undefined
     );
     if (agentResult.interactionPause) {
-      await persistInteractionPause(agentResult.interactionPause);
+      await persistInteractionPause(agentResult.interactionPause, agentResult.turnTelemetry);
       const intro = agentResult.interactionPause.assistant_content;
       return NextResponse.json({
         message: intro,
@@ -3290,7 +2722,7 @@ REQUIRED behavior — do not deviate:
       });
     }
     const { response, dedupedWebSources } = buildAssistantResponse(agentResult.lastMessage);
-    await persistChatTurn(response);
+    await persistChatTurn(response, agentResult.turnTelemetry);
     return NextResponse.json({
       message: response,
       sources,

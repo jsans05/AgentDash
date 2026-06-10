@@ -12,7 +12,7 @@ async function getLatestConversation(
 ) {
   const { data: convo, error } = await supabase
     .from("ai_conversations")
-    .select("conversation_id, created_at, updated_at, pending_turn")
+    .select("conversation_id, created_at, updated_at, pending_turn, flow_mode")
     .eq("project_id", projectId)
     .eq("owner_user_id", ownerId)
     .order("updated_at", { ascending: false })
@@ -32,7 +32,7 @@ export async function GET(req: Request, ctx: Ctx) {
   if (requestedConversationId) {
     const { data, error } = await supabase
       .from("ai_conversations")
-      .select("conversation_id, created_at, updated_at, pending_turn")
+      .select("conversation_id, created_at, updated_at, pending_turn, flow_mode")
       .eq("conversation_id", requestedConversationId)
       .eq("project_id", id)
       .eq("owner_user_id", profile.user_id)
@@ -56,7 +56,7 @@ export async function GET(req: Request, ctx: Ctx) {
         owner_user_id: profile.user_id,
         title: null,
       })
-      .select("conversation_id, created_at, updated_at, pending_turn")
+      .select("conversation_id, created_at, updated_at, pending_turn, flow_mode")
       .single();
     if (createError || !created) {
       return NextResponse.json({ error: createError?.message ?? "Failed to create conversation" }, { status: 500 });
@@ -79,6 +79,7 @@ export async function GET(req: Request, ctx: Ctx) {
 
   return NextResponse.json({
     conversation_id: convo.conversation_id,
+    flow_mode: (convo as { flow_mode?: string | null }).flow_mode ?? null,
     pending_interaction: pendingTurn
       ? {
           tool_call_id: pendingTurn.tool_call_id,

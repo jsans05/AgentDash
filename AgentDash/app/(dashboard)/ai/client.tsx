@@ -5,17 +5,26 @@ import { useSearchParams } from "next/navigation";
 import { postAiChat, type PostAiChatResult } from "@/lib/ai/chat-fetch";
 import type { ChatSseEvent } from "@/lib/ai/chat-sse";
 import type { InteractionResponsePayload } from "@/lib/ai/user-question";
-import { ChatPanel, type ChatProject, type ChatUiContext, type Message } from "@/components/chat/ChatPanel";
+import { ChatPanel, type ChatFlowMode, type ChatProject, type ChatUiContext, type Message } from "@/components/chat/ChatPanel";
+import { parseFlowMode } from "@/lib/ai/flow-mode";
 
 function parseUiContext(raw: string | null): ChatUiContext | undefined {
   if (raw === "target_list" || raw === "crm_pipeline" || raw === "global") return raw;
   return undefined;
 }
 
+function parseFlowModeParam(raw: string | null): ChatFlowMode | undefined {
+  const parsed = parseFlowMode(raw);
+  return parsed && parsed !== "auto" ? parsed : undefined;
+}
+
 function AIChatClientInner({ role }: { role: string }) {
   const searchParams = useSearchParams();
   const athleteId = searchParams.get("athlete_id")?.trim() || undefined;
   const uiContext = parseUiContext(searchParams.get("context"));
+  const flowMode =
+    parseFlowModeParam(searchParams.get("flow_mode")) ??
+    (uiContext === "target_list" ? "outbound" : "auto");
 
   const onSend = useCallback(
     async (
@@ -31,11 +40,13 @@ function AIChatClientInner({ role }: { role: string }) {
         interactionResponse?: InteractionResponsePayload;
         athleteId?: string;
         uiContext?: ChatUiContext;
+        flowMode?: ChatFlowMode;
       }
     ): Promise<PostAiChatResult> => {
       const payload = messages.map((m) => ({ role: m.role, content: m.content }));
       const resolvedAthleteId = options?.athleteId ?? athleteId;
       const resolvedUiContext = options?.uiContext ?? uiContext;
+      const resolvedFlowMode = options?.flowMode ?? flowMode;
       return postAiChat(
         {
           messages: payload,
@@ -50,6 +61,7 @@ function AIChatClientInner({ role }: { role: string }) {
           mode: options?.mode ?? "default",
           ...(resolvedAthleteId ? { athlete_id: resolvedAthleteId } : {}),
           ...(resolvedUiContext ? { ui_context: resolvedUiContext } : {}),
+          flow_mode: resolvedFlowMode ?? "auto",
         },
         {
           signal: options?.signal,
@@ -60,7 +72,7 @@ function AIChatClientInner({ role }: { role: string }) {
         }
       );
     },
-    [athleteId, uiContext]
+    [athleteId, uiContext, flowMode]
   );
 
   return (
@@ -71,6 +83,7 @@ function AIChatClientInner({ role }: { role: string }) {
       placeholder="Message Mystery Machine..."
       athleteId={athleteId}
       uiContext={uiContext}
+      flowMode={flowMode}
     />
   );
 }

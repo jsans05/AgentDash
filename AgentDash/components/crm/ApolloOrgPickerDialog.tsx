@@ -65,8 +65,8 @@ export function ApolloOrgPickerDialog({
       const res = await fetch(`/api/apollo/companies/${companyId}/org-candidates`, {
         credentials: "include",
       });
-      const json = (await res.json()) as OrgCandidatesResponse;
-      if (!res.ok) throw new Error(json.error || "Failed to load organizations");
+      const json = (await res.json().catch(() => ({}))) as OrgCandidatesResponse;
+      if (!res.ok) throw new Error(json.error || `Failed to load organizations (${res.status})`);
       setData(json);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load organizations");
@@ -90,8 +90,8 @@ export function ApolloOrgPickerDialog({
         credentials: "include",
         body: JSON.stringify({ apollo_organization_id }),
       });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || "Failed to update company");
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error || `Failed to update company (${res.status})`);
       onSelected({
         apollo_organization_name: json.organization?.apollo_organization_name ?? "",
         match_notes: json.organization?.match_notes,

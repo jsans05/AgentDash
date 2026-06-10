@@ -1,4 +1,5 @@
 import { PROSPECTING_TABLE_HEADER } from "@/lib/ai/grouped-prospecting";
+import { GLOBAL_EMAIL_CLOSING } from "@/lib/ai/pitch-spec";
 
 type ValidationResult = {
   ok: boolean;
@@ -55,6 +56,35 @@ export function validateProspectingTable(value: string): ValidationResult {
     return { ok: false, error: "Prospecting response must contain at least one table row." };
   }
   return { ok: true };
+}
+
+const TRAILING_SIGNATURE_LINE = /^(The·Team|--|Best,|Thanks,|Sincerely,|Regards,)/i;
+
+/** Normalize pitch email bodies so the last line is exactly GLOBAL_EMAIL_CLOSING. */
+export function enforcePitchEmailClosing(text: string): string {
+  const lines = String(text ?? "").split("\n");
+  const closingIdx = lines.findLastIndex((line) => line.trim() === GLOBAL_EMAIL_CLOSING);
+  if (closingIdx >= 0) {
+    return lines
+      .slice(0, closingIdx + 1)
+      .join("\n")
+      .replace(/[ \t]+\n/g, "\n")
+      .trimEnd();
+  }
+
+  const trimmed = [...lines];
+  while (trimmed.length > 0) {
+    const last = trimmed[trimmed.length - 1]?.trim() ?? "";
+    if (!last || TRAILING_SIGNATURE_LINE.test(last)) {
+      trimmed.pop();
+      continue;
+    }
+    break;
+  }
+
+  if (trimmed.length === 0) return GLOBAL_EMAIL_CLOSING;
+  const body = trimmed.join("\n").replace(/[ \t]+\n/g, "\n").trimEnd();
+  return body.endsWith(GLOBAL_EMAIL_CLOSING) ? body : `${body}\n\n${GLOBAL_EMAIL_CLOSING}`;
 }
 
 export function validateGroupedProspectingOutput(value: string): ValidationResult {

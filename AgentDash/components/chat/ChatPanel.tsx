@@ -11,8 +11,15 @@ import { useAuth } from "@/app/providers";
 import type { Profile } from "@/lib/supabase/types";
 import type { PostAiChatResult } from "@/lib/ai/chat-fetch";
 import type { ChatSseEvent, ChatSseWebSource } from "@/lib/ai/chat-sse";
+import type { FlowMode } from "@/lib/ai/flow-mode";
+import { parseFlowMode } from "@/lib/ai/flow-mode";
 import type { InteractionResponsePayload, UserQuestionPrompt } from "@/lib/ai/user-question";
 import { formatInteractionUserSummary } from "@/lib/ai/user-question";
+import {
+  ChatFlowModeSelector,
+  COMPOSER_ICON_BUTTON_CLASS,
+  COMPOSER_ICON_CLASS,
+} from "./ChatFlowModeSelector";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { ChatMultiSelectCard } from "./ChatMultiSelectCard";
 import { Copy, RefreshCw, Trash2, ArrowDown, Paperclip, X as XIcon, FileSpreadsheet, ImageIcon } from "lucide-react";
@@ -67,11 +74,14 @@ export type ChatProject = {
   createdAt?: string;
 };
 
+export type ChatFlowMode = FlowMode;
+
 export type ChatUiContext = "target_list" | "crm_pipeline" | "global";
 
 export type ChatPanelSendOptions = {
   signal?: AbortSignal;
   mode?: "default" | "deep_research" | "web_search";
+  flowMode?: ChatFlowMode;
   attachments?: File[];
   onStreamToken?: (text: string) => void;
   onStreamEvent?: (event: ChatSseEvent) => void;
@@ -83,13 +93,15 @@ export type ChatPanelSendOptions = {
 function withChatRoutingOptions(
   options: ChatPanelSendOptions | undefined,
   athleteId?: string,
-  uiContext?: ChatUiContext
+  uiContext?: ChatUiContext,
+  flowMode?: ChatFlowMode
 ): ChatPanelSendOptions | undefined {
-  if (!athleteId && !uiContext) return options;
+  if (!athleteId && !uiContext && !flowMode) return options;
   return {
     ...options,
     ...(athleteId ? { athleteId } : {}),
     ...(uiContext ? { uiContext } : {}),
+    ...(flowMode ? { flowMode } : {}),
   };
 }
 
@@ -145,6 +157,8 @@ export type ChatPanelProps = {
   placeholder?: string;
   athleteId?: string;
   uiContext?: ChatUiContext;
+  /** Initial / default flow mode (outbound, inbound, email). */
+  flowMode?: ChatFlowMode;
   /** Hides project sidebar; use in embedded panels (e.g. CRM drafting). */
   layout?: "default" | "embedded";
   /** Fired after a successful assistant reply (send or regenerate). */
@@ -168,6 +182,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
     embeddedDedicatedProjectName,
     athleteId,
     uiContext,
+    flowMode: initialFlowMode = "auto",
   },
   ref
 ) {
@@ -187,6 +202,11 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   const [streamingWebSources, setStreamingWebSources] = useState<ChatSseWebSource[]>([]);
   const [streamingToolStatus, setStreamingToolStatus] = useState<string | null>(null);
   const [sendMode, setSendMode] = useState<"default" | "deep_research" | "web_search">("default");
+  const [flowMode, setFlowMode] = useState<ChatFlowMode>(initialFlowMode);
+
+  useEffect(() => {
+    setFlowMode(initialFlowMode);
+  }, [initialFlowMode]);
   const [attachments, setAttachments] = useState<File[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -267,6 +287,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
           : null;
       }
       setActiveConversationId(String(data?.conversation_id ?? ""));
+      setFlowMode(parseFlowMode(data?.flow_mode) ?? "auto");
       setMessages(dedupeMessagesById(nextMessages));
       setShowJumpToLatest(false);
     } finally {
@@ -544,7 +565,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
           },
         },
         athleteId,
-        uiContext
+        uiContext,
+        flowMode
           )
         );
         applyAssistantResult(result, streamMsgId, streamStarted);
@@ -584,6 +606,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
       applyAssistantResult,
       athleteId,
       uiContext,
+      flowMode,
     ]
   );
 
@@ -709,7 +732,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
           },
         },
         athleteId,
-        uiContext
+        uiContext,
+        flowMode
       );
         // #region agent log
         fetch("http://127.0.0.1:7310/ingest/3db61d27-132c-4ea5-8254-c4515c90a750", {
@@ -769,6 +793,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
       projectLoading,
       athleteId,
       uiContext,
+      flowMode,
     ]
   );
 
@@ -900,7 +925,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
         },
           },
           athleteId,
-          uiContext
+          uiContext,
+          flowMode
         )
       );
       applyAssistantResult(result, streamMsgId, streamStarted);
@@ -912,30 +938,6 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
       setStreamingSources([]);
       setStreamingWebSources([]);
       setStreamingToolStatus(null);
-    }
-  };
-
-  const clearChat = async () => {
-    if (!activeProject) return;
-    abortSendRef.current?.abort();
-    const res = await fetch(`/api/ai/projects/${activeProject.id}/conversation`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: null }),
-      credentials: "include",
-    });
-    if (!res.ok) return;
-    const data = await res.json();
-    const newConversationId = String(data?.conversation_id ?? "");
-    pendingInteractionRef.current = null;
-    setInput("");
-    setShowJumpToLatest(false);
-    if (newConversationId) {
-      await loadConversationForProject(activeProject.id, newConversationId);
-    } else {
-      setActiveConversationId("");
-      setMessages([]);
-      setConversationReady(true);
     }
   };
 
@@ -1099,19 +1101,22 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
     setMemoryModalOpen(false);
   };
 
-  const deleteProject = async () => {
-    if (!activeProject || projects.length <= 1) return;
-    const confirmed = window.confirm(`Delete "${activeProject.name}" and all chat history in it?`);
+  const deleteProject = async (projectId: string) => {
+    const project = projects.find((p) => p.id === projectId);
+    if (!project || projects.length <= 1) return;
+    const confirmed = window.confirm(`Delete "${project.name}" and all chat history in it?`);
     if (!confirmed) return;
-    const res = await fetch(`/api/ai/projects/${activeProject.id}`, {
+    const res = await fetch(`/api/ai/projects/${projectId}`, {
       method: "DELETE",
       credentials: "include",
     });
     if (!res.ok) return;
-    const remaining = projects.filter((p) => p.id !== activeProject.id);
+    const remaining = projects.filter((p) => p.id !== projectId);
     setProjects(remaining);
     setActiveProjectId(remaining[0]?.id ?? "");
-    setMessages([]);
+    if (projectId === activeProjectId) {
+      setMessages([]);
+    }
   };
 
   const lastUserIndex = messages.map((m) => m.role).lastIndexOf("user");
@@ -1142,26 +1147,44 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
         <ScrollArea className="flex-1 min-h-0 px-2 py-2">
           <div className="space-y-1">
             {projects.map((project) => (
-              <button
+              <div
                 key={project.id}
-                type="button"
-                onClick={() => setActiveProjectId(project.id)}
                 className={cn(
-                  "w-full rounded-xl border px-3 py-2 text-left transition-colors",
+                  "group flex items-center gap-1 rounded-xl border transition-colors",
                   project.id === activeProjectId
                     ? "border-[#2E7040]/60 bg-[#1C3323] text-[#F4F1EB]"
                     : "border-transparent bg-transparent text-[#BFB8AB] hover:bg-white/5 hover:text-[#F4F1EB]"
                 )}
-                disabled={loading || projectLoading || bootLoading}
               >
-                <div className="text-sm font-medium truncate">{project.name}</div>
-                {project.memoryNotes.length > 0 ? (
-                  <div className="truncate text-[11px] opacity-80">
-                    {project.memoryNotes.length} memory note
-                    {project.memoryNotes.length === 1 ? "" : "s"}
-                  </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveProjectId(project.id)}
+                  className="min-w-0 flex-1 rounded-xl px-3 py-2 text-left"
+                  disabled={loading || projectLoading || bootLoading}
+                >
+                  <div className="text-sm font-medium truncate">{project.name}</div>
+                  {project.memoryNotes.length > 0 ? (
+                    <div className="truncate text-[11px] opacity-80">
+                      {project.memoryNotes.length} memory note
+                      {project.memoryNotes.length === 1 ? "" : "s"}
+                    </div>
+                  ) : null}
+                </button>
+                {projects.length > 1 ? (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void deleteProject(project.id);
+                    }}
+                    disabled={loading || projectLoading || bootLoading}
+                    className="mr-2 shrink-0 rounded-md p-1.5 text-[#AFA89C] opacity-0 transition-opacity hover:bg-[#3A1E1E] hover:text-[#F1A2A2] group-hover:opacity-100 disabled:opacity-0"
+                    aria-label={`Delete ${project.name}`}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
                 ) : null}
-              </button>
+              </div>
             ))}
           </div>
         </ScrollArea>
@@ -1177,15 +1200,6 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
               className="border-white/15 bg-transparent text-[#E6E0D5] hover:bg-white/5"
             >
               Rename
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={deleteProject}
-              disabled={loading || !activeProject || projects.length <= 1}
-              className="text-[#E6E0D5] hover:bg-white/5"
-            >
-              Delete
             </Button>
           </div>
           <div className="flex gap-2">
@@ -1244,8 +1258,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
             <div className="rounded-3xl border border-white/10 bg-[#171B18]/80 px-8 py-10 text-center text-sm text-[#C9C2B6]">
               <p className="mb-2 text-base font-medium text-[#F4F1EB]">How can Mystery Machine help?</p>
               <ul className="inline-block space-y-1.5 text-left">
+                <li>• Use + to pick Outbound, Inbound, or Email — or chat in default mode</li>
                 <li>• Prospect for one athlete or your full roster</li>
-                <li>• Pull sales insights and audience fit data</li>
                 <li>• Draft outreach, sponsorship notes, and follow-ups</li>
               </ul>
             </div>
@@ -1461,66 +1475,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
 
         <Separator />
 
-        {/* Actions + Composer */}
+        {/* Composer */}
         <div className="shrink-0 border-t border-white/10 bg-[#121613] p-4">
-          <div className="flex items-center justify-between gap-2 mb-2">
-            <div className="flex gap-1">
-              {canRegenerate && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={regenerateLast}
-                  disabled={loading}
-                  className="border-white/15 bg-transparent text-[#E6E0D5] hover:bg-white/5"
-                >
-                  <RefreshCw className="h-3.5 w-3.5 mr-1" />
-                  Regenerate
-                </Button>
-              )}
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={clearChat}
-                disabled={loading || projectLoading || bootLoading}
-                className="text-[#D1CABF] hover:bg-white/5"
-              >
-                <Trash2 className="h-3.5 w-3.5 mr-1" />
-                New chat
-              </Button>
-            </div>
-          </div>
-          <div className="flex flex-wrap gap-1.5 mb-2">
-            <Button
-              type="button"
-              variant={sendMode === "deep_research" ? "default" : "outline"}
-              size="sm"
-              disabled={loading || projectLoading || bootLoading}
-              onClick={() => setSendMode((prev) => (prev === "deep_research" ? "default" : "deep_research"))}
-              className={cn(
-                sendMode === "deep_research"
-                  ? "border-[#2E7040] text-white"
-                  : "border-white/15 bg-transparent text-[#D1CABF] hover:bg-white/5"
-              )}
-              style={sendMode === "deep_research" ? { backgroundColor: FOREST_GREEN } : undefined}
-            >
-              Deep research
-            </Button>
-            <Button
-              type="button"
-              variant={sendMode === "web_search" ? "default" : "outline"}
-              size="sm"
-              disabled={loading || projectLoading || bootLoading}
-              onClick={() => setSendMode((prev) => (prev === "web_search" ? "default" : "web_search"))}
-              className={cn(
-                sendMode === "web_search"
-                  ? "border-[#2E7040] text-white"
-                  : "border-white/15 bg-transparent text-[#D1CABF] hover:bg-white/5"
-              )}
-              style={sendMode === "web_search" ? { backgroundColor: FOREST_GREEN } : undefined}
-            >
-              Web search
-            </Button>
-          </div>
           {attachments.length > 0 && (
             <div className="mb-2 flex flex-wrap gap-1.5">
               {attachments.map((file, idx) => {
@@ -1567,37 +1523,69 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
               if (fileInputRef.current) fileInputRef.current.value = "";
             }}
           />
-          <div className={cn("flex items-end gap-2 p-2", COMPOSER_SURFACE)}>
-            <Tooltip content="Attach screenshot or spreadsheet (.xlsx / .csv)">
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={loading || projectLoading || bootLoading || attachments.length >= MAX_ATTACHMENTS}
-                className="shrink-0 text-[#AFA89C] hover:bg-white/5 hover:text-[#F4F1EB]"
-                aria-label="Attach file"
-              >
-                <Paperclip className="h-4 w-4" />
-              </Button>
-            </Tooltip>
+          <div className={cn("flex flex-col", COMPOSER_SURFACE)}>
             <Textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={placeholder}
-              className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent py-3 text-[#F4F1EB] placeholder:text-[#8E877A] focus-visible:ring-0 focus-visible:ring-offset-0"
+              className="min-h-[44px] max-h-[200px] w-full resize-none border-none bg-transparent px-3 pb-1 pt-3 text-[#F4F1EB] placeholder:text-[#8E877A] focus-visible:ring-0 focus-visible:ring-offset-0"
               rows={1}
               disabled={loading || projectLoading || bootLoading}
             />
-            <Button
-              onClick={handleSend}
-              disabled={loading || projectLoading || bootLoading || (!input.trim() && attachments.length === 0)}
-              className="shrink-0 text-white hover:opacity-95"
-              style={{ backgroundColor: FOREST_GREEN }}
-            >
-              Send
-            </Button>
+            <div className="flex items-center justify-between gap-2 px-2 pb-2 pt-1">
+              <div className="flex min-w-0 items-center gap-1">
+                {canRegenerate ? (
+                  <Tooltip content="Regenerate last response">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      onClick={regenerateLast}
+                      disabled={loading}
+                      className={COMPOSER_ICON_BUTTON_CLASS}
+                      aria-label="Regenerate last response"
+                    >
+                      <RefreshCw className={COMPOSER_ICON_CLASS} />
+                    </Button>
+                  </Tooltip>
+                ) : null}
+                <Tooltip content="Attach screenshot or spreadsheet (.xlsx / .csv)">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={
+                      loading || projectLoading || bootLoading || attachments.length >= MAX_ATTACHMENTS
+                    }
+                    className={COMPOSER_ICON_BUTTON_CLASS}
+                    aria-label="Attach file"
+                  >
+                    <Paperclip className={COMPOSER_ICON_CLASS} />
+                  </Button>
+                </Tooltip>
+                <ChatFlowModeSelector
+                  flowMode={flowMode}
+                  onFlowModeChange={setFlowMode}
+                  sendMode={sendMode}
+                  onSendModeChange={setSendMode}
+                  disabled={loading || projectLoading || bootLoading}
+                  readOnlyEmail={layout === "embedded"}
+                />
+              </div>
+              <Button
+                size="sm"
+                onClick={handleSend}
+                disabled={
+                  loading || projectLoading || bootLoading || (!input.trim() && attachments.length === 0)
+                }
+                className="shrink-0 text-white hover:opacity-95"
+                style={{ backgroundColor: FOREST_GREEN }}
+              >
+                Send
+              </Button>
+            </div>
           </div>
         </div>
       </div>

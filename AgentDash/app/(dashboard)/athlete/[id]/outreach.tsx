@@ -19,7 +19,7 @@ export function OutreachTab({ athleteId, athleteName }: Props) {
           All prospecting runs in <strong>Mystery Machine</strong>. There you can get sponsor recommendations for this athlete or any others, using their sport, accolades, audience data, current sponsors, and exclusivities.
         </p>
         <Link
-          href={`/ai?athlete_id=${encodeURIComponent(athleteId)}&context=target_list`}
+          href={`/ai?athlete_id=${encodeURIComponent(athleteId)}&context=target_list&flow_mode=outbound`}
           className="inline-flex items-center rounded-md bg-[#2E7040] px-4 py-2 text-sm font-medium text-white hover:bg-[#285F36]"
         >
           Open Mystery Machine to prospect for {athleteName}

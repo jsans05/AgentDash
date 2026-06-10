@@ -8,7 +8,7 @@ import {
 export const ASK_USER_QUESTION_TOOL = "ask_user_question";
 export const USER_QUESTION_OTHER_ID = "__other__";
 
-export type UserQuestionOption = { id: string; label: string };
+export type UserQuestionOption = { id: string; label: string; category?: string };
 
 export type UserQuestionPrompt = {
   type: "multi_select";
@@ -41,20 +41,40 @@ export type PendingTurnState = {
   model_messages: unknown[];
 };
 
+export const CATEGORIZED_PICKER_OPTION_CAP = 120;
+
 const optionSchema = z.object({
-  id: z.string().trim().min(1).max(80),
+  id: z.string().trim().min(1).max(120),
   label: z.string().trim().min(1).max(200),
+  category: z.string().trim().min(1).max(80).optional(),
 });
 
-export const askUserQuestionArgsSchema = z.object({
+function optionCapForArgs(options: Array<{ category?: string }>): number {
+  return options.some((option) => Boolean(option.category))
+    ? CATEGORIZED_PICKER_OPTION_CAP
+    : INTEREST_PICKER_OPTION_CAP;
+}
+
+export const askUserQuestionArgsSchema = z
+  .object({
   question: z.string().trim().min(1).max(500),
-  options: z.array(optionSchema).min(2).max(INTEREST_PICKER_OPTION_CAP),
+  options: z.array(optionSchema).min(2),
   allow_multiple: z.boolean().optional().default(true),
   allow_other: z.boolean().optional().default(false),
   allow_skip: z.boolean().optional().default(true),
   min_selections: z.number().int().min(0).max(20).optional(),
   max_selections: z.number().int().min(1).max(20).optional(),
-});
+})
+  .superRefine((value, ctx) => {
+    const cap = optionCapForArgs(value.options);
+    if (value.options.length > cap) {
+      ctx.addIssue({
+        code: "custom",
+        message: `Too many options (max ${cap})`,
+        path: ["options"],
+      });
+    }
+  });
 
 export const interactionResponseSchema = z.object({
   conversation_id: z.string().trim().min(1).max(120),
@@ -80,9 +100,14 @@ function preprocessInterestPickerArgs(raw: unknown): unknown {
     const row = o as Record<string, unknown>;
     const id = String(row.id ?? row.label ?? "").trim();
     const label = String(row.label ?? row.id ?? "").trim();
-    if (id && label) opts.push({ id, label });
+    const category = String(row.category ?? "").trim();
+    if (id && label) {
+      opts.push(category ? { id, label, category } : { id, label });
+    }
   }
-  r.options = expandInterestPickerOptionsIfNeeded(question, opts);
+  if (!opts.some((option) => option.category)) {
+    r.options = expandInterestPickerOptionsIfNeeded(question, opts);
+  }
   return r;
 }
 

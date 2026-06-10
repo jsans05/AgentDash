@@ -45,7 +45,7 @@ export function CompanyContactsTable({ companyId, companyName }: { companyId: st
     setError(null);
     try {
       const res = await fetch(`/api/crm/companies/${companyId}/contacts`, { credentials: "include" });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error || "Failed to load contacts");
       setContacts(mapRows(data.contacts));
     } catch (e) {

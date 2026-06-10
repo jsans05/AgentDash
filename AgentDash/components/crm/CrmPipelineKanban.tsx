@@ -1092,6 +1092,7 @@ function CompanySlideOver({
         onStreamToken?: (text: string) => void;
         onStreamEvent?: (event: ChatSseEvent) => void;
         interactionResponse?: InteractionResponsePayload;
+        flowMode?: "outbound" | "inbound" | "email" | "auto";
       }
     ): Promise<PostAiChatResult> => {
       const contacts: string[] = [];
@@ -1246,6 +1247,8 @@ function CompanySlideOver({
             memory_notes: project.memoryNotes,
           },
           mode: options?.mode ?? "default",
+          flow_mode: options?.flowMode ?? "email",
+          ui_context: "crm_pipeline",
         },
         {
           signal: options?.signal,
@@ -2354,6 +2357,7 @@ function DraftingTab({
               roleScope={role}
               onSend={onSendChat}
               layout="embedded"
+              flowMode="email"
               embeddedDedicatedProjectName={`Pipeline draft ${card.id}`}
               placeholder="Draft outreach…"
               onAssistantReply={onAssistantReply}

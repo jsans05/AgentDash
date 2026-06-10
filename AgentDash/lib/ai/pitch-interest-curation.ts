@@ -2,13 +2,14 @@ import type { createServerClient } from "@/lib/supabase/server";
 import type { Profile } from "@/lib/supabase/types";
 import { audiencePercentPoints, getAthleteAudienceProfile } from "@/lib/athlete-data";
 import { getRelevantAudienceInterests } from "@/lib/ai/getRelevantAudienceInterests";
-import { getInterestCategoriesForBrandType } from "@/lib/industry-interest-map";
+import { getInterestCategoriesForBrandType, type IndustryInterestKey } from "@/lib/industry-interest-map";
 import type { PitchType } from "@/lib/ai/pitch-spec";
 import {
   computeRosterAudienceSummary,
   getRosterAthleteIdsForProfile,
   rankMappedInterestsOnRoster,
 } from "@/lib/ai/roster-audience";
+import { buildSuggestedPitchAngles, type SuggestedPitchAngle } from "@/lib/ai/pitch-angle-curation";
 
 type SupabaseClient = Awaited<ReturnType<typeof createServerClient>>;
 
@@ -34,6 +35,7 @@ export type PitchInterestCurationResult = {
   industry_key: string | null;
   mapped_valid_categories: string[];
   suggested_interests: CuratedInterestSuggestion[];
+  suggested_angles: SuggestedPitchAngle[];
   suggested_demographics: CuratedDemographicLine[];
   interest_strength: "strong" | "weak" | "unknown";
   rationale: string;
@@ -42,6 +44,24 @@ export type PitchInterestCurationResult = {
 function interestStrengthLabel(maxPct: number | null): "strong" | "weak" | "unknown" {
   if (maxPct == null) return "unknown";
   return maxPct >= 6 ? "strong" : "weak";
+}
+
+function attachSuggestedAngles(
+  result: Omit<PitchInterestCurationResult, "suggested_angles"> & { suggested_angles?: SuggestedPitchAngle[] },
+  audience: Awaited<ReturnType<typeof getAthleteAudienceProfile>> | null
+): PitchInterestCurationResult {
+  const suggested_angles =
+    result.suggested_angles ??
+    buildSuggestedPitchAngles({
+      audience,
+      suggestedInterests: result.suggested_interests,
+      interestStrength: result.interest_strength,
+      industryKey: (result.industry_key as IndustryInterestKey | null) ?? null,
+      mappedCategories: result.mapped_valid_categories,
+      companyName: result.company_name,
+      targetIndustryOrCategory: result.target_industry_or_category,
+    });
+  return { ...result, suggested_angles };
 }
 
 function buildRationale(params: {
@@ -122,23 +142,26 @@ export async function curatePitchInterests(params: {
     const strength =
       maxRoster > 0 ? "strong" : mappedCategories.length > 0 ? "weak" : "unknown";
 
-    return {
-      pitch_type,
-      company_name,
-      target_industry_or_category: target,
-      industry_key: industryKey,
-      mapped_valid_categories: mappedCategories,
-      suggested_interests,
-      suggested_demographics: [],
-      interest_strength: strength,
-      rationale: buildRationale({
-        companyName: company_name,
-        industryKey,
-        suggested: suggested_interests,
-        strength,
-        scope: "roster",
-      }),
-    };
+    return attachSuggestedAngles(
+      {
+        pitch_type,
+        company_name,
+        target_industry_or_category: target,
+        industry_key: industryKey,
+        mapped_valid_categories: mappedCategories,
+        suggested_interests,
+        suggested_demographics: [],
+        interest_strength: strength,
+        rationale: buildRationale({
+          companyName: company_name,
+          industryKey,
+          suggested: suggested_interests,
+          strength,
+          scope: "roster",
+        }),
+      },
+      null
+    );
   }
 
   if (
@@ -197,23 +220,26 @@ export async function curatePitchInterests(params: {
       });
     }
 
-    return {
-      pitch_type,
-      company_name,
-      target_industry_or_category: target,
-      industry_key: industryKey,
-      mapped_valid_categories: mappedCategories,
-      suggested_interests,
-      suggested_demographics,
-      interest_strength: strength,
-      rationale: buildRationale({
-        companyName: company_name,
-        industryKey,
-        suggested: suggested_interests,
-        strength,
-        scope: "athlete",
-      }),
-    };
+    return attachSuggestedAngles(
+      {
+        pitch_type,
+        company_name,
+        target_industry_or_category: target,
+        industry_key: industryKey,
+        mapped_valid_categories: mappedCategories,
+        suggested_interests,
+        suggested_demographics,
+        interest_strength: strength,
+        rationale: buildRationale({
+          companyName: company_name,
+          industryKey,
+          suggested: suggested_interests,
+          strength,
+          scope: "athlete",
+        }),
+      },
+      audience
+    );
   }
 
   if (mappedCategories.length > 0 && needsRosterRanking) {
@@ -227,31 +253,31 @@ export async function curatePitchInterests(params: {
   }
 
   const fallbackNames = mappedCategories.slice(0, maxSuggestions);
-  return {
-    pitch_type,
-    company_name,
-    target_industry_or_category: target,
-    industry_key: industryKey,
-    mapped_valid_categories: mappedCategories,
-    suggested_interests: fallbackNames.map((interest_name) => ({
-      interest_name,
-      athlete_pct: null,
-      roster_audience_count: null,
-      roster_athlete_count: null,
-    })),
-    suggested_demographics: [],
-    interest_strength: fallbackNames.length ? "weak" : "unknown",
-    rationale: buildRationale({
-      companyName: company_name,
-      industryKey,
-      suggested: fallbackNames.map((interest_name) => ({
-        interest_name,
-        athlete_pct: null,
-        roster_audience_count: null,
-        roster_athlete_count: null,
-      })),
-      strength: fallbackNames.length ? "weak" : "unknown",
-      scope: "athlete",
-    }),
-  };
+  const suggested_interests = fallbackNames.map((interest_name) => ({
+    interest_name,
+    athlete_pct: null,
+    roster_audience_count: null,
+    roster_athlete_count: null,
+  }));
+  const strength = fallbackNames.length ? "weak" : "unknown";
+  return attachSuggestedAngles(
+    {
+      pitch_type,
+      company_name,
+      target_industry_or_category: target,
+      industry_key: industryKey,
+      mapped_valid_categories: mappedCategories,
+      suggested_interests,
+      suggested_demographics: [],
+      interest_strength: strength,
+      rationale: buildRationale({
+        companyName: company_name,
+        industryKey,
+        suggested: suggested_interests,
+        strength,
+        scope: "athlete",
+      }),
+    },
+    null
+  );
 }

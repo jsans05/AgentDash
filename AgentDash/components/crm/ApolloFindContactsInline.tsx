@@ -97,9 +97,9 @@ export function ApolloFindContactsInline({
         credentials: "include",
         body: JSON.stringify(body),
       });
-      const data = (await res.json()) as FindContactsResult;
+      const data = (await res.json().catch(() => ({}))) as FindContactsResult;
       if (!res.ok) {
-        throw new Error(data?.error || "Find contacts failed");
+        throw new Error(data?.error || `Find contacts failed (${res.status})`);
       }
       onContacts(data.contacts ?? []);
       const found = data.found ?? 0;

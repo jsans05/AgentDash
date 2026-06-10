@@ -1,6 +1,7 @@
 import type { createServerClient } from "@/lib/supabase/server";
 import type { Profile } from "@/lib/supabase/types";
 import { audiencePercentPoints, getAthleteAudienceProfile } from "@/lib/athlete-data";
+import { athletePitchAngleInsightLines, type PitchAngle } from "@/lib/ai/pitch-angle-bullets";
 import { buildDraftFromTemplate, bulletizeProofPoints, normalizeSportForPitch } from "@/lib/ai/email-generation";
 import { getActiveEmailTemplate } from "@/lib/ai/email-template-store";
 import {
@@ -30,6 +31,8 @@ import type { PitchAthleteSpotlight } from "@/lib/ai/pitch-fact-sheet";
 
 export type { PitchAthleteSpotlight };
 
+export type { PitchAngle } from "@/lib/ai/pitch-angle-bullets";
+
 export type ComposePitchEmailInput = {
   supabase: SupabaseClient;
   profile: Profile;
@@ -38,6 +41,8 @@ export type ComposePitchEmailInput = {
   recipient_name?: string;
   /** Confirmed interest categories (user and/or auto-curated) */
   interest_names: string[];
+  /** Multi-dimensional audience signals (single_athlete only; multi-athlete types ignore) */
+  pitch_angles?: PitchAngle[];
   target_industry_or_category?: string | null;
   athlete_id?: string | null;
   /** For multi_athlete_combined and multi_athlete_per_contact batch */
@@ -352,6 +357,7 @@ async function composeMultiAthleteCombinedEmail(
   if (pastLine) blocks.push("", pastLine);
   blocks.push("", PLEASURE_LINE, "", teamLine);
 
+  // TODO: multi-athlete pitch_angles aggregation — for now ignore pitch_angles and use interest_names only.
   for (let i = 0; i < spotlights.length; i++) {
     const athlete = spotlights[i];
     const sport = normalizeSportForPitch(athlete.athlete_sport);
@@ -489,9 +495,13 @@ export async function composePitchEmail(input: ComposePitchEmailInput): Promise<
     }
 
     const intro_line = athleteBridgeLine(athlete_name, athlete_sport, company_name, 0);
+    const pitchAngles =
+      input.pitch_type === "single_athlete" && input.pitch_angles?.length ? input.pitch_angles : undefined;
     const proofLines =
       audienceProfile != null
-        ? athleteAudienceInsightLines(audienceProfile, effectiveInterests, athlete_name, 3)
+        ? pitchAngles
+          ? athletePitchAngleInsightLines(audienceProfile, pitchAngles, athlete_name)
+          : athleteAudienceInsightLines(audienceProfile, effectiveInterests, athlete_name, 3)
         : audienceProofFromInterests(curation.suggested_interests, effectiveInterests, undefined);
     const accoladeLines = (spotlight?.accolades ?? []).slice(0, 2).map((a) => String(a).trim()).filter(Boolean);
     const proof_points = bulletizeProofPoints(

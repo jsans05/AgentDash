@@ -11,6 +11,8 @@ export type AIFlowIntent =
 
 export type ClassifyFlowIntentOptions = {
   pipelineDrafting?: boolean;
+  /** When set (e.g. from Outreach tab), casual prospecting phrases route to outbound. */
+  athleteId?: string | null;
 };
 
 export type ChatBulkImportIntent = {
@@ -119,28 +121,50 @@ export function detectInboundCompanyAthleteMatchIntent(messages: any[]): boolean
     /which athlete(s)? (should|to|would|might|could)/.test(text) ||
     /find athletes for/.test(text) ||
     /which athletes? (for|should|fit|match)/.test(text) ||
-    /who should we pitch/.test(text) ||
+    /who should (they|we) pitch to\b/.test(text) ||
     (/company|brand|eyewear|sponsor|partnership/.test(text) &&
       /(who should|which athlete|pick\b|recommend)/.test(text))
   );
 }
 
-export function detectCompanyTargetsIntent(messages: any[]): boolean {
+export function detectCompanyTargetsIntent(
+  messages: any[],
+  options?: ClassifyFlowIntentOptions
+): boolean {
   const text = latestUserText(messages);
   if (!text) return false;
 
-  // If they're explicitly asking for an email/outreach draft, let the email intents win.
-  if (/(email|outreach|reach out|intro)/.test(text)) return false;
+  // Email-draft phrasing wins over outbound prospecting.
+  if (/(draft|write|compose|send).*(email|outreach)/.test(text)) return false;
+  if (/\bemail\b.*(for|to)\b/.test(text)) return false;
+
+  const hasAthleteContext =
+    Boolean(String(options?.athleteId ?? "").trim()) ||
+    /\bfor\b.+/.test(text) ||
+    /'s\b/.test(text) ||
+    /\bathlete\b/.test(text);
 
   const mentionsTargets =
-    /(what|which|who).*(companies|brands|sponsors|sponsorships|targets)|find.*(sponsors|sponsorships|brands|companies)|prospect.*(for|to)|sponsor.*(for|to)/.test(
+    /(what|which|who).*(companies|brands|sponsors|sponsorships|targets)|find.*(sponsors|sponsorships|brands|companies)|prospect|sponsor.*(for|to)/.test(
       text
-    ) || /(get|give|list|suggest).*(companies|brands|sponsors|targets)/.test(text);
+    ) ||
+    /(get|give|list|suggest).*(companies|brands|sponsors|targets)/.test(text) ||
+    /\bfocus on\b.*\bcompanies\b/.test(text) ||
+    /who should (they|we) pitch for\b/.test(text);
 
-  // Heuristic: must mention an athlete reference ("for X", "for <athlete>", "<athlete>'s").
-  const mentionsAthleteRef = /\bfor\b.+/.test(text) || /'s\b/.test(text) || /\bathlete\b/.test(text);
+  if (mentionsTargets && hasAthleteContext) return true;
 
-  return mentionsTargets && mentionsAthleteRef;
+  // Casual outbound phrasing when athlete is scoped via session/query param.
+  if (
+    String(options?.athleteId ?? "").trim() &&
+    (/\blet'?s prospect\b/.test(text) ||
+      /\bprospect\b/.test(text) ||
+      /\b(sponsors?|brands?|companies)\b/.test(text))
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 /**
@@ -402,6 +426,6 @@ export function classifyFlowIntent(messages: any[], options?: ClassifyFlowIntent
   if (detectGeneralOutreachIntent(messages)) return "email_general_outreach";
   if (detectEmailIntent(messages)) return "email_single_athlete";
   if (detectInboundCompanyAthleteMatchIntent(messages)) return "inbound_company_athlete_match";
-  if (detectCompanyTargetsIntent(messages)) return "company_targets";
+  if (detectCompanyTargetsIntent(messages, options)) return "company_targets";
   return "general";
 }

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   classifyFlowIntent,
+  detectCompanyTargetsIntent,
   detectInboundCompanyAthleteMatchIntent,
   detectTargetListOutreachPushIntent,
   detectTargetListSaveIntent,
@@ -17,6 +18,17 @@ test("detectInboundCompanyAthleteMatchIntent matches sponsor picking athletes", 
   ];
   assert.equal(detectInboundCompanyAthleteMatchIntent(messages), true);
   assert.equal(classifyFlowIntent(messages), "inbound_company_athlete_match");
+});
+
+test("detectCompanyTargetsIntent matches who should we pitch for athlete", () => {
+  const messages = [{ role: "user", content: "Who should we pitch for Jordan?" }];
+  assert.equal(detectCompanyTargetsIntent(messages), true);
+  assert.equal(classifyFlowIntent(messages), "company_targets");
+});
+
+test("detectInboundCompanyAthleteMatchIntent matches pitch to company", () => {
+  const messages = [{ role: "user", content: "Who should we pitch to Nike?" }];
+  assert.equal(detectInboundCompanyAthleteMatchIntent(messages), true);
 });
 
 test("detectTargetListOutreachPushIntent requires target list phrase and email action", () => {
