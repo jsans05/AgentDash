@@ -11,6 +11,12 @@ type ChatCompletionChunk = {
     };
     finish_reason?: string | null;
   }>;
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_creation_input_tokens: number;
+    cache_read_input_tokens: number;
+  };
 };
 
 export type StreamedAssistantMessage = {
@@ -29,7 +35,16 @@ export async function streamChatCompletionToMessage(
     onToken?: (text: string) => void;
     onToolCallsDetected?: (names: string[]) => void;
   }
-): Promise<{ message: StreamedAssistantMessage; finishReason: string | null }> {
+): Promise<{
+  message: StreamedAssistantMessage;
+  finishReason: string | null;
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_creation_input_tokens: number;
+    cache_read_input_tokens: number;
+  };
+}> {
   const stream = await createStream();
   let content = "";
   const toolCallsByIndex: Record<
@@ -38,8 +53,19 @@ export async function streamChatCompletionToMessage(
   > = {};
   let finishReason: string | null = null;
   let sawToolCallDelta = false;
+  let usage:
+    | {
+        input_tokens: number;
+        output_tokens: number;
+        cache_creation_input_tokens: number;
+        cache_read_input_tokens: number;
+      }
+    | undefined;
 
   for await (const chunk of stream) {
+    if (chunk.usage) {
+      usage = chunk.usage;
+    }
     const choice = chunk.choices[0];
     if (!choice) continue;
     if (choice.finish_reason) finishReason = choice.finish_reason;
@@ -87,5 +113,6 @@ export async function streamChatCompletionToMessage(
       ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
     },
     finishReason,
+    usage,
   };
 }

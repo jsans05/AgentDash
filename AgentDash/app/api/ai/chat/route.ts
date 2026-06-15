@@ -26,6 +26,8 @@ import { parseChatModelTier, resolveChatModelId } from "@/lib/ai/chat-model";
 import {
   createChatCompletionStreamWithReasoningCompat,
   createChatCompletionWithReasoningCompat,
+  type ChatCompletionUsage,
+  type ChatMessage,
 } from "@/lib/ai/anthropic-chat-client";
 import { streamChatCompletionToMessage } from "@/lib/ai/openai-chat-stream";
 import { stripSponsorGapCopy } from "@/lib/ai/email-copy-guard";
@@ -1211,6 +1213,10 @@ type TurnTelemetry = {
   flow_mode: string;
   flow_intent: string;
   flow_mode_enforcement: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_read_input_tokens: number;
 };
 
 const ATHLETE_ID_TOOL_NAMES = new Set([
@@ -1704,9 +1710,19 @@ REQUIRED behavior — do not deviate:
       includeBulkImport,
     });
     const activeToolDefinitions = filterToolDefinitions(TOOLS, resolvedFlowMode);
-    const SYSTEM_PROMPT = `${baseSystemPrompt}${userMemoryPrompt}${toneSamplePrompt}${projectPrompt}${extraPrompt}${crmPipelineAddon}${targetListSessionAddon}${modePromptAddon}${attachmentAddon}${chatBulkImportAddon}${targetListOutreachAddon}${
+    const dynamicSystemContext = `${userMemoryPrompt}${toneSamplePrompt}${projectPrompt}${extraPrompt}${crmPipelineAddon}${targetListSessionAddon}${modePromptAddon}${attachmentAddon}${chatBulkImportAddon}${targetListOutreachAddon}${
       flowPromptAddon ? `\n\n${flowPromptAddon}` : ""
     }${interestGateAddons ? `\n\n${interestGateAddons}` : ""}${emailInterestAddon ? `\n\n${emailInterestAddon}` : ""}`;
+    const initialSystemMessages: ChatMessage[] = [
+      {
+        role: "system",
+        content: baseSystemPrompt,
+        cache_control: { type: "ephemeral" },
+      },
+      ...(dynamicSystemContext.trim()
+        ? [{ role: "system" as const, content: dynamicSystemContext }]
+        : []),
+    ];
 
     const tools = await createAITools(profile);
     const sources: string[] = [];
@@ -1744,7 +1760,7 @@ REQUIRED behavior — do not deviate:
     };
 
     const runToolCallingAgent = async (
-      systemPrompt: string,
+      systemMessages: ChatMessage[],
       sseEmit?: (event: ChatSseEvent) => void,
       agentOptions?: { resumeMessages?: any[] }
     ): Promise<{
@@ -1778,13 +1794,7 @@ REQUIRED behavior — do not deviate:
             };
           }
         }
-        currentMessages = [
-          {
-            role: "system",
-            content: systemPrompt,
-          },
-          ...messagesForModel,
-        ];
+        currentMessages = [...systemMessages, ...messagesForModel];
       }
       const turnStart = Date.now();
       let iterationCount = 0;
@@ -1793,6 +1803,19 @@ REQUIRED behavior — do not deviate:
       const MAX_TOOL_ITERATIONS = 6;
       let maxIterations = MAX_TOOL_ITERATIONS;
       let lastMessage: any = null;
+      const usageTotals: ChatCompletionUsage = {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      };
+      const accumulateUsage = (usage?: ChatCompletionUsage) => {
+        if (!usage) return;
+        usageTotals.input_tokens += usage.input_tokens;
+        usageTotals.output_tokens += usage.output_tokens;
+        usageTotals.cache_creation_input_tokens += usage.cache_creation_input_tokens;
+        usageTotals.cache_read_input_tokens += usage.cache_read_input_tokens;
+      };
       const emitTurnSummary = (hitIterationCap: boolean): TurnTelemetry => {
         const summary: TurnTelemetry = {
           iterations: iterationCount,
@@ -1802,6 +1825,10 @@ REQUIRED behavior — do not deviate:
           flow_mode: resolvedFlowMode,
           flow_intent: flowIntent,
           flow_mode_enforcement: getFlowModeEnforcement(),
+          input_tokens: usageTotals.input_tokens,
+          output_tokens: usageTotals.output_tokens,
+          cache_creation_input_tokens: usageTotals.cache_creation_input_tokens,
+          cache_read_input_tokens: usageTotals.cache_read_input_tokens,
         };
         console.log("[AI Chat] Turn summary", JSON.stringify(summary));
         return summary;
@@ -1859,6 +1886,7 @@ REQUIRED behavior — do not deviate:
         messages: currentMessages,
         tools: activeToolDefinitions,
         tool_choice: "auto" as const,
+        cache_tools: true,
       };
 
       while (maxIterations-- > 0) {
@@ -1867,7 +1895,7 @@ REQUIRED behavior — do not deviate:
           `[AI Chat] Iteration ${MAX_TOOL_ITERATIONS - maxIterations}, messages: ${currentMessages.length}`
         );
         if (sseEmit) {
-          const { message, finishReason } = await streamChatCompletionToMessage(
+          const { message, finishReason, usage } = await streamChatCompletionToMessage(
             () =>
               createChatCompletionStreamWithReasoningCompat({
                 ...completionBody,
@@ -1879,6 +1907,7 @@ REQUIRED behavior — do not deviate:
                 sseEmit({ type: "meta", phase: "tools", tools }),
             }
           );
+          accumulateUsage(usage);
           lastMessage = message;
           console.log(
             `[AI Chat] Response finish_reason: ${finishReason}, tool_calls: ${lastMessage.tool_calls?.length ?? 0}`
@@ -1888,6 +1917,7 @@ REQUIRED behavior — do not deviate:
             ...completionBody,
             messages: currentMessages,
           });
+          accumulateUsage(completion.usage);
           lastMessage = completion.choices[0].message;
           console.log(
             `[AI Chat] Response finish_reason: ${completion.choices[0]?.finish_reason}, tool_calls: ${lastMessage.tool_calls?.length ?? 0}`
@@ -2363,18 +2393,20 @@ REQUIRED behavior — do not deviate:
           ];
           const forcedToolChoice = hitIterationCap ? ("none" as const) : ("auto" as const);
           if (sseEmit) {
-            const { message } = await streamChatCompletionToMessage(
+            const { message, usage } = await streamChatCompletionToMessage(
               () =>
                 createChatCompletionStreamWithReasoningCompat({
                   model: resolvedChatModel,
                   messages: forcedMessages,
                   tools: activeToolDefinitions,
                   tool_choice: forcedToolChoice,
+                  cache_tools: true,
                 }),
               {
                 onToken: (text) => sseEmit({ type: "token", text }),
               }
             );
+            accumulateUsage(usage);
             lastMessage = message;
           } else {
             const completion = await createChatCompletionWithReasoningCompat({
@@ -2382,7 +2414,9 @@ REQUIRED behavior — do not deviate:
               messages: forcedMessages,
               tools: activeToolDefinitions,
               tool_choice: forcedToolChoice,
+              cache_tools: true,
             });
+            accumulateUsage(completion.usage);
             lastMessage = completion.choices[0].message;
           }
         } catch {
@@ -2582,7 +2616,7 @@ REQUIRED behavior — do not deviate:
           };
           try {
             const agentResult = await runToolCallingAgent(
-              SYSTEM_PROMPT,
+              initialSystemMessages,
               emit,
               resumeMessages ? { resumeMessages } : undefined
             );
@@ -2619,7 +2653,7 @@ REQUIRED behavior — do not deviate:
     }
 
     const agentResult = await runToolCallingAgent(
-      SYSTEM_PROMPT,
+      initialSystemMessages,
       undefined,
       resumeMessages ? { resumeMessages } : undefined
     );

@@ -13,16 +13,21 @@ type ChatCompletionChunk = {
     };
     finish_reason?: string | null;
   }>;
+  usage?: ChatCompletionUsage;
 };
 import {
   ANTHROPIC_CHAT_MODEL,
   ANTHROPIC_MAX_TOKENS,
   getAnthropicApiKey,
+  isAnthropicPromptCacheEnabled,
 } from "@/lib/ai/llm-chat-defaults";
+
+export type CacheControl = { type: "ephemeral" };
 
 export type ChatMessage = {
   role: "system" | "user" | "assistant" | "tool";
   content?: string | null;
+  cache_control?: CacheControl;
   tool_calls?: Array<{
     id: string;
     type: "function";
@@ -48,6 +53,15 @@ export type ChatCompletionBody = {
   temperature?: number;
   max_completion_tokens?: number;
   stream?: boolean;
+  /** When true, marks the last tool with cache_control (requires prompt cache enabled). */
+  cache_tools?: boolean;
+};
+
+export type ChatCompletionUsage = {
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_read_input_tokens: number;
 };
 
 export type OpenAICompatibleAssistantMessage = {
@@ -62,6 +76,7 @@ export type OpenAICompatibleAssistantMessage = {
 
 type AnthropicMessageParam = Anthropic.Messages.MessageParam;
 type AnthropicTool = Anthropic.Messages.Tool;
+type AnthropicSystem = string | Anthropic.Messages.TextBlockParam[];
 
 let client: Anthropic | null = null;
 
@@ -89,23 +104,39 @@ function parseToolArguments(raw: string): Record<string, unknown> {
   }
 }
 
-function toAnthropicTools(tools: ChatToolDefinition[] | undefined): AnthropicTool[] | undefined {
-  if (!tools?.length) return undefined;
-  return tools.map((tool) => ({
-    name: tool.function.name,
-    description: tool.function.description,
-    input_schema: (tool.function.parameters ?? {
-      type: "object",
-      properties: {},
-    }) as Anthropic.Messages.Tool.InputSchema,
-  }));
+function promptCacheActive(body: ChatCompletionBody, messages: ChatMessage[]): boolean {
+  if (!isAnthropicPromptCacheEnabled()) return false;
+  if (body.cache_tools) return true;
+  return messages.some((m) => m.role === "system" && m.cache_control);
 }
 
-function toAnthropicMessages(messages: ChatMessage[]): {
-  system: string | undefined;
+export function toAnthropicTools(
+  tools: ChatToolDefinition[] | undefined,
+  cacheTools: boolean
+): AnthropicTool[] | undefined {
+  if (!tools?.length) return undefined;
+  return tools.map((tool, index) => {
+    const mapped: AnthropicTool = {
+      name: tool.function.name,
+      description: tool.function.description,
+      input_schema: (tool.function.parameters ?? {
+        type: "object",
+        properties: {},
+      }) as Anthropic.Messages.Tool.InputSchema,
+    };
+    if (cacheTools && index === tools.length - 1) {
+      mapped.cache_control = { type: "ephemeral" };
+    }
+    return mapped;
+  });
+}
+
+export function toAnthropicMessages(messages: ChatMessage[], useStructuredSystem: boolean): {
+  system: AnthropicSystem | undefined;
   messages: AnthropicMessageParam[];
 } {
   const systemParts: string[] = [];
+  const systemBlocks: Anthropic.Messages.TextBlockParam[] = [];
   const anthropicMessages: AnthropicMessageParam[] = [];
 
   let pendingToolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
@@ -122,7 +153,16 @@ function toAnthropicMessages(messages: ChatMessage[]): {
   for (const message of messages) {
     if (message.role === "system") {
       const text = String(message.content ?? "").trim();
-      if (text) systemParts.push(text);
+      if (!text) continue;
+      if (useStructuredSystem) {
+        const block: Anthropic.Messages.TextBlockParam = { type: "text", text };
+        if (message.cache_control) {
+          block.cache_control = message.cache_control;
+        }
+        systemBlocks.push(block);
+      } else {
+        systemParts.push(text);
+      }
       continue;
     }
 
@@ -169,6 +209,13 @@ function toAnthropicMessages(messages: ChatMessage[]): {
 
   flushToolResults();
 
+  if (useStructuredSystem) {
+    return {
+      system: systemBlocks.length ? systemBlocks : undefined,
+      messages: anthropicMessages,
+    };
+  }
+
   return {
     system: systemParts.length ? systemParts.join("\n\n") : undefined,
     messages: anthropicMessages,
@@ -180,6 +227,22 @@ function mapStopReason(stopReason: string | null): string | null {
   if (stopReason === "tool_use") return "tool_calls";
   if (stopReason === "end_turn") return "stop";
   return stopReason;
+}
+
+type AnthropicUsageLike = {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+};
+
+function fromAnthropicUsage(usage: AnthropicUsageLike): ChatCompletionUsage {
+  return {
+    input_tokens: usage.input_tokens ?? 0,
+    output_tokens: usage.output_tokens ?? 0,
+    cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
+    cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
+  };
 }
 
 function fromAnthropicMessage(message: Anthropic.Messages.Message): {
@@ -216,9 +279,13 @@ function fromAnthropicMessage(message: Anthropic.Messages.Message): {
   };
 }
 
-function buildRequestParams(body: ChatCompletionBody): Anthropic.Messages.MessageCreateParamsNonStreaming {
-  const { system, messages } = toAnthropicMessages(body.messages);
-  const tools = toAnthropicTools(body.tools);
+export function buildRequestParams(
+  body: ChatCompletionBody
+): Anthropic.Messages.MessageCreateParamsNonStreaming {
+  const useStructuredSystem = promptCacheActive(body, body.messages);
+  const cacheTools = useStructuredSystem && Boolean(body.cache_tools);
+  const { system, messages } = toAnthropicMessages(body.messages, useStructuredSystem);
+  const tools = toAnthropicTools(body.tools, cacheTools);
   const toolChoice =
     body.tool_choice === "none"
       ? ({ type: "none" } as const)
@@ -240,6 +307,10 @@ export async function createChatCompletion(body: ChatCompletionBody) {
   const anthropic = getClient();
   const response = await anthropic.messages.create(buildRequestParams(body));
   const mapped = fromAnthropicMessage(response);
+  const usage = fromAnthropicUsage(response.usage);
+  if (usage.cache_creation_input_tokens > 0 || usage.cache_read_input_tokens > 0) {
+    console.log("[Anthropic] Prompt cache usage", JSON.stringify(usage));
+  }
   return {
     choices: [
       {
@@ -247,6 +318,7 @@ export async function createChatCompletion(body: ChatCompletionBody) {
         finish_reason: mapped.finish_reason,
       },
     ],
+    usage,
   };
 }
 
@@ -258,8 +330,13 @@ async function* anthropicStreamToOpenAIChunks(
     { id: string; name: string; arguments: string; started: boolean }
   > = {};
   let finishReason: string | null = null;
+  let usage: ChatCompletionUsage | undefined;
 
   for await (const event of stream) {
+    if (event.type === "message_start" && event.message.usage) {
+      usage = fromAnthropicUsage(event.message.usage);
+    }
+
     if (event.type === "content_block_start" && event.content_block.type === "tool_use") {
       const block = event.content_block;
       toolCallsByIndex[event.index] = {
@@ -330,6 +407,9 @@ async function* anthropicStreamToOpenAIChunks(
 
     if (event.type === "message_delta") {
       finishReason = mapStopReason(event.delta.stop_reason);
+      if (event.usage) {
+        usage = fromAnthropicUsage(event.usage);
+      }
     }
   }
 
@@ -342,6 +422,7 @@ async function* anthropicStreamToOpenAIChunks(
           finish_reason: finishReason,
         },
       ],
+      ...(usage ? { usage } : {}),
     } as ChatCompletionChunk;
   }
 }

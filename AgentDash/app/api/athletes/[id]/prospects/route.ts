@@ -102,6 +102,7 @@ ${discovery.markdown}`;
           role: "system",
           content:
             "You polish partnership justification copy in sponsorship prospecting tables. Never alter scores, websites, or company names.",
+          cache_control: { type: "ephemeral" },
         },
         { role: "user", content: polishPrompt },
       ],

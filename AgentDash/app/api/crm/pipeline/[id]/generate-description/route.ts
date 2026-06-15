@@ -71,7 +71,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   try {
     const completion = await createChatCompletion({
       messages: [
-        { role: "system", content: systemPrompt },
+        { role: "system", content: systemPrompt, cache_control: { type: "ephemeral" } },
         { role: "user", content: userPrompt },
       ],
       temperature: 0.3,

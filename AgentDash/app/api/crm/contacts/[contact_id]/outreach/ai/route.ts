@@ -101,7 +101,11 @@ export async function POST(
   try {
     const completion = await createChatCompletion({
       messages: [
-        { role: "system", content: "You write crisp sponsorship outreach notes suitable for copying into an email or CRM." },
+        {
+          role: "system",
+          content: "You write crisp sponsorship outreach notes suitable for copying into an email or CRM.",
+          cache_control: { type: "ephemeral" },
+        },
         { role: "user", content: prompt },
       ],
       temperature: 0.7,

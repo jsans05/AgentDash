@@ -153,7 +153,7 @@ export async function polishPitchEmailCopy(params: {
     const completion = await withTimeout(
       createChatCompletion({
         messages: [
-          { role: "system", content: POLISH_SYSTEM },
+          { role: "system", content: POLISH_SYSTEM, cache_control: { type: "ephemeral" } },
           {
             role: "user",
             content: buildUserPrompt(params.factSheet, toneSamples, params.revisionHint, priorErrors),

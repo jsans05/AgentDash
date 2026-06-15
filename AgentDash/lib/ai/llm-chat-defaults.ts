@@ -27,3 +27,10 @@ export function getAnthropicApiKey(): string | null {
   const key = process.env.ANTHROPIC_API_KEY?.trim();
   return key || null;
 }
+
+/** Anthropic prompt caching (ephemeral 5-min TTL). Set false to disable globally. */
+export function isAnthropicPromptCacheEnabled(): boolean {
+  const raw = process.env.ANTHROPIC_PROMPT_CACHE_ENABLED?.trim().toLowerCase();
+  if (!raw) return true;
+  return raw !== "false" && raw !== "0" && raw !== "off";
+}
