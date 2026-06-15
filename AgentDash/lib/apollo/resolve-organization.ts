@@ -27,14 +27,17 @@ export async function resolveOrganizationForCompany(
 
   if (domainFromSite) {
     const enriched = await enrichOrganizationByDomainFull(domainFromSite);
+    const patch: Record<string, string> = {};
+    if (enriched.apollo_organization_id && enriched.apollo_organization_id !== company.apollo_organization_id) {
+      patch.apollo_organization_id = enriched.apollo_organization_id;
+    }
+    if (enriched.hq_phone && !company.hq_phone) {
+      patch.hq_phone = enriched.hq_phone;
+    }
+    if (Object.keys(patch).length > 0) {
+      await supabaseAdmin.from("companies").update(patch).eq("company_id", companyId);
+    }
     if (enriched.apollo_organization_id) {
-      const patch: Record<string, string> = {};
-      if (enriched.apollo_organization_id !== company.apollo_organization_id) {
-        patch.apollo_organization_id = enriched.apollo_organization_id;
-      }
-      if (Object.keys(patch).length > 0) {
-        await supabaseAdmin.from("companies").update(patch).eq("company_id", companyId);
-      }
       return {
         company_id: companyId,
         company_name,

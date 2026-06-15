@@ -109,6 +109,7 @@ export async function enrichOrganizationByDomainFull(domain: string): Promise<Ap
       industry: null,
       description: null,
       primary_domain: clean || null,
+      hq_phone: null,
       estimated_num_employees: null,
       annual_revenue: null,
       city: null,

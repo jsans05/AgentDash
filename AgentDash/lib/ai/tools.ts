@@ -33,7 +33,7 @@ import { ilikeContains, normalizeOrIlikeFragment } from "@/lib/supabase/ilike";
 import { fetchAthleteTargetListRows } from "@/lib/crm/athlete-target-list";
 import { isEffectivelyUncategorizedCompanyCategory } from "@/lib/crm/company-category";
 import { discoverAthleteProspects } from "@/lib/ai/athlete-prospect-discovery";
-import { mergeAthleteIntoPotentialAthletes, parseOptionalMatchScore } from "@/lib/crm/potential-athletes";
+import { mergeAthleteIntoPotentialAthletes, parseOptionalMatchScore, setMatchScoreForAthlete } from "@/lib/crm/potential-athletes";
 import { searchCompanies } from "@/lib/enrichment";
 import { formatAthleteGender, normalizeAthleteGender } from "@/lib/athletes/gender";
 import { upsertContactOutreachDraft } from "@/lib/crm/target-list-outreach";
@@ -2228,6 +2228,7 @@ export async function createAITools(profile: Profile) {
       athlete_id?: string;
       athlete_name?: string;
       uncategorized_only?: boolean;
+      category_filter?: string;
       include_contacts?: boolean;
     }) => {
       const resolved = await resolveAthleteIdForPipelineTools(params);
@@ -2242,6 +2243,14 @@ export async function createAITools(profile: Profile) {
 
       if (params.uncategorized_only) {
         rows = rows.filter((r) => isEffectivelyUncategorizedCompanyCategory(r.category));
+      }
+
+      const categoryFilter = String(params.category_filter ?? "").trim();
+      if (categoryFilter) {
+        const needle = categoryFilter.toLowerCase();
+        rows = rows.filter(
+          (r) => String(r.category ?? "").trim().toLowerCase() === needle
+        );
       }
 
       const includeContacts = Boolean(params.include_contacts);
@@ -2325,6 +2334,88 @@ export async function createAITools(profile: Profile) {
           continue;
         }
         results.push({ pipeline_id: pid, ok: true, company_id: row.company_id });
+      }
+
+      return {
+        ok: true as const,
+        athlete_id: resolved.athleteId,
+        updated: results.filter((r) => r.ok).length,
+        failed: results.filter((r) => !r.ok).length,
+        results,
+      };
+    },
+
+    updateTargetListMatchScores: async (params: {
+      athlete_id?: string;
+      athlete_name?: string;
+      updates: Array<{ pipeline_id: string; match_score: number | null }>;
+    }) => {
+      const resolved = await resolveAthleteIdForPipelineTools(params);
+      if (!resolved.ok) return { ok: false as const, error: resolved.error };
+
+      const updates = Array.isArray(params.updates) ? params.updates : [];
+      if (updates.length === 0) return { ok: false as const, error: "updates array is required" };
+      if (updates.length > 80) return { ok: false as const, error: "Too many updates (max 80 per call)" };
+
+      let rows;
+      try {
+        rows = await fetchAthleteTargetListRows(supabase, profile.user_id, resolved.athleteId);
+      } catch (e: any) {
+        return { ok: false as const, error: e?.message ?? "Failed to verify target list" };
+      }
+      const allowed = new Set(rows.map((r) => r.pipeline_id));
+
+      const results: Array<{ pipeline_id: string; ok: boolean; error?: string; match_score?: number | null }> = [];
+
+      for (const u of updates) {
+        const pid = String(u.pipeline_id ?? "").trim();
+        if (!pid) {
+          results.push({ pipeline_id: "(missing)", ok: false, error: "pipeline_id is required" });
+          continue;
+        }
+        if (!allowed.has(pid)) {
+          results.push({
+            pipeline_id: pid,
+            ok: false,
+            error: "Pipeline row not on this athlete's target list or not owned by you",
+          });
+          continue;
+        }
+        const matchScore = parseOptionalMatchScore(u.match_score);
+        if (u.match_score != null && String(u.match_score).trim() !== "" && matchScore == null) {
+          results.push({ pipeline_id: pid, ok: false, error: "Invalid match_score" });
+          continue;
+        }
+
+        const { data: pipe, error: readErr } = await supabase
+          .from("crm_companies_pipeline")
+          .select("id, potential_athletes, created_by_user_id")
+          .eq("id", pid)
+          .maybeSingle();
+        if (readErr || !pipe) {
+          results.push({ pipeline_id: pid, ok: false, error: readErr?.message || "Pipeline row not found" });
+          continue;
+        }
+        if (String(pipe.created_by_user_id) !== profile.user_id) {
+          results.push({ pipeline_id: pid, ok: false, error: "Not your pipeline card" });
+          continue;
+        }
+
+        const nextAthletes = setMatchScoreForAthlete(
+          pipe.potential_athletes,
+          resolved.athleteId,
+          matchScore
+        );
+        const { error: upErr } = await supabase
+          .from("crm_companies_pipeline")
+          .update({ potential_athletes: nextAthletes })
+          .eq("id", pid)
+          .eq("created_by_user_id", profile.user_id);
+        if (upErr) {
+          results.push({ pipeline_id: pid, ok: false, error: upErr.message });
+          continue;
+        }
+        results.push({ pipeline_id: pid, ok: true, match_score: matchScore });
       }
 
       return {

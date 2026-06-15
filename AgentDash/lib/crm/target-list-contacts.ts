@@ -11,6 +11,7 @@ export type TargetListContactShape = {
   linkedin_url: string | null;
   apollo_person_id: string | null;
   apollo_reveal_status: ApolloRevealStatus;
+  apollo_phone_reveal_status: "pending" | "revealed" | null;
   outreach_email_subject?: string | null;
   outreach_email?: string | null;
   email_drafts?: unknown;
@@ -18,6 +19,7 @@ export type TargetListContactShape = {
 
 export function mapApiContactToTargetList(raw: Record<string, unknown>): TargetListContactShape {
   const status = raw.apollo_reveal_status;
+  const phoneStatus = raw.apollo_phone_reveal_status;
   return {
     contact_id: String(raw.contact_id ?? ""),
     first_name: String(raw.first_name ?? ""),
@@ -30,6 +32,8 @@ export function mapApiContactToTargetList(raw: Record<string, unknown>): TargetL
     apollo_person_id: raw.apollo_person_id != null ? String(raw.apollo_person_id) : null,
     apollo_reveal_status:
       status === "pending" || status === "revealed" ? status : null,
+    apollo_phone_reveal_status:
+      phoneStatus === "pending" || phoneStatus === "revealed" ? phoneStatus : null,
     outreach_email_subject: null,
     outreach_email: null,
     email_drafts: raw.email_drafts ?? [],

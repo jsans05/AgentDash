@@ -159,7 +159,7 @@ export default async function AthleteProfilePage({
           </nav>
         </div>
 
-        <div className="space-y-6 px-6 py-5">
+        <div className={activeTab === "outreach" ? "flex h-[calc(100dvh-15rem)] min-h-[28rem] flex-col overflow-hidden px-6 py-4" : "space-y-6 px-6 py-5"}>
           {activeTab === "profile" ? (
             <>
               {/* Basic Info */}

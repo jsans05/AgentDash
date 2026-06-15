@@ -33,6 +33,7 @@ type FindContactsResult = {
   filtered_out?: number;
   search_mode?: ApolloContactSearchMode;
   no_matches?: boolean;
+  hq_phone?: string | null;
   error?: string;
   organization?: {
     apollo_organization_name?: string | null;
@@ -48,7 +49,7 @@ type ApolloFindContactsInlineProps = {
   disabled?: boolean;
   searchOverrides?: ApolloContactSearchOverrides;
   onRefineSearchClick?: () => void;
-  onContacts: (contacts: unknown[]) => void;
+  onContacts: (contacts: unknown[], meta?: { hq_phone?: string | null }) => void;
   onError?: (message: string) => void;
 };
 
@@ -99,7 +100,7 @@ export function ApolloFindContactsInline({
       if (!res.ok) {
         throw new Error(data?.error || `Find contacts failed (${res.status})`);
       }
-      onContacts(data.contacts ?? []);
+      onContacts(data.contacts ?? [], { hq_phone: data.hq_phone ?? null });
       const found = data.found ?? 0;
       setPage(pageNum);
       setLastFound(found);

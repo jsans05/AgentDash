@@ -13,6 +13,28 @@ import type { PostAiChatResult } from "@/lib/ai/chat-fetch";
 import type { ChatSseEvent, ChatSseWebSource } from "@/lib/ai/chat-sse";
 import type { FlowMode } from "@/lib/ai/flow-mode";
 import { deriveRoutingFlowMode, type ChatUiContext } from "./chat-routing";
+
+function mysteryMachineEmptyStateLines(uiContext?: ChatUiContext): string[] {
+  switch (uiContext) {
+    case "target_list":
+      return [
+        "Prospect brands and add them to this list",
+        "Draft or improve outreach for listed companies",
+        "Use quick actions above to categorize or bulk-edit",
+      ];
+    case "crm_pipeline":
+      return [
+        "Draft outreach for this pipeline company",
+        "Refine copy; approved saves go to the card",
+      ];
+    default:
+      return [
+        "Find sponsors for an athlete, or athletes for a brand",
+        "Draft outreach emails with audience data",
+        "Import prospects to CRM or target lists",
+      ];
+  }
+}
 import type { InteractionResponsePayload, UserQuestionPrompt } from "@/lib/ai/user-question";
 import { formatInteractionUserSummary } from "@/lib/ai/user-question";
 import {
@@ -281,6 +303,8 @@ export type ChatPanelProps = {
   contextAthleteName?: string;
   /** Hides project sidebar; use in embedded panels (e.g. CRM drafting). */
   layout?: "default" | "embedded";
+  /** Hides title, project name, and role badge (embedded side panels). */
+  hideHeader?: boolean;
   /** Fired after a successful assistant reply (send or regenerate). */
   onAssistantReply?: (content: string) => void;
   /** Fired when the user edits an inline email draft card (subject/body). */
@@ -300,6 +324,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
     onSend,
     placeholder = "Message...",
     layout = "default",
+    hideHeader = false,
     onAssistantReply,
     onEmailDraftChange,
     embeddedDedicatedProjectName,
@@ -1234,8 +1259,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   return (
     <div
       className={cn(
-        "flex h-full min-h-0 overflow-hidden rounded-2xl border border-white/10 bg-[#101311] text-[#ECE7DF] shadow-[0_20px_60px_rgba(0,0,0,0.45)]",
-        layout === "embedded" ? "flex-col" : ""
+        "flex h-full min-h-0 overflow-hidden text-[#ECE7DF]",
+        layout === "embedded"
+          ? hideHeader
+            ? "flex-col bg-transparent"
+            : "flex-col rounded-2xl border border-white/10 bg-[#101311] shadow-[0_20px_60px_rgba(0,0,0,0.45)]"
+          : "rounded-2xl border border-white/10 bg-[#101311] shadow-[0_20px_60px_rgba(0,0,0,0.45)]"
       )}
     >
       {layout === "default" && (
@@ -1344,7 +1373,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
       )}
 
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-[#111412]">
-        {/* Top: title + role badge */}
+        {!hideHeader ? (
         <div className="flex shrink-0 items-center justify-between gap-3 border-b border-white/10 px-6 py-4">
           <div className="min-w-0">
             <h2 className="truncate text-lg font-semibold text-[#F4F1EB]">{title}</h2>
@@ -1359,6 +1388,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
             {roleScope}
           </Badge>
         </div>
+        ) : null}
 
         {/* Scrollable messages */}
         <ScrollArea ref={scrollRef} className="min-h-0 flex-1 px-6">
@@ -1367,9 +1397,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
             <div className="rounded-3xl border border-white/10 bg-[#171B18]/80 px-8 py-10 text-center text-sm text-[#C9C2B6]">
               <p className="mb-2 text-base font-medium text-[#F4F1EB]">How can Mystery Machine help?</p>
               <ul className="inline-block space-y-1.5 text-left">
-                <li>• Use + to pick Outbound, Inbound, or Email — or chat in default mode</li>
-                <li>• Prospect for one athlete or your full roster</li>
-                <li>• Draft outreach, sponsorship notes, and follow-ups</li>
+                {mysteryMachineEmptyStateLines(uiContext).map((line) => (
+                  <li key={line}>• {line}</li>
+                ))}
               </ul>
             </div>
           )}

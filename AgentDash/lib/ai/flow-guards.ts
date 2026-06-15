@@ -122,7 +122,7 @@ export function getAthleteTargetListSessionAddon(athleteId: string, athleteName?
 
 ━━━ ATHLETE TARGET LIST SESSION (FLOW 8D) ━━━
 ${nameLine}
-The user opened Mystery Machine from this athlete's **Target List / Outreach** tab in **Outbound** mode. Default task: find sponsor companies via getSponsorshipTargets + generateAthleteProspectList. When the user asks to save outreach copy, use the athlete Target List spreadsheet columns below — **not** CRM pipeline \`draft_messages\`.
+The user opened Mystery Machine from this athlete's **Target List / Outreach** tab (inline AI panel or full page). When the user asks to save outreach copy, use the athlete Target List spreadsheet columns below — **not** CRM pipeline \`draft_messages\`.
 
 You MUST in **this** assistant turn when saving outreach copy:
 1) Call **getAthleteTargetList** with \`athlete_id: "${id}"\` (\`include_contacts: true\` when saving per-contact copy) → \`pipeline_id\` for each company.
@@ -130,6 +130,7 @@ You MUST in **this** assistant turn when saving outreach copy:
 
 You must **NOT** use **pushEmailToCrm** for target-list saves (that writes CRM drafting only).
 Do not claim the email is on the target list unless **updateTargetListOutreach** returned \`ok: true\` and \`updated\` > 0.
+If SESSION CONTEXT lists selected \`pipeline_id\` values or a focused row, prefer those over asking which company — use them directly when the user says "this company" or "selected companies".
 If a company is missing from the list, use **bulkImportCompaniesToCrmForAthlete** or **pushCompanyToCrmPipeline** with \`athlete_id: "${id}"\`, then **updateTargetListOutreach**.
 `.trim();
 }

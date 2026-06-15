@@ -43,6 +43,7 @@ export type ApolloEnrichedOrganization = {
   industry: string | null;
   description: string | null;
   primary_domain: string | null;
+  hq_phone: string | null;
   estimated_num_employees: number | null;
   annual_revenue: number | null;
   city: string | null;

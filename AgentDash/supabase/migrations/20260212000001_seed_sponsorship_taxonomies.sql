@@ -123,6 +123,37 @@ INSERT INTO public.sponsorship_taxonomies (sport, tier, category, sort_order) VA
   ('Supercross / Motocross (Moto)', 'ENDEMIC', 'Protein / Supplements', 26)
 ON CONFLICT (sport, tier, category) DO NOTHING;
 
+-- Moto GP (clone of Supercross / Motocross endemic)
+INSERT INTO public.sponsorship_taxonomies (sport, tier, category, sort_order) VALUES
+  ('Moto GP', 'ENDEMIC', 'Motorcycle Manufacturers (OEMs)', 0),
+  ('Moto GP', 'ENDEMIC', 'Complete Motorcycles (privateer builds / race teams)', 1),
+  ('Moto GP', 'ENDEMIC', 'Exhaust Systems', 2),
+  ('Moto GP', 'ENDEMIC', 'Suspension (forks, shocks)', 3),
+  ('Moto GP', 'ENDEMIC', 'Wheels & Rims', 4),
+  ('Moto GP', 'ENDEMIC', 'Tires', 5),
+  ('Moto GP', 'ENDEMIC', 'Brakes', 6),
+  ('Moto GP', 'ENDEMIC', 'Engine Performance Parts', 7),
+  ('Moto GP', 'ENDEMIC', 'Clutches & Drivetrain', 8),
+  ('Moto GP', 'ENDEMIC', 'Handlebars & Controls', 9),
+  ('Moto GP', 'ENDEMIC', 'Foot Pegs', 10),
+  ('Moto GP', 'ENDEMIC', 'Radiators & Cooling Systems', 11),
+  ('Moto GP', 'ENDEMIC', 'Electronics / ECU / Mapping', 12),
+  ('Moto GP', 'ENDEMIC', 'Aftermarket Plastics & Body Kits', 13),
+  ('Moto GP', 'ENDEMIC', 'Helmets', 14),
+  ('Moto GP', 'ENDEMIC', 'Goggles', 15),
+  ('Moto GP', 'ENDEMIC', 'Boots', 16),
+  ('Moto GP', 'ENDEMIC', 'Protective Armor (chest, knee, neck braces)', 17),
+  ('Moto GP', 'ENDEMIC', 'Gloves', 18),
+  ('Moto GP', 'ENDEMIC', 'Apparel', 19),
+  ('Moto GP', 'ENDEMIC', 'Sunglasses / Eyewear', 20),
+  ('Moto GP', 'ENDEMIC', 'Watches', 21),
+  ('Moto GP', 'ENDEMIC', 'Gear Bags', 22),
+  ('Moto GP', 'ENDEMIC', 'Tools / Garage Equipment', 23),
+  ('Moto GP', 'ENDEMIC', 'Energy Drinks', 24),
+  ('Moto GP', 'ENDEMIC', 'Hydration', 25),
+  ('Moto GP', 'ENDEMIC', 'Protein / Supplements', 26)
+ON CONFLICT (sport, tier, category) DO NOTHING;
+
 -- Mountain Bike
 INSERT INTO public.sponsorship_taxonomies (sport, tier, category, sort_order)
 SELECT 'Mountain Bike', 'NON_ENDEMIC', category, sort_order FROM public.sponsorship_taxonomies WHERE sport = 'Surf' AND tier = 'NON_ENDEMIC'
@@ -211,42 +242,52 @@ INSERT INTO public.sponsorship_taxonomies (sport, tier, category, sort_order) VA
   ('Ski', 'ENDEMIC', 'Protein / Supplements', 20)
 ON CONFLICT (sport, tier, category) DO NOTHING;
 
--- Racing / Motorsports
-INSERT INTO public.sponsorship_taxonomies (sport, tier, category, sort_order)
-SELECT 'Racing / Motorsports', 'NON_ENDEMIC', category, sort_order FROM public.sponsorship_taxonomies WHERE sport = 'Surf' AND tier = 'NON_ENDEMIC'
+-- Four Wheel Offroad (four-wheel endemic template)
+INSERT INTO public.sponsorship_taxonomies (sport, tier, category, sort_order) VALUES
+  ('Four Wheel Offroad', 'ENDEMIC', 'Automotive OEMs', 0),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Performance Vehicle Brands', 1),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Electric Vehicle Manufacturers', 2),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Engine Performance Parts', 3),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Exhaust Systems', 4),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Suspension Systems', 5),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Tires', 6),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Wheels / Rims', 7),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Braking Systems', 8),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Fuel Systems', 9),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Transmission / Drivetrain Components', 10),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Performance Electronics / ECU', 11),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Aerodynamics & Body Kits', 12),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Aftermarket Parts Manufacturers', 13),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Fuel Brands (Racing & Performance Fuels)', 14),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Helmets', 15),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Racing Suits', 16),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Gloves', 17),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Safety Equipment (HANS devices, fire systems)', 18),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Footwear (racing boots)', 19),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Tools / Garage Equipment', 20),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Automotive Fluids (oil, lubricants, coolants)', 21),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Trailer / Hauling Equipment', 22),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Apparel', 23),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Sunglasses / Eyewear', 24),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Watches', 25),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Gear Bags', 26),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Energy Drinks', 27),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Hydration', 28),
+  ('Four Wheel Offroad', 'ENDEMIC', 'Protein / Supplements', 29)
 ON CONFLICT (sport, tier, category) DO NOTHING;
 
-INSERT INTO public.sponsorship_taxonomies (sport, tier, category, sort_order) VALUES
-  ('Racing / Motorsports', 'ENDEMIC', 'Automotive OEMs', 0),
-  ('Racing / Motorsports', 'ENDEMIC', 'Performance Vehicle Brands', 1),
-  ('Racing / Motorsports', 'ENDEMIC', 'Electric Vehicle Manufacturers', 2),
-  ('Racing / Motorsports', 'ENDEMIC', 'Engine Performance Parts', 3),
-  ('Racing / Motorsports', 'ENDEMIC', 'Exhaust Systems', 4),
-  ('Racing / Motorsports', 'ENDEMIC', 'Suspension Systems', 5),
-  ('Racing / Motorsports', 'ENDEMIC', 'Tires', 6),
-  ('Racing / Motorsports', 'ENDEMIC', 'Wheels / Rims', 7),
-  ('Racing / Motorsports', 'ENDEMIC', 'Braking Systems', 8),
-  ('Racing / Motorsports', 'ENDEMIC', 'Fuel Systems', 9),
-  ('Racing / Motorsports', 'ENDEMIC', 'Transmission / Drivetrain Components', 10),
-  ('Racing / Motorsports', 'ENDEMIC', 'Performance Electronics / ECU', 11),
-  ('Racing / Motorsports', 'ENDEMIC', 'Aerodynamics & Body Kits', 12),
-  ('Racing / Motorsports', 'ENDEMIC', 'Aftermarket Parts Manufacturers', 13),
-  ('Racing / Motorsports', 'ENDEMIC', 'Fuel Brands (Racing & Performance Fuels)', 14),
-  ('Racing / Motorsports', 'ENDEMIC', 'Helmets', 15),
-  ('Racing / Motorsports', 'ENDEMIC', 'Racing Suits', 16),
-  ('Racing / Motorsports', 'ENDEMIC', 'Gloves', 17),
-  ('Racing / Motorsports', 'ENDEMIC', 'Safety Equipment (HANS devices, fire systems)', 18),
-  ('Racing / Motorsports', 'ENDEMIC', 'Footwear (racing boots)', 19),
-  ('Racing / Motorsports', 'ENDEMIC', 'Tools / Garage Equipment', 20),
-  ('Racing / Motorsports', 'ENDEMIC', 'Automotive Fluids (oil, lubricants, coolants)', 21),
-  ('Racing / Motorsports', 'ENDEMIC', 'Trailer / Hauling Equipment', 22),
-  ('Racing / Motorsports', 'ENDEMIC', 'Apparel', 23),
-  ('Racing / Motorsports', 'ENDEMIC', 'Sunglasses / Eyewear', 24),
-  ('Racing / Motorsports', 'ENDEMIC', 'Watches', 25),
-  ('Racing / Motorsports', 'ENDEMIC', 'Gear Bags', 26),
-  ('Racing / Motorsports', 'ENDEMIC', 'Energy Drinks', 27),
-  ('Racing / Motorsports', 'ENDEMIC', 'Hydration', 28),
-  ('Racing / Motorsports', 'ENDEMIC', 'Protein / Supplements', 29)
+-- Drag
+INSERT INTO public.sponsorship_taxonomies (sport, tier, category, sort_order)
+SELECT 'Drag', tier, category, sort_order
+FROM public.sponsorship_taxonomies
+WHERE sport = 'Four Wheel Offroad' AND tier = 'ENDEMIC'
+ON CONFLICT (sport, tier, category) DO NOTHING;
+
+-- Indy / F1
+INSERT INTO public.sponsorship_taxonomies (sport, tier, category, sort_order)
+SELECT 'Indy / F1', tier, category, sort_order
+FROM public.sponsorship_taxonomies
+WHERE sport = 'Four Wheel Offroad' AND tier = 'ENDEMIC'
 ON CONFLICT (sport, tier, category) DO NOTHING;
 
 -- Track & Field
@@ -396,31 +437,54 @@ INSERT INTO public.sponsorship_taxonomies (sport, tier, category, sort_order) VA
   ('Outdoor / Climbing', 'ENDEMIC', 'Performance Fuel (gels, electrolytes)', 25)
 ON CONFLICT (sport, tier, category) DO NOTHING;
 
--- Lifestyle / Broadcast / Chef / Personality
+-- Lifestyle
 INSERT INTO public.sponsorship_taxonomies (sport, tier, category, sort_order)
-SELECT 'Lifestyle / Broadcast / Chef / Personality', 'NON_ENDEMIC', category, sort_order FROM public.sponsorship_taxonomies WHERE sport = 'Surf' AND tier = 'NON_ENDEMIC'
+SELECT 'Lifestyle', 'NON_ENDEMIC', category, sort_order FROM public.sponsorship_taxonomies WHERE sport = 'Surf' AND tier = 'NON_ENDEMIC'
 ON CONFLICT (sport, tier, category) DO NOTHING;
 
 INSERT INTO public.sponsorship_taxonomies (sport, tier, category, sort_order) VALUES
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Media Production Equipment (cameras, lighting, mics)', 0),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Content Creation Software / Platforms', 1),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Streaming Platforms', 2),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Podcast Equipment', 3),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Publishing Platforms', 4),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Apparel', 5),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Footwear', 6),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Watches', 7),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Sunglasses / Eyewear', 8),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Jewelry / Accessories', 9),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Kitchen Appliances', 10),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Cookware', 11),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Knives', 12),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Food & Beverage Brands', 13),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Grocery / Ingredient Brands', 14),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Restaurant / Hospitality Groups', 15),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Fitness Brands', 16),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Supplements', 17),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Energy Drinks', 18),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Hydration', 19),
-  ('Lifestyle / Broadcast / Chef / Personality', 'ENDEMIC', 'Health & Wellness Products', 20)
+  ('Lifestyle', 'ENDEMIC', 'Media Production Equipment (cameras, lighting, mics)', 0),
+  ('Lifestyle', 'ENDEMIC', 'Content Creation Software / Platforms', 1),
+  ('Lifestyle', 'ENDEMIC', 'Streaming Platforms', 2),
+  ('Lifestyle', 'ENDEMIC', 'Podcast Equipment', 3),
+  ('Lifestyle', 'ENDEMIC', 'Publishing Platforms', 4),
+  ('Lifestyle', 'ENDEMIC', 'Apparel', 5),
+  ('Lifestyle', 'ENDEMIC', 'Footwear', 6),
+  ('Lifestyle', 'ENDEMIC', 'Watches', 7),
+  ('Lifestyle', 'ENDEMIC', 'Sunglasses / Eyewear', 8),
+  ('Lifestyle', 'ENDEMIC', 'Jewelry / Accessories', 9),
+  ('Lifestyle', 'ENDEMIC', 'Kitchen Appliances', 10),
+  ('Lifestyle', 'ENDEMIC', 'Cookware', 11),
+  ('Lifestyle', 'ENDEMIC', 'Knives', 12),
+  ('Lifestyle', 'ENDEMIC', 'Food & Beverage Brands', 13),
+  ('Lifestyle', 'ENDEMIC', 'Grocery / Ingredient Brands', 14),
+  ('Lifestyle', 'ENDEMIC', 'Restaurant / Hospitality Groups', 15),
+  ('Lifestyle', 'ENDEMIC', 'Fitness Brands', 16),
+  ('Lifestyle', 'ENDEMIC', 'Supplements', 17),
+  ('Lifestyle', 'ENDEMIC', 'Energy Drinks', 18),
+  ('Lifestyle', 'ENDEMIC', 'Hydration', 19),
+  ('Lifestyle', 'ENDEMIC', 'Health & Wellness Products', 20)
+ON CONFLICT (sport, tier, category) DO NOTHING;
+
+-- Minimal endemic template for additional sports
+INSERT INTO public.sponsorship_taxonomies (sport, tier, category, sort_order)
+SELECT s.sport, 'ENDEMIC', c.category, c.sort_order
+FROM (
+  VALUES
+    ('Cycling'),
+    ('Diving'),
+    ('Kitesurfing'),
+    ('Softball'),
+    ('Lifestyle - Breakdancing'),
+    ('Marathon/Half Marathon')
+) AS s(sport)
+CROSS JOIN (
+  VALUES
+    ('Apparel', 0),
+    ('Footwear', 1),
+    ('Sunglasses / Eyewear', 2),
+    ('Watches', 3),
+    ('Energy Drinks', 4),
+    ('Hydration', 5)
+) AS c(category, sort_order)
 ON CONFLICT (sport, tier, category) DO NOTHING;

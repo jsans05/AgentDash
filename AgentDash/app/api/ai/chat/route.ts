@@ -1017,7 +1017,7 @@ const TOOLS = [
     function: {
       name: "getAthleteTargetList",
       description:
-        "Read the live CRM target list for one athlete: pipeline cards where that athlete is in potential_athletes, with company name, category (product_category), match_score, pipeline_id, and saved outreach_email_subject / outreach_email when present. Rows are sorted by category then match_score descending. Use before categorizing, auditing uncategorized rows, or unlinking. Default omits full contact arrays (contact_count only); set include_contacts true if emails/names are needed. uncategorized_only narrows to rows with no real category.",
+        "Read the live CRM target list for one athlete: pipeline cards where that athlete is in potential_athletes, with company name, category (product_category), match_score, pipeline_id, and saved outreach_email_subject / outreach_email when present. Rows are sorted by category then match_score descending. Use before categorizing, auditing uncategorized rows, category-scoped email drafting, or unlinking. Default omits full contact arrays (contact_count only); set include_contacts true if emails/names are needed. uncategorized_only narrows to rows with no real category. category_filter narrows to one exact category name (case-insensitive).",
       parameters: {
         type: "object",
         properties: {
@@ -1026,6 +1026,10 @@ const TOOLS = [
           uncategorized_only: {
             type: "boolean",
             description: "If true, return only companies whose category is empty or Uncategorized.",
+          },
+          category_filter: {
+            type: "string",
+            description: "If set, return only companies in this product_category (exact match, case-insensitive), e.g. Fragrance or Energy Drinks.",
           },
           include_contacts: {
             type: "boolean",
@@ -1057,6 +1061,38 @@ const TOOLS = [
                 product_category: { type: "string", description: "Display category for target-list sorting (e.g. Energy Drinks)." },
               },
               required: ["pipeline_id", "product_category"],
+            },
+          },
+        },
+        required: ["updates"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "updateTargetListMatchScores",
+      description:
+        "Set athlete–company match_score on target list rows (stored in potential_athletes for that athlete). Pass pipeline_id values from getAthleteTargetList. Use when the user asks to change match score / fit score on existing list rows. Up to 80 updates per call. Pass match_score null to clear.",
+      parameters: {
+        type: "object",
+        properties: {
+          athlete_id: { type: "string" },
+          athlete_name: { type: "string" },
+          updates: {
+            type: "array",
+            maxItems: 80,
+            items: {
+              type: "object",
+              properties: {
+                pipeline_id: { type: "string" },
+                match_score: {
+                  type: "number",
+                  description: "Athlete–company fit score (higher = better match). Omit or null to clear.",
+                  nullable: true,
+                },
+              },
+              required: ["pipeline_id"],
             },
           },
         },
@@ -1242,6 +1278,7 @@ const TOOLS_WITH_ATHLETE_ID_RESOLUTION = new Set([
   "generateAthleteProspectList",
   "getAthleteTargetList",
   "updateTargetListCompanyCategories",
+  "updateTargetListMatchScores",
   "updateTargetListOutreach",
   "removeAthleteFromTargetListCards",
 ]);
@@ -1686,14 +1723,13 @@ REQUIRED behavior — do not deviate:
     const targetListOutreachPush = detectTargetListOutreachPushIntent(trimmedMessages);
     const targetListSaveIntent = detectTargetListSaveIntent(trimmedMessages);
     const targetListUiContext = ui_context === "target_list";
-    const injectTargetListSession =
-      (resolvedFlowMode === "outbound" && targetListUiContext && Boolean(requestAthleteId)) ||
-      (Boolean(requestAthleteId) && targetListSaveIntent);
+    const injectTargetListSession = targetListUiContext && Boolean(requestAthleteId);
     const targetListSessionAddon = injectTargetListSession
       ? `\n\n${getAthleteTargetListSessionAddon(requestAthleteId)}`
       : "";
     const injectTargetListPushGuard =
-      resolvedFlowMode === "email" && (targetListOutreachPush || targetListSaveIntent);
+      (targetListUiContext || resolvedFlowMode === "email") &&
+      (targetListOutreachPush || targetListSaveIntent);
     const targetListOutreachAddon = injectTargetListPushGuard
       ? `\n\n${getTargetListOutreachPushAddon()}`
       : "";

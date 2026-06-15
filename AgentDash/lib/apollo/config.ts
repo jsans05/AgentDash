@@ -8,6 +8,16 @@ export function isApolloEmailRevealAllowed(): boolean {
   return process.env.APOLLO_ALLOW_EMAIL_REVEAL !== "false";
 }
 
+export function isApolloPhoneRevealAllowed(): boolean {
+  if (!isApolloEnabled()) return false;
+  return process.env.APOLLO_ALLOW_PHONE_REVEAL !== "false";
+}
+
+export function apolloWebhookSecret(): string | null {
+  const s = process.env.APOLLO_WEBHOOK_SECRET?.trim();
+  return s || null;
+}
+
 export function apolloMaxPeoplePerRequest(): number {
   const n = Number(process.env.APOLLO_MAX_PEOPLE_PER_REQUEST ?? 25);
   if (!Number.isFinite(n) || n < 1) return 25;

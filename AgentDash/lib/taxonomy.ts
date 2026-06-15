@@ -5,6 +5,10 @@
 
 import { createServerClient } from "@/lib/supabase/server";
 import { TAXONOMY_NON_ENDEMIC_GLOBAL_SPORT } from "@/lib/taxonomy-constants";
+import {
+  resolveSportToCanonical,
+  sportForTaxonomyEndemicQuery,
+} from "@/lib/taxonomy-sport-resolve";
 
 export type TaxonomyBySport = {
   endemic: string[];
@@ -13,9 +17,7 @@ export type TaxonomyBySport = {
 };
 
 export { TAXONOMY_NON_ENDEMIC_GLOBAL_SPORT, isAthleteTaxonomySport } from "@/lib/taxonomy-constants";
-
-const MOTO_CANONICAL = "Supercross / Motocross (Moto)";
-const RACING_CANONICAL = "Racing / Motorsports";
+export { resolveSportToCanonical, sportForTaxonomyEndemicQuery } from "@/lib/taxonomy-sport-resolve";
 
 export type TaxonomyNodeRow = {
   id: string;
@@ -33,100 +35,6 @@ export function normalizeCategoryForMatch(cat: string): string {
     .toLowerCase()
     .trim()
     .replace(/\s+/g, " ");
-}
-
-/**
- * Map roster/display sport values to canonical taxonomy sport names (sponsorship_taxonomies.sport for ENDEMIC).
- * Roster may use different labels than the taxonomy row sport column.
- */
-const SPORT_ALIAS_TO_CANONICAL: Record<string, string> = {
-  "motorsports/two wheel - supercross/motocross": MOTO_CANONICAL,
-  "motorsports / two wheel - supercross / motocross": MOTO_CANONICAL,
-  "supercross/motocross": MOTO_CANONICAL,
-  "supercross / motocross (moto)": MOTO_CANONICAL,
-  "supercross": MOTO_CANONICAL,
-  "motocross": MOTO_CANONICAL,
-  "moto": MOTO_CANONICAL,
-  "racing / motorsports": RACING_CANONICAL,
-  "racing/motorsports": RACING_CANONICAL,
-  /** Bare "motorsports" resolved only after 2W/4W heuristics (see resolveSportToCanonical). */
-  motorsports: RACING_CANONICAL,
-  "mountain bike": "Mountain Bike",
-  "mountain biking": "Mountain Bike",
-  "track & field": "Track & Field",
-  "track and field": "Track & Field",
-  "outdoor / climbing": "Outdoor / Climbing",
-  "outdoor/climbing": "Outdoor / Climbing",
-  "lifestyle / broadcast / chef / personality": "Lifestyle / Broadcast / Chef / Personality",
-  /** Roster "Snow - …" / OpenSnowboard-style groupings → per-discipline taxonomy sport keys */
-  "snow - snowboard": "Snowboard",
-  "snow-snowboard": "Snowboard",
-  "snow/snowboard": "Snowboard",
-  snowboarding: "Snowboard",
-  "snow - ski": "Ski",
-  "snow-ski": "Ski",
-  "snow/ski": "Ski",
-};
-
-/**
- * Resolve athlete/roster sport string to canonical taxonomy sport (for ENDEMIC lookups).
- */
-export function resolveSportToCanonical(sport: string | null): string | null {
-  const s = sport?.trim() || "";
-  if (!s) return null;
-  // Treat en dash, em dash, minus sign like hyphen so "Snow – Snowboard" matches roster aliases
-  const key = s
-    .replace(/[\u2013\u2014\u2212]/g, "-")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/\s*\/\s*/g, "/");
-
-  if (SPORT_ALIAS_TO_CANONICAL[key]) return SPORT_ALIAS_TO_CANONICAL[key];
-
-  const haystack = key;
-  const twoWheelHints =
-    /(?:^|[\s/\-])(two[\s-]wheel|2[\s-]?wheel|supercross|motocross|\bmoto\b|dirt[\s-]?bike|off[\s-]?road[\s-]?moto|\bmx\b)/.test(
-      haystack
-    );
-  const fourWheelHints =
-    /\b(four[\s-]wheel|4[\s-]?wheel|nascar|indycar|indy[\s-]car|formula[\s-]?1|\bf1\b|stock[\s-]?car|cup[\s-]series|sport[s]?car|road[\s-]racing|gt[\s-]racing|circuit[\s-]racing|monster[\s-]?truck)\b/.test(
-      haystack
-    );
-
-  if (twoWheelHints && !fourWheelHints) return MOTO_CANONICAL;
-  if (fourWheelHints && !twoWheelHints) return RACING_CANONICAL;
-  if (twoWheelHints && fourWheelHints) {
-    if (/(?:^|[\s/\-])(two[\s-]wheel|2[\s-]?wheel)/.test(haystack)) return MOTO_CANONICAL;
-    if (/\b(four[\s-]wheel|4[\s-]?wheel)\b/.test(haystack)) return RACING_CANONICAL;
-    return MOTO_CANONICAL;
-  }
-
-  const entries = Object.entries(SPORT_ALIAS_TO_CANONICAL)
-    .filter(([alias]) => alias !== "motorsports")
-    .sort((a, b) => b[0].length - a[0].length);
-
-  for (const [alias, canonical] of entries) {
-    const a = alias.replace(/\s*\/\s*/g, "/");
-    if (haystack.includes(a)) return canonical;
-    if (a.length >= 4 && a.includes(haystack) && haystack.length >= 4) return canonical;
-  }
-
-  if (haystack === "motorsports" || (haystack.includes("motorsports") && !twoWheelHints)) {
-    return RACING_CANONICAL;
-  }
-
-  return null;
-}
-
-/**
- * Sport string to use for taxonomy ENDEMIC queries. Tries exact match first, then alias resolution.
- */
-export function sportForTaxonomyEndemicQuery(sport: string | null): string {
-  const s = sport?.trim() || "";
-  if (!s) return "";
-  const canonical = resolveSportToCanonical(s);
-  return canonical ?? s;
 }
 
 /**

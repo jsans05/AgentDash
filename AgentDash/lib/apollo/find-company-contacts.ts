@@ -39,7 +39,7 @@ export async function findContactsForCompany(
   const { data: allContacts, error: listErr } = await supabaseAdmin
     .from("crm_contacts")
     .select(
-      "contact_id, first_name, last_name, role, email, phone, notes, linkedin_url, apollo_person_id, apollo_reveal_status"
+      "contact_id, first_name, last_name, role, email, phone, notes, linkedin_url, apollo_person_id, apollo_reveal_status, apollo_phone_reveal_status"
     )
     .eq("company_id", params.companyId)
     .eq("created_by_user_id", params.userId)
@@ -48,6 +48,13 @@ export async function findContactsForCompany(
     .order("first_name", { ascending: true });
 
   if (listErr) throw new Error(listErr.message);
+
+  const { data: companyRow, error: companyErr } = await supabaseAdmin
+    .from("companies")
+    .select("hq_phone")
+    .eq("company_id", params.companyId)
+    .single();
+  if (companyErr) throw new Error(companyErr.message);
 
   return {
     organization: org,
@@ -58,6 +65,7 @@ export async function findContactsForCompany(
     created: sync.created,
     updated: sync.updated,
     contacts: allContacts ?? [],
+    hq_phone: companyRow?.hq_phone != null ? String(companyRow.hq_phone) : null,
     page: params.overrides?.page ?? 1,
   };
 }

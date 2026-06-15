@@ -1,6 +1,8 @@
 const PREFIX = "agentdash.targetList.";
 
 export const TARGET_LIST_FIND_CONTACTS_DISMISS_KEY = `${PREFIX}findContactsConfirmDismissed`;
+export const TARGET_LIST_PULL_HQ_PHONE_DISMISS_KEY = `${PREFIX}pullHqPhoneConfirmDismissed`;
+export const TARGET_LIST_REVEAL_PHONE_DISMISS_KEY = `${PREFIX}revealPhoneConfirmDismissed`;
 export const TARGET_LIST_REMOVE_COMPANY_DISMISS_KEY = `${PREFIX}removeCompanyConfirmDismissed`;
 export const TARGET_LIST_REVEAL_CONTACT_DISMISS_KEY = `${PREFIX}revealContactConfirmDismissed`;
 export const TARGET_LIST_DELETE_CONTACT_DISMISS_KEY = `${PREFIX}deleteContactConfirmDismissed`;

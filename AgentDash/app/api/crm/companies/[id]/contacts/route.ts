@@ -14,7 +14,7 @@ export async function GET(
   const { data, error } = await supabase
     .from("crm_contacts")
     .select(
-      "contact_id, first_name, last_name, role, email, phone, notes, linkedin_url, apollo_person_id, apollo_reveal_status"
+      "contact_id, first_name, last_name, role, email, phone, notes, linkedin_url, apollo_person_id, apollo_reveal_status, apollo_phone_reveal_status"
     )
     .eq("company_id", companyId)
     .eq("created_by_user_id", profile.user_id)

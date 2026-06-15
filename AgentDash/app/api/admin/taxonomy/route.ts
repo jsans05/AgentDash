@@ -46,7 +46,7 @@ export async function GET(req: Request) {
       return NextResponse.json(globalRows);
     }
 
-    const trySports = ["Surf", "Supercross / Motocross (Moto)", "Racing / Motorsports"];
+    const trySports = ["Surf", "Supercross / Motocross (Moto)", "Four Wheel Offroad"];
     for (const refSport of trySports) {
       const { data: legacy, error: legErr } = await supabase
         .from("sponsorship_taxonomies")

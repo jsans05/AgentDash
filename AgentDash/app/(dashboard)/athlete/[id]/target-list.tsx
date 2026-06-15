@@ -1,10 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import Link from "next/link";
+import { ChevronLeft, Maximize2, Minimize2 } from "lucide-react";
 import type { ApolloRevealStatus } from "@/components/crm/ApolloContactActions";
 import { ContactEmailCell } from "@/components/crm/ContactEmailCell";
+import { ContactPhoneCell } from "@/components/crm/ContactPhoneCell";
 import { ApolloFindContactsInline } from "@/components/crm/ApolloFindContactsInline";
+import { ApolloEnrichHqPhoneInline } from "@/components/crm/ApolloEnrichHqPhoneInline";
 import { ApolloRefineSearchDialog } from "@/components/crm/ApolloRefineSearchDialog";
 import { contactSearchOverridesToRequestBody } from "@/lib/apollo/contact-search-api-body";
 import {
@@ -17,19 +21,35 @@ import type { ApolloContactSearchOverrides } from "@/lib/apollo/search-defaults"
 import { ContactLinkedinCell } from "@/components/crm/ContactLinkedinCell";
 import { PartnershipNotesDisplay } from "@/components/crm/PartnershipNotesDisplay";
 import { TargetListActionDialog } from "@/components/crm/TargetListActionDialog";
+import { TargetListAiPanel } from "@/components/crm/TargetListAiDock";
 import { TargetListCompanyContactActions } from "@/components/crm/TargetListCompanyContactActions";
+import { isEffectivelyUncategorizedCompanyCategory } from "@/lib/crm/company-category";
+import {
+  readStoredTargetListPanelCollapsed,
+  readStoredTargetListFocusMode,
+  writeStoredTargetListFocusMode,
+  TARGET_LIST_CATEGORY_FILTER_ALL,
+  TARGET_LIST_CATEGORY_FILTER_UNCATEGORIZED,
+} from "@/lib/crm/target-list-chat-constants";
+import {
+  buildTargetListSessionContext,
+  type TargetListFocusedRow,
+} from "@/lib/crm/target-list-session-context";
+import { cn } from "@/lib/utils";
 import { formatApolloPartnershipSearchSummary } from "@/lib/apollo/search-defaults";
 import { formatContactDisplayName } from "@/lib/crm/contact-display-name";
 import {
   isTargetListDialogDismissed,
   TARGET_LIST_DELETE_CONTACTS_BULK_DISMISS_KEY,
   TARGET_LIST_FIND_CONTACTS_DISMISS_KEY,
+  TARGET_LIST_PULL_HQ_PHONE_DISMISS_KEY,
   TARGET_LIST_REMOVE_COMPANY_DISMISS_KEY,
 } from "@/lib/crm/target-list-prefs";
 import {
   isDeletableTargetListContact,
   mapApiContactToTargetList,
   mergeCompanyContactsIntoRows,
+  patchContactInRows,
   removeContactFromRows,
   removeContactsFromRows,
 } from "@/lib/crm/target-list-contacts";
@@ -54,6 +74,7 @@ type Contact = {
   linkedin_url: string | null;
   apollo_person_id: string | null;
   apollo_reveal_status: ApolloRevealStatus;
+  apollo_phone_reveal_status: "pending" | "revealed" | null;
   outreach_email_subject: string | null;
   outreach_email: string | null;
   email_drafts?: unknown;
@@ -291,9 +312,11 @@ const COLUMNS = [
 export function AthleteTargetList({
   athleteId,
   athleteName,
+  className,
 }: {
   athleteId: string;
   athleteName?: string;
+  className?: string;
 }) {
   const [rows, setRows] = useState<TargetListRow[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -307,6 +330,8 @@ export function AthleteTargetList({
     Record<string, string>
   >({});
   const [bulkFindContacts, setBulkFindContacts] = useState(false);
+  const [bulkPullHqPhone, setBulkPullHqPhone] = useState(false);
+  const [bulkPullHqConfirmOpen, setBulkPullHqConfirmOpen] = useState(false);
   const [generatingOutreach, setGeneratingOutreach] = useState(false);
   const [generatingOutreachKey, setGeneratingOutreachKey] = useState<string | null>(null);
   const [searchDisclosureHtml, setSearchDisclosureHtml] = useState<string | null>(null);
@@ -327,12 +352,84 @@ export function AthleteTargetList({
   const [apolloProspectingPrefs, setApolloProspectingPrefs] = useState<ApolloRevenueFilterPrefs>({});
   const [apolloSearchOverrides, setApolloSearchOverrides] = useState<ApolloContactSearchOverrides>({});
   const [refineSearchOpen, setRefineSearchOpen] = useState(false);
+  const [activeCategoryFilter, setActiveCategoryFilter] = useState(TARGET_LIST_CATEGORY_FILTER_ALL);
+  const [selectedCompanyIds, setSelectedCompanyIds] = useState<Set<string>>(new Set());
+  const [focusedRow, setFocusedRow] = useState<TargetListFocusedRow | null>(null);
+  const [flashedPipelineIds, setFlashedPipelineIds] = useState<Set<string>>(new Set());
+  const [updateToast, setUpdateToast] = useState<string | null>(null);
+  const [aiDockCollapsed, setAiDockCollapsed] = useState(false);
+  const [focusMode, setFocusMode] = useState(false);
+  const [navOffsetPx, setNavOffsetPx] = useState(64);
+  const [bulkActionsOpen, setBulkActionsOpen] = useState(false);
+  const flashAfterLoadRef = useRef<Set<string> | null>(null);
+  const bulkActionsRef = useRef<HTMLDivElement>(null);
+
+  const bulkActionsDisabled =
+    bulkFindContacts ||
+    bulkPullHqPhone ||
+    bulkPartnershipResearch ||
+    researchingPipelineId != null ||
+    generatingOutreach ||
+    loading ||
+    !rows ||
+    rows.length === 0;
+
+  const setFocusModePersisted = useCallback((next: boolean) => {
+    setFocusMode(next);
+    writeStoredTargetListFocusMode(next);
+    try {
+      const url = new URL(window.location.href);
+      if (next) url.searchParams.set("focus", "1");
+      else url.searchParams.delete("focus");
+      window.history.replaceState(null, "", url.toString());
+    } catch {
+      // ignore
+    }
+  }, []);
 
   useEffect(() => {
+    setAiDockCollapsed(readStoredTargetListPanelCollapsed());
     const prefs = loadApolloRevenueFilterPrefs();
     setApolloProspectingPrefs(prefs);
     setApolloSearchOverrides(parseRevenueFilterBody(prefs));
+    try {
+      const urlFocus = new URLSearchParams(window.location.search).get("focus") === "1";
+      setFocusMode(urlFocus || readStoredTargetListFocusMode());
+    } catch {
+      setFocusMode(readStoredTargetListFocusMode());
+    }
   }, []);
+
+  useEffect(() => {
+    if (!focusMode) return;
+    function measureNav() {
+      const nav = document.querySelector("nav");
+      setNavOffsetPx(nav ? Math.ceil(nav.getBoundingClientRect().bottom) : 64);
+    }
+    measureNav();
+    window.addEventListener("resize", measureNav);
+    return () => window.removeEventListener("resize", measureNav);
+  }, [focusMode]);
+
+  useEffect(() => {
+    if (!focusMode) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [focusMode]);
+
+  useEffect(() => {
+    if (!bulkActionsOpen) return;
+    function onPointerDown(e: MouseEvent) {
+      if (bulkActionsRef.current && !bulkActionsRef.current.contains(e.target as Node)) {
+        setBulkActionsOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [bulkActionsOpen]);
 
   function updateApolloProspectingPrefs(prefs: ApolloRevenueFilterPrefs) {
     setApolloProspectingPrefs(prefs);
@@ -361,7 +458,179 @@ export function AthleteTargetList({
     void load();
   }, [load]);
 
-  const flat = useMemo(() => (rows ? buildFlatRows(rows) : []), [rows]);
+  const pendingPhoneContactIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const row of rows ?? []) {
+      for (const c of row.contacts) {
+        if (c.apollo_phone_reveal_status === "pending") ids.add(c.contact_id);
+      }
+    }
+    return ids;
+  }, [rows]);
+
+  useEffect(() => {
+    if (pendingPhoneContactIds.size === 0) return;
+
+    let cancelled = false;
+    async function pollPendingPhones() {
+      for (const contactId of pendingPhoneContactIds) {
+        if (cancelled) return;
+        try {
+          const res = await fetch(`/api/crm/contacts/${contactId}`, { credentials: "include" });
+          const data = await res.json();
+          const c = data?.contact;
+          if (!c || cancelled) continue;
+          const status = c.apollo_phone_reveal_status;
+          const normalizedStatus =
+            status === "pending" || status === "revealed" ? status : null;
+          if (c.phone || normalizedStatus !== "pending") {
+            setRows((prev) =>
+              prev
+                ? patchContactInRows(prev, contactId, {
+                    phone: c.phone != null ? String(c.phone) : null,
+                    apollo_phone_reveal_status: normalizedStatus,
+                  })
+                : prev
+            );
+          }
+        } catch {
+          // ignore transient poll errors
+        }
+      }
+    }
+
+    void pollPendingPhones();
+    const timer = setInterval(() => void pollPendingPhones(), 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [pendingPhoneContactIds]);
+
+  const categorySummary = useMemo(() => {
+    if (!rows) return { sorted: [] as Array<[string, number]>, uncategorized: 0, total: 0 };
+    const cats = new Map<string, number>();
+    let uncategorized = 0;
+    for (const r of rows) {
+      if (isEffectivelyUncategorizedCompanyCategory(r.category)) uncategorized += 1;
+      else {
+        const c = String(r.category ?? "").trim();
+        if (c) cats.set(c, (cats.get(c) ?? 0) + 1);
+      }
+    }
+    return {
+      sorted: [...cats.entries()].sort((a, b) => a[0].localeCompare(b[0], undefined, { sensitivity: "base" })),
+      uncategorized,
+      total: rows.length,
+    };
+  }, [rows]);
+
+  const visibleRowIndexes = useMemo(() => {
+    if (!rows) return new Set<number>();
+    const indexes = new Set<number>();
+    rows.forEach((r, i) => {
+      if (activeCategoryFilter === TARGET_LIST_CATEGORY_FILTER_ALL) {
+        indexes.add(i);
+        return;
+      }
+      if (activeCategoryFilter === TARGET_LIST_CATEGORY_FILTER_UNCATEGORIZED) {
+        if (isEffectivelyUncategorizedCompanyCategory(r.category)) indexes.add(i);
+        return;
+      }
+      if (String(r.category ?? "").trim().toLowerCase() === activeCategoryFilter.toLowerCase()) {
+        indexes.add(i);
+      }
+    });
+    return indexes;
+  }, [rows, activeCategoryFilter]);
+
+  const flat = useMemo(() => {
+    if (!rows) return [];
+    return buildFlatRows(rows).filter((fr) => visibleRowIndexes.has(fr.rowIndex));
+  }, [rows, visibleRowIndexes]);
+
+  const getSessionContext = useCallback(() => {
+    if (!rows) return "";
+    return buildTargetListSessionContext({
+      athleteId,
+      athleteName,
+      activeCategoryFilter,
+      rows,
+      selectedCompanyIds,
+      focusedRow,
+    });
+  }, [athleteId, athleteName, activeCategoryFilter, rows, selectedCompanyIds, focusedRow]);
+
+  const refreshAfterAiMutation = useCallback(async () => {
+    const toFlash = new Set<string>();
+    if (focusedRow) toFlash.add(focusedRow.pipelineId);
+    for (const r of rows ?? []) {
+      if (selectedCompanyIds.has(r.company_id)) toFlash.add(r.pipeline_id);
+    }
+    flashAfterLoadRef.current = toFlash.size > 0 ? toFlash : new Set(rows?.map((r) => r.pipeline_id));
+    setUpdateToast("Target list updated");
+    await load();
+  }, [load, rows, focusedRow, selectedCompanyIds]);
+
+  useEffect(() => {
+    const pending = flashAfterLoadRef.current;
+    if (!pending || pending.size === 0) return;
+    flashAfterLoadRef.current = null;
+    setFlashedPipelineIds(pending);
+    const t = window.setTimeout(() => setFlashedPipelineIds(new Set()), 2200);
+    return () => window.clearTimeout(t);
+  }, [rows]);
+
+  useEffect(() => {
+    if (!updateToast) return;
+    const t = window.setTimeout(() => setUpdateToast(null), 3200);
+    return () => window.clearTimeout(t);
+  }, [updateToast]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && focusMode) {
+        const t = e.target as HTMLElement;
+        if (t.closest("input, textarea, select, [contenteditable=true]")) return;
+        e.preventDefault();
+        setFocusModePersisted(false);
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "j") {
+        e.preventDefault();
+        setAiDockCollapsed((c) => !c);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [focusMode, setFocusModePersisted]);
+
+  function toggleCompanySelected(companyId: string, checked: boolean) {
+    setSelectedCompanyIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(companyId);
+      else next.delete(companyId);
+      return next;
+    });
+  }
+
+  function focusFlatRow(fr: FlatRow) {
+    const row = rows?.[fr.rowIndex];
+    if (!row) return;
+    const contact = fr.contactIndex != null ? row.contacts[fr.contactIndex] : null;
+    setFocusedRow({
+      pipelineId: row.pipeline_id,
+      companyId: row.company_id,
+      companyName: row.company_name,
+      category: row.category,
+      contactId: contact?.contact_id ?? null,
+      contactName: contact
+        ? formatContactDisplayName(contact.first_name, contact.last_name) || null
+        : null,
+      rowIndex: fr.rowIndex,
+      contactIndex: fr.contactIndex,
+    });
+  }
 
   /* Update local state after a save so the UI stays in sync. */
   function patchRowLocal(rowIndex: number, patch: Partial<TargetListRow>) {
@@ -387,13 +656,24 @@ export function AthleteTargetList({
     });
   }
 
-  function applyCompanyContactsToRows(companyId: string, apiContacts: unknown[]) {
+  function applyCompanyContactsToRows(
+    companyId: string,
+    apiContacts: unknown[],
+    meta?: { hq_phone?: string | null }
+  ) {
     const contacts = (Array.isArray(apiContacts) ? apiContacts : []).map((c) =>
       mapApiContactToTargetList(c as Record<string, unknown>)
     );
-    setRows((prev) =>
-      prev ? (mergeCompanyContactsIntoRows(prev, companyId, contacts) as TargetListRow[]) : prev
-    );
+    setRows((prev) => {
+      if (!prev) return prev;
+      let next = mergeCompanyContactsIntoRows(prev, companyId, contacts) as TargetListRow[];
+      if (meta?.hq_phone !== undefined) {
+        next = next.map((row) =>
+          row.company_id === companyId ? { ...row, hq_phone: meta.hq_phone ?? null } : row
+        );
+      }
+      return next;
+    });
   }
 
   function removeContactLocal(contactId: string) {
@@ -601,13 +881,64 @@ export function AthleteTargetList({
       }
       for (const result of Array.isArray(data.results) ? data.results : []) {
         if (result?.ok && result.company_id) {
-          applyCompanyContactsToRows(String(result.company_id), result.contacts ?? []);
+          applyCompanyContactsToRows(String(result.company_id), result.contacts ?? [], {
+            hq_phone: result.hq_phone ?? null,
+          });
         }
       }
     } catch (e) {
       setGlobalError(e instanceof Error ? e.message : "Find contacts failed");
     } finally {
       setBulkFindContacts(false);
+    }
+  }
+
+  function requestBulkPullHqPhones() {
+    if (!rows || rows.length === 0) return;
+    if (isTargetListDialogDismissed(TARGET_LIST_PULL_HQ_PHONE_DISMISS_KEY)) {
+      void pullHqPhonesForAllCompanies();
+      return;
+    }
+    setBulkPullHqConfirmOpen(true);
+  }
+
+  async function pullHqPhonesForAllCompanies() {
+    if (!rows || rows.length === 0) return;
+    setBulkPullHqPhone(true);
+    setGlobalError(null);
+    const companyIds = [...new Set(rows.map((r) => r.company_id))];
+    try {
+      const res = await fetch("/api/apollo/companies/bulk-enrich-hq-phone", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ company_ids: companyIds }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Bulk HQ phone pull failed");
+      const byCompany = new Map<string, string | null>();
+      for (const result of Array.isArray(data.results) ? data.results : []) {
+        if (result?.ok && result.company_id) {
+          byCompany.set(String(result.company_id), result.hq_phone ?? null);
+        }
+      }
+      if (byCompany.size > 0) {
+        setRows((prev) =>
+          prev?.map((row) => {
+            const hq = byCompany.get(row.company_id);
+            return hq !== undefined ? { ...row, hq_phone: hq } : row;
+          }) ?? prev
+        );
+      }
+      if (data.summary?.failed > 0) {
+        setGlobalError(
+          `HQ phones: ${data.summary.updated ?? 0} updated, ${data.summary.found ?? 0} found (${data.summary.succeeded}/${data.summary.companies} companies succeeded).`
+        );
+      }
+    } catch (e) {
+      setGlobalError(e instanceof Error ? e.message : "HQ phone pull failed");
+    } finally {
+      setBulkPullHqPhone(false);
     }
   }
 
@@ -1018,110 +1349,296 @@ export function AthleteTargetList({
     }
   }
 
-  return (
-    <>
-    <ApolloRefineSearchDialog
-      open={refineSearchOpen}
-      prefs={apolloProspectingPrefs}
-      onClose={() => setRefineSearchOpen(false)}
-      onSave={updateApolloProspectingPrefs}
-    />
-    <section className="rounded-lg border border-white/10 bg-[#151A17]">
-      <header className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
-        <div>
-          <h3 className="text-base font-semibold text-[#F4F1EB]">Target List</h3>
-          <p className="mt-0.5 text-xs text-[#B9B2A6]">
-            Every company prospected and assigned to this athlete in your CRM pipeline. Click any cell to edit in place;
-            changes sync to the CRM. Rows without a contact are highlighted.
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3">
-          {rows && rows.length > 0 ? (
-            <span className="whitespace-nowrap text-xs text-[#B9B2A6]">
-              {rows.length} {rows.length === 1 ? "company" : "companies"}
-            </span>
-          ) : null}
-          <button
-            type="button"
-            onClick={() => requestBulkFindContacts()}
-            disabled={
-              bulkFindContacts ||
-              bulkPartnershipResearch ||
-              researchingPipelineId != null ||
-              generatingOutreach ||
-              loading ||
-              !rows ||
-              rows.length === 0
-            }
-            className="inline-flex items-center gap-1.5 rounded-md border border-[#2E7040]/60 bg-[#1B2F21] px-3 py-1.5 text-xs font-medium text-[#DBEEE0] hover:bg-[#23452E] disabled:cursor-not-allowed disabled:opacity-50"
-            title={formatApolloPartnershipSearchSummary()}
-          >
-            {bulkFindContacts ? (
-              <>
-                <span
-                  className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-[#DBEEE0]/25 border-t-[#DBEEE0]"
-                  aria-hidden
-                />
-                Finding contacts…
-              </>
-            ) : (
-              "Find contacts (all)"
-            )}
-          </button>
-          <button
-            type="button"
-            onClick={() => void researchPartnershipsForAllCompanies()}
-            disabled={
-              bulkFindContacts ||
-              bulkPartnershipResearch ||
-              researchingPipelineId != null ||
-              generatingOutreach ||
-              loading ||
-              !rows ||
-              rows.length === 0
-            }
-            className="inline-flex items-center gap-1.5 rounded-md border border-[#2E7040]/60 bg-[#1B2F21] px-3 py-1.5 text-xs font-medium text-[#DBEEE0] hover:bg-[#23452E] disabled:cursor-not-allowed disabled:opacity-50"
-            title="Web search + Gemini for each company; bullets cite search result URLs only"
-          >
-            {bulkPartnershipResearch
-              ? `Researching ${bulkPartnershipIndex}/${rows?.length ?? 0}…`
-              : "Research partnerships (all)"}
-          </button>
-          <button
-            type="button"
-            onClick={() => void handleGenerateOutreachEmails()}
-            disabled={
-              generatingOutreach ||
-              generatingOutreachKey != null ||
-              bulkFindContacts ||
-              bulkPartnershipResearch ||
-              researchingPipelineId != null ||
-              loading ||
-              !rows ||
-              rows.length === 0
-            }
-            className="inline-flex items-center gap-1.5 rounded-md border border-[#2E7040]/60 bg-[#173522] px-3 py-1.5 text-xs font-medium text-[#DBEEE0] hover:bg-[#1F4730] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {generatingOutreach ? "Generating…" : "Generate Outreach Emails"}
-          </button>
-          <button
-            type="button"
-            onClick={() => void handleExport()}
-            disabled={
-              exporting ||
-              bulkFindContacts ||
-              bulkPartnershipResearch ||
-              researchingPipelineId != null ||
-              loading ||
-              !rows ||
-              rows.length === 0
-            }
-            className="inline-flex items-center gap-1.5 rounded-md border border-[#2E7040]/60 bg-[#1B2F21] px-3 py-1.5 text-xs font-medium text-[#DBEEE0] hover:bg-[#23452E] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {exporting ? "Exporting…" : "Export to Excel"}
-          </button>
-        </div>
+  const bulkActionBtnClass =
+    "inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50";
+
+  const listShell = (
+    <div
+      className={cn(
+        "flex min-h-0 flex-col overflow-hidden bg-[#151A17]",
+        focusMode
+          ? "fixed inset-x-0 bottom-0 z-40 border-t border-white/10 shadow-2xl"
+          : cn("flex-1 rounded-lg border border-white/10", className)
+      )}
+      style={focusMode ? { top: navOffsetPx } : undefined}
+    >
+      <header
+        className={cn(
+          "flex shrink-0 items-center justify-between gap-3 border-b border-white/10",
+          focusMode ? "px-3 py-2" : "px-4 py-3"
+        )}
+      >
+        {focusMode ? (
+          <>
+            <div className="flex min-w-0 items-center gap-2">
+              <h3 className="truncate text-sm font-semibold text-[#F4F1EB]">
+                {athleteName ? `${athleteName} — Target List` : "Target List"}
+              </h3>
+              {rows && rows.length > 0 ? (
+                <span className="shrink-0 whitespace-nowrap text-xs text-[#8E877A]">
+                  {rows.length} {rows.length === 1 ? "company" : "companies"}
+                </span>
+              ) : null}
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <div ref={bulkActionsRef} className="relative">
+                <button
+                  type="button"
+                  onClick={() => setBulkActionsOpen((o) => !o)}
+                  disabled={bulkActionsDisabled && !bulkPullHqPhone && !bulkFindContacts && !bulkPartnershipResearch && !generatingOutreach && !exporting}
+                  className={cn(
+                    bulkActionBtnClass,
+                    "border-white/15 bg-[#1A211D] text-[#D7D0C4] hover:bg-white/5"
+                  )}
+                >
+                  Bulk actions
+                </button>
+                {bulkActionsOpen ? (
+                  <div className="absolute right-0 top-full z-50 mt-1 w-56 rounded-md border border-white/10 bg-[#151A17] py-1 shadow-xl">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBulkActionsOpen(false);
+                        requestBulkPullHqPhones();
+                      }}
+                      disabled={bulkActionsDisabled}
+                      className="block w-full px-3 py-2 text-left text-xs text-[#D7D0C4] hover:bg-white/5 disabled:opacity-50"
+                    >
+                      {bulkPullHqPhone ? "Pulling HQ phones…" : "Pull HQ phones (all)"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBulkActionsOpen(false);
+                        requestBulkFindContacts();
+                      }}
+                      disabled={bulkActionsDisabled}
+                      className="block w-full px-3 py-2 text-left text-xs text-[#D7D0C4] hover:bg-white/5 disabled:opacity-50"
+                    >
+                      {bulkFindContacts ? "Finding contacts…" : "Find contacts (all)"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBulkActionsOpen(false);
+                        void researchPartnershipsForAllCompanies();
+                      }}
+                      disabled={bulkActionsDisabled}
+                      className="block w-full px-3 py-2 text-left text-xs text-[#D7D0C4] hover:bg-white/5 disabled:opacity-50"
+                    >
+                      {bulkPartnershipResearch
+                        ? `Researching ${bulkPartnershipIndex}/${rows?.length ?? 0}…`
+                        : "Research partnerships (all)"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBulkActionsOpen(false);
+                        void handleGenerateOutreachEmails();
+                      }}
+                      disabled={bulkActionsDisabled || generatingOutreachKey != null}
+                      className="block w-full px-3 py-2 text-left text-xs text-[#D7D0C4] hover:bg-white/5 disabled:opacity-50"
+                    >
+                      {generatingOutreach ? "Generating…" : "Generate outreach emails"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBulkActionsOpen(false);
+                        void handleExport();
+                      }}
+                      disabled={bulkActionsDisabled || exporting}
+                      className="block w-full px-3 py-2 text-left text-xs text-[#D7D0C4] hover:bg-white/5 disabled:opacity-50"
+                    >
+                      {exporting ? "Exporting…" : "Export to Excel"}
+                    </button>
+                    {athleteName ? (
+                      <Link
+                        href={`/ai?athlete_id=${encodeURIComponent(athleteId)}&context=target_list&athlete_name=${encodeURIComponent(athleteName)}`}
+                        className="block px-3 py-2 text-left text-xs text-[#CEE4D4] hover:bg-white/5"
+                        onClick={() => setBulkActionsOpen(false)}
+                      >
+                        Prospect & import in Mystery Machine
+                      </Link>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+              <button
+                type="button"
+                onClick={() => setAiDockCollapsed((c) => !c)}
+                className={cn(
+                  bulkActionBtnClass,
+                  "border-[#2E7040]/60 bg-[#173522] text-[#DBEEE0] hover:bg-[#1F4730]"
+                )}
+                title="Toggle Target List AI (⌘J)"
+              >
+                {aiDockCollapsed ? "Open AI" : "AI open"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setFocusModePersisted(false)}
+                className={cn(
+                  bulkActionBtnClass,
+                  "border-white/15 bg-[#1A211D] text-[#D7D0C4] hover:bg-white/5"
+                )}
+                title="Exit focus mode (Esc)"
+              >
+                <Minimize2 className="h-3.5 w-3.5" aria-hidden />
+                Exit focus
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div>
+              <h3 className="text-base font-semibold text-[#F4F1EB]">Target List</h3>
+              <p className="mt-0.5 text-xs text-[#B9B2A6]">
+                Every company prospected and assigned to this athlete in your CRM pipeline. Click any cell to edit in
+                place; changes sync to the CRM. Rows without a contact are highlighted.
+              </p>
+              {athleteName ? (
+                <Link
+                  href={`/ai?athlete_id=${encodeURIComponent(athleteId)}&context=target_list&athlete_name=${encodeURIComponent(athleteName)}`}
+                  className="mt-1 inline-block text-xs text-[#CEE4D4] underline hover:text-[#E8F6ED]"
+                >
+                  Prospect & import in Mystery Machine
+                </Link>
+              ) : null}
+            </div>
+            <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3">
+              {rows && rows.length > 0 ? (
+                <span className="whitespace-nowrap text-xs text-[#B9B2A6]">
+                  {rows.length} {rows.length === 1 ? "company" : "companies"}
+                </span>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => setFocusModePersisted(true)}
+                className={cn(
+                  bulkActionBtnClass,
+                  "border-white/15 bg-[#1A211D] text-[#D7D0C4] hover:bg-white/5"
+                )}
+                title="Expand spreadsheet — hide athlete header and tabs"
+              >
+                <Maximize2 className="h-3.5 w-3.5" aria-hidden />
+                Expand
+              </button>
+              <button
+                type="button"
+                onClick={() => setAiDockCollapsed((c) => !c)}
+                className={cn(
+                  bulkActionBtnClass,
+                  "border-[#2E7040]/60 bg-[#173522] text-[#DBEEE0] hover:bg-[#1F4730]"
+                )}
+                title="Toggle Target List AI (⌘J)"
+              >
+                {aiDockCollapsed ? (
+                  <>
+                    Open AI assistant <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
+                  </>
+                ) : (
+                  "AI assistant open"
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => requestBulkPullHqPhones()}
+                disabled={bulkActionsDisabled}
+                className={cn(
+                  bulkActionBtnClass,
+                  "border-[#3A4A5E]/60 bg-[#1A2028] text-[#B8C8DC] hover:bg-[#222A35]"
+                )}
+                title="Apollo organization enrich — corporate HQ / switchboard numbers"
+              >
+                {bulkPullHqPhone ? "Pulling HQ phones…" : "Pull HQ phones (all)"}
+              </button>
+              <button
+                type="button"
+                onClick={() => requestBulkFindContacts()}
+                disabled={bulkActionsDisabled}
+                className={cn(
+                  bulkActionBtnClass,
+                  "border-[#2E7040]/60 bg-[#1B2F21] text-[#DBEEE0] hover:bg-[#23452E]"
+                )}
+                title={formatApolloPartnershipSearchSummary()}
+              >
+                {bulkFindContacts ? (
+                  <>
+                    <span
+                      className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-[#DBEEE0]/25 border-t-[#DBEEE0]"
+                      aria-hidden
+                    />
+                    Finding contacts…
+                  </>
+                ) : (
+                  "Find contacts (all)"
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => void researchPartnershipsForAllCompanies()}
+                disabled={bulkActionsDisabled}
+                className={cn(
+                  bulkActionBtnClass,
+                  "border-[#2E7040]/60 bg-[#1B2F21] text-[#DBEEE0] hover:bg-[#23452E]"
+                )}
+                title="Web search + Gemini for each company; bullets cite search result URLs only"
+              >
+                {bulkPartnershipResearch
+                  ? `Researching ${bulkPartnershipIndex}/${rows?.length ?? 0}…`
+                  : "Research partnerships (all)"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleGenerateOutreachEmails()}
+                disabled={bulkActionsDisabled || generatingOutreachKey != null}
+                className={cn(
+                  bulkActionBtnClass,
+                  "border-[#2E7040]/60 bg-[#173522] text-[#DBEEE0] hover:bg-[#1F4730]"
+                )}
+              >
+                {generatingOutreach ? "Generating…" : "Generate Outreach Emails"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleExport()}
+                disabled={bulkActionsDisabled || exporting}
+                className={cn(
+                  bulkActionBtnClass,
+                  "border-[#2E7040]/60 bg-[#1B2F21] text-[#DBEEE0] hover:bg-[#23452E]"
+                )}
+              >
+                {exporting ? "Exporting…" : "Export to Excel"}
+              </button>
+            </div>
+          </>
+        )}
       </header>
+
+      <TargetListActionDialog
+        open={bulkPullHqConfirmOpen}
+        title="Pull HQ phones for all companies?"
+        description={
+          <>
+            <p>
+              Run Apollo organization enrichment for every company on this list ({rows?.length ?? 0}{" "}
+              {rows?.length === 1 ? "company" : "companies"}) to fetch corporate switchboard numbers.
+            </p>
+            <p className="text-[#AEA79A]">
+              Companies need a website on file. Existing HQ numbers are kept unless Apollo returns a new
+              value for blank cells. Uses Apollo enrichment credits.
+            </p>
+          </>
+        }
+        confirmLabel="Pull HQ phones (all)"
+        dismissStorageKey={TARGET_LIST_PULL_HQ_PHONE_DISMISS_KEY}
+        onCancel={() => setBulkPullHqConfirmOpen(false)}
+        onConfirm={() => {
+          setBulkPullHqConfirmOpen(false);
+          void pullHqPhonesForAllCompanies();
+        }}
+      />
 
       <TargetListActionDialog
         open={bulkFindConfirmOpen}
@@ -1255,6 +1772,64 @@ export function AthleteTargetList({
         </div>
       ) : null}
 
+      {updateToast ? (
+        <div className="border-b border-[#2E7040]/40 bg-[#1B2F21] px-4 py-2 text-xs text-[#DBEEE0]">{updateToast}</div>
+      ) : null}
+
+      {rows && rows.length > 0 ? (
+        <div
+          className={cn(
+            "flex shrink-0 items-center gap-1.5 border-b border-white/10",
+            focusMode ? "overflow-x-auto px-3 py-1.5 flex-nowrap" : "flex-wrap px-4 py-2"
+          )}
+        >
+          <span className="mr-1 text-[10px] font-medium uppercase tracking-wide text-[#8E877A]">Category</span>
+          <button
+            type="button"
+            onClick={() => setActiveCategoryFilter(TARGET_LIST_CATEGORY_FILTER_ALL)}
+            className={cn(
+              "rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-colors",
+              activeCategoryFilter === TARGET_LIST_CATEGORY_FILTER_ALL
+                ? "bg-[#2E7040] text-[#F2FFF5]"
+                : "border border-white/10 text-[#B9B2A6] hover:bg-white/5"
+            )}
+          >
+            All ({categorySummary.total})
+          </button>
+          {categorySummary.uncategorized > 0 ? (
+            <button
+              type="button"
+              onClick={() => setActiveCategoryFilter(TARGET_LIST_CATEGORY_FILTER_UNCATEGORIZED)}
+              className={cn(
+                "rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-colors",
+                activeCategoryFilter === TARGET_LIST_CATEGORY_FILTER_UNCATEGORIZED
+                  ? "bg-[#2E7040] text-[#F2FFF5]"
+                  : "border border-white/10 text-[#B9B2A6] hover:bg-white/5"
+              )}
+            >
+              Uncategorized ({categorySummary.uncategorized})
+            </button>
+          ) : null}
+          {categorySummary.sorted.map(([cat, count]) => (
+            <button
+              key={cat}
+              type="button"
+              onClick={() => setActiveCategoryFilter(cat)}
+              className={cn(
+                "rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-colors",
+                activeCategoryFilter === cat
+                  ? "bg-[#2E7040] text-[#F2FFF5]"
+                  : "border border-white/10 text-[#B9B2A6] hover:bg-white/5"
+              )}
+            >
+              {cat} ({count})
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="flex min-h-0 flex-1 flex-row overflow-hidden">
+      <div className="min-h-0 min-w-0 flex-1 overflow-auto">
       {loading ? (
         <div className="p-4 text-sm text-[#B9B2A6]">Loading target list…</div>
       ) : error ? (
@@ -1264,6 +1839,8 @@ export function AthleteTargetList({
           No target companies yet. Open <Link href="/crm" className="text-[#CEE4D4] underline hover:text-[#E8F6ED]">the CRM</Link> and assign this
           athlete on a pipeline card to populate this list.
         </div>
+      ) : flat.length === 0 ? (
+        <div className="p-4 text-sm text-[#B9B2A6]">No companies match this category filter.</div>
       ) : (
         <div className="overflow-x-auto">
           <table className="min-w-full border-collapse text-sm">
@@ -1293,7 +1870,21 @@ export function AthleteTargetList({
                   : "";
 
                 return (
-                  <tr key={fr.key} className="border-t border-white/10 align-top hover:bg-white/[0.03]">
+                  <tr
+                    key={fr.key}
+                    className={cn(
+                      "border-t border-white/10 align-top hover:bg-white/[0.03] cursor-pointer",
+                      focusedRow?.pipelineId === row.pipeline_id &&
+                        focusedRow.contactIndex === fr.contactIndex &&
+                        "ring-1 ring-inset ring-[#2E7040]/50 bg-[#2E7040]/5",
+                      flashedPipelineIds.has(row.pipeline_id) && "bg-[#2E7040]/12 transition-colors duration-500"
+                    )}
+                    onClick={(e) => {
+                      const t = e.target as HTMLElement;
+                      if (t.closest("button, a, input, textarea, select, label")) return;
+                      focusFlatRow(fr);
+                    }}
+                  >
                     {/* Category */}
                     <Td>
                       {fr.showCategory ? (
@@ -1321,6 +1912,19 @@ export function AthleteTargetList({
                     <Td className={yellowCell}>
                       {fr.showCompany ? (
                         <div className="space-y-1">
+                          <label className="flex items-start gap-1.5">
+                            <input
+                              type="checkbox"
+                              className="mt-1 shrink-0 rounded border-white/20 bg-transparent"
+                              checked={selectedCompanyIds.has(row.company_id)}
+                              onChange={(e) => {
+                                e.stopPropagation();
+                                toggleCompanySelected(row.company_id, e.target.checked);
+                              }}
+                              onClick={(e) => e.stopPropagation()}
+                              aria-label={`Select ${row.company_name}`}
+                            />
+                            <span className="min-w-0 flex-1">
                           <EditableCell
                             value={row.company_name}
                             placeholder="Company name"
@@ -1339,13 +1943,26 @@ export function AthleteTargetList({
                               </Link>
                             )}
                           />
+                            </span>
+                          </label>
                           <ApolloFindContactsInline
                             companyId={row.company_id}
                             companyName={row.company_name}
                             searchOverrides={apolloSearchOverrides}
                             onRefineSearchClick={() => setRefineSearchOpen(true)}
-                            disabled={bulkFindContacts || removingPipelineId === row.pipeline_id}
-                            onContacts={(contacts) => applyCompanyContactsToRows(row.company_id, contacts)}
+                            disabled={bulkFindContacts || bulkPullHqPhone || removingPipelineId === row.pipeline_id}
+                            onContacts={(contacts, meta) =>
+                              applyCompanyContactsToRows(row.company_id, contacts, meta)
+                            }
+                            onError={(msg) => setGlobalError(msg)}
+                          />
+                          <ApolloEnrichHqPhoneInline
+                            companyId={row.company_id}
+                            companyName={row.company_name}
+                            hqPhone={row.hq_phone}
+                            website={row.website}
+                            disabled={bulkFindContacts || bulkPullHqPhone || removingPipelineId === row.pipeline_id}
+                            onHqPhone={(hqPhone) => patchRowLocal(fr.rowIndex, { hq_phone: hqPhone })}
                             onError={(msg) => setGlobalError(msg)}
                           />
                           <button
@@ -1353,6 +1970,7 @@ export function AthleteTargetList({
                             className="block w-full rounded border border-[#8C3A3A]/50 bg-[#2A1818] px-1.5 py-0.5 text-[10px] font-medium text-[#F1A2A2] hover:bg-[#3A1E1E] disabled:cursor-not-allowed disabled:opacity-50"
                             disabled={
                               bulkFindContacts ||
+                              bulkPullHqPhone ||
                               bulkPartnershipResearch ||
                               removingPipelineId === row.pipeline_id ||
                               deletingContactsCompanyId === row.company_id
@@ -1374,6 +1992,7 @@ export function AthleteTargetList({
                             deleting={deletingContactsCompanyId === row.company_id}
                             disabled={
                               bulkFindContacts ||
+                              bulkPullHqPhone ||
                               bulkPartnershipResearch ||
                               removingPipelineId === row.pipeline_id
                             }
@@ -1578,16 +2197,51 @@ export function AthleteTargetList({
 
                     {/* Number */}
                     <Td className={yellowCell}>
-                      <EditableCell
-                        value={contact?.phone ?? ""}
-                        placeholder="+1 (555) 555-5555"
-                        disabled={!contact}
-                        onSave={async (next) => {
-                          if (!contact) return;
-                          await saveContactPatch(fr.rowIndex, fr.contactIndex!, { phone: next || null });
-                          patchContactLocal(fr.rowIndex, fr.contactIndex!, { phone: next || null });
-                        }}
-                      />
+                      {contact?.apollo_person_id &&
+                      !contact.phone &&
+                      contact.apollo_phone_reveal_status !== "revealed" ? (
+                        <ContactPhoneCell
+                          contactId={contact.contact_id}
+                          phone={contact.phone}
+                          apolloPersonId={contact.apollo_person_id}
+                          apolloPhoneRevealStatus={contact.apollo_phone_reveal_status ?? null}
+                          compact
+                          onRevealed={(updated) => {
+                            patchContactLocal(fr.rowIndex, fr.contactIndex!, {
+                              phone: (updated.phone as string) ?? contact.phone,
+                              apollo_phone_reveal_status:
+                                updated.apollo_phone_reveal_status === "pending" ||
+                                updated.apollo_phone_reveal_status === "revealed"
+                                  ? (updated.apollo_phone_reveal_status as "pending" | "revealed")
+                                  : "pending",
+                            });
+                          }}
+                        />
+                      ) : (
+                        <EditableCell
+                          value={contact?.phone ?? ""}
+                          placeholder="+1 (555) 555-5555"
+                          disabled={!contact}
+                          onSave={async (next) => {
+                            if (!contact) return;
+                            await saveContactPatch(fr.rowIndex, fr.contactIndex!, { phone: next || null });
+                            patchContactLocal(fr.rowIndex, fr.contactIndex!, { phone: next || null });
+                          }}
+                          display={(v) =>
+                            v ? (
+                              <a
+                                href={`tel:${v.replace(/\s/g, "")}`}
+                                className="text-[#CEE4D4] hover:underline"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                {v}
+                              </a>
+                            ) : (
+                              <span className="text-[#8E877A]">—</span>
+                            )
+                          }
+                        />
+                      )}
                     </Td>
 
                     {/* HQ Number */}
@@ -1730,6 +2384,7 @@ export function AthleteTargetList({
                               generatingOutreach ||
                               generatingOutreachKey === outreachGenerateKey(fr.rowIndex, fr.contactIndex) ||
                               bulkFindContacts ||
+                              bulkPullHqPhone ||
                               bulkPartnershipResearch
                             }
                             title={
@@ -1801,7 +2456,34 @@ export function AthleteTargetList({
           </table>
         </div>
       )}
-    </section>
+      </div>
+      <TargetListAiPanel
+        athleteId={athleteId}
+        athleteName={athleteName}
+        rows={rows ?? []}
+        activeCategoryFilter={activeCategoryFilter}
+        selectedCompanyIds={selectedCompanyIds}
+        focusedRow={focusedRow}
+        getSessionContext={getSessionContext}
+        onMutatingToolsUsed={() => void refreshAfterAiMutation()}
+        collapsed={aiDockCollapsed}
+        onCollapsedChange={setAiDockCollapsed}
+      />
+      </div>
+    </div>
+  );
+
+  return (
+    <>
+      <ApolloRefineSearchDialog
+        open={refineSearchOpen}
+        prefs={apolloProspectingPrefs}
+        onClose={() => setRefineSearchOpen(false)}
+        onSave={updateApolloProspectingPrefs}
+      />
+      {focusMode && typeof document !== "undefined"
+        ? createPortal(listShell, document.body)
+        : listShell}
     </>
   );
 }

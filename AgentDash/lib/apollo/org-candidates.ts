@@ -19,6 +19,7 @@ export type CompanyOrgRow = {
   industry: string | null;
   product_category: string | null;
   apollo_organization_id: string | null;
+  hq_phone: string | null;
 };
 
 export type OrgCandidateRow = {
@@ -39,7 +40,7 @@ export async function loadCompanyOrgRow(
 ): Promise<CompanyOrgRow> {
   const { data: company, error } = await supabaseAdmin
     .from("companies")
-    .select("company_id, name, website, industry, product_category, apollo_organization_id")
+    .select("company_id, name, website, industry, product_category, apollo_organization_id, hq_phone")
     .eq("company_id", companyId)
     .single();
 
@@ -56,6 +57,7 @@ export async function loadCompanyOrgRow(
     apollo_organization_id: company.apollo_organization_id
       ? String(company.apollo_organization_id)
       : null,
+    hq_phone: company.hq_phone ? String(company.hq_phone) : null,
   };
 }
 

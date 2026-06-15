@@ -91,6 +91,8 @@ export function mapRawOrganization(raw: Record<string, unknown>): import("@/lib/
   };
 }
 
+import { extractOrgPhone } from "@/lib/apollo/phone-utils";
+
 export function mapEnrichedOrganization(org: Record<string, unknown>): import("@/lib/apollo/org-search-types").ApolloEnrichedOrganization {
   const primary_domain =
     org.primary_domain != null ? String(org.primary_domain).replace(/^www\./i, "") : null;
@@ -124,6 +126,7 @@ export function mapEnrichedOrganization(org: Record<string, unknown>): import("@
           ? String(org.seo_description)
           : null,
     primary_domain,
+    hq_phone: extractOrgPhone(org),
     estimated_num_employees:
       typeof org.estimated_num_employees === "number" ? org.estimated_num_employees : null,
     annual_revenue: typeof org.annual_revenue === "number" ? org.annual_revenue : null,

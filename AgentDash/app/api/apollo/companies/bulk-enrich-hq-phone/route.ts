@@ -2,10 +2,8 @@ import { NextResponse } from "next/server";
 import { requireProfile } from "@/lib/auth";
 import { createServiceRoleClient } from "@/lib/supabase/server";
 import { isApolloEnabled } from "@/lib/apollo/config";
-import { findContactsForCompany } from "@/lib/apollo/find-company-contacts";
+import { enrichCompanyHqPhone } from "@/lib/apollo/enrich-company-hq-phone";
 import { ApolloApiError } from "@/lib/apollo/client";
-import { parseContactSearchOverridesFromBody } from "@/lib/apollo/contact-search-api-body";
-import { apolloContactOverridesToPeopleSearch } from "@/lib/apollo/search-defaults";
 
 export async function POST(req: Request) {
   const profile = await requireProfile();
@@ -17,6 +15,7 @@ export async function POST(req: Request) {
   const companyIds = Array.isArray(body.company_ids)
     ? ([...new Set(body.company_ids.map((id: unknown) => String(id)).filter(Boolean))] as string[])
     : [];
+  const overwrite = body.overwrite === true;
 
   if (companyIds.length === 0) {
     return NextResponse.json({ error: "company_ids required" }, { status: 400 });
@@ -25,36 +24,29 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Max 80 companies per bulk request" }, { status: 400 });
   }
 
-  const overrides = apolloContactOverridesToPeopleSearch(
-    parseContactSearchOverridesFromBody(body as Record<string, unknown>)
-  );
-
   const supabaseAdmin = await createServiceRoleClient();
   const results: Array<{
     company_id: string;
     ok: boolean;
-    found?: number;
-    created?: number;
-    updated?: number;
-    contacts?: unknown[];
+    hq_phone?: string | null;
+    updated?: boolean;
+    found?: boolean;
     error?: string;
   }> = [];
 
   for (const companyId of companyIds) {
     try {
-      const result = await findContactsForCompany(supabaseAdmin, {
+      const result = await enrichCompanyHqPhone(supabaseAdmin, {
         userId: profile.user_id,
         companyId,
-        overrides,
+        overwrite,
       });
       results.push({
         company_id: companyId,
         ok: true,
-        found: result.found,
-        created: result.created,
-        updated: result.updated,
-        contacts: result.contacts,
         hq_phone: result.hq_phone,
+        updated: result.updated,
+        found: result.found,
       });
     } catch (e) {
       const msg =
@@ -71,8 +63,8 @@ export async function POST(req: Request) {
     companies: companyIds.length,
     succeeded: results.filter((r) => r.ok).length,
     failed: results.filter((r) => !r.ok).length,
-    total_found: results.reduce((n, r) => n + (r.found ?? 0), 0),
-    total_created: results.reduce((n, r) => n + (r.created ?? 0), 0),
+    updated: results.filter((r) => r.ok && r.updated).length,
+    found: results.filter((r) => r.ok && r.found).length,
   };
 
   return NextResponse.json({ summary, results });

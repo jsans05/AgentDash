@@ -13,6 +13,7 @@ export type TargetListContact = {
   linkedin_url: string | null;
   apollo_person_id: string | null;
   apollo_reveal_status: "pending" | "revealed" | null;
+  apollo_phone_reveal_status: "pending" | "revealed" | null;
   outreach_email_subject: string | null;
   outreach_email: string | null;
   /** Raw drafts for client-side upsert on edit; not shown in table. */
@@ -51,6 +52,7 @@ function mergeContact(base: TargetListContact, next: TargetListContact): TargetL
     linkedin_url: base.linkedin_url ?? next.linkedin_url ?? null,
     apollo_person_id: base.apollo_person_id ?? next.apollo_person_id ?? null,
     apollo_reveal_status: base.apollo_reveal_status ?? next.apollo_reveal_status ?? null,
+    apollo_phone_reveal_status: base.apollo_phone_reveal_status ?? next.apollo_phone_reveal_status ?? null,
     outreach_email_subject: base.outreach_email_subject ?? next.outreach_email_subject ?? null,
     outreach_email: base.outreach_email ?? next.outreach_email ?? null,
     email_drafts: base.email_drafts ?? next.email_drafts ?? [],
@@ -139,7 +141,7 @@ export async function fetchAthleteTargetListRows(
   const { data: contactRows, error: contactErr } = await supabase
     .from("crm_contacts")
     .select(
-      "contact_id, company_id, first_name, last_name, role, email, phone, notes, linkedin_url, apollo_person_id, apollo_reveal_status, email_drafts, archived"
+      "contact_id, company_id, first_name, last_name, role, email, phone, notes, linkedin_url, apollo_person_id, apollo_reveal_status, apollo_phone_reveal_status, email_drafts, archived"
     )
     .in("company_id", companyIds)
     .eq("created_by_user_id", createdByUserId)
@@ -165,6 +167,10 @@ export async function fetchAthleteTargetListRows(
       apollo_reveal_status:
         c.apollo_reveal_status === "pending" || c.apollo_reveal_status === "revealed"
           ? c.apollo_reveal_status
+          : null,
+      apollo_phone_reveal_status:
+        c.apollo_phone_reveal_status === "pending" || c.apollo_phone_reveal_status === "revealed"
+          ? c.apollo_phone_reveal_status
           : null,
       outreach_email_subject: outreach?.subject ?? null,
       outreach_email: outreach?.body ?? null,

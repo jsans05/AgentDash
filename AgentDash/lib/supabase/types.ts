@@ -103,6 +103,7 @@ export type CrmContact = {
 
   apollo_person_id: string | null;
   apollo_reveal_status: "pending" | "revealed" | null;
+  apollo_phone_reveal_status: "pending" | "revealed" | null;
 
   created_at: string;
   updated_at: string;
