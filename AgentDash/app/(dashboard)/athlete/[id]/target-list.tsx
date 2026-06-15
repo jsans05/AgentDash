@@ -4,12 +4,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { ApolloRevealStatus } from "@/components/crm/ApolloContactActions";
 import { ContactEmailCell } from "@/components/crm/ContactEmailCell";
-import { ApolloFindContactsInline, type ApolloContactSearchOverrides } from "@/components/crm/ApolloFindContactsInline";
-import { ApolloTargetListProspecting } from "@/components/crm/ApolloTargetListProspecting";
+import { ApolloFindContactsInline } from "@/components/crm/ApolloFindContactsInline";
+import { ApolloRefineSearchDialog } from "@/components/crm/ApolloRefineSearchDialog";
+import { contactSearchOverridesToRequestBody } from "@/lib/apollo/contact-search-api-body";
 import {
   loadApolloRevenueFilterPrefs,
   parseRevenueFilterBody,
+  saveApolloRevenueFilterPrefs,
+  type ApolloRevenueFilterPrefs,
 } from "@/lib/apollo/prospecting-prefs";
+import type { ApolloContactSearchOverrides } from "@/lib/apollo/search-defaults";
 import { ContactLinkedinCell } from "@/components/crm/ContactLinkedinCell";
 import { PartnershipNotesDisplay } from "@/components/crm/PartnershipNotesDisplay";
 import { TargetListActionDialog } from "@/components/crm/TargetListActionDialog";
@@ -313,7 +317,6 @@ export function AthleteTargetList({
     null
   );
   const [removingPipelineId, setRemovingPipelineId] = useState<string | null>(null);
-  const [selectedCompanyIds, setSelectedCompanyIds] = useState<Set<string>>(new Set());
   const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set());
   const [deletingContactsCompanyId, setDeletingContactsCompanyId] = useState<string | null>(null);
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState<{
@@ -321,11 +324,21 @@ export function AthleteTargetList({
     contactIds: string[];
     mode: "unrevealed" | "selected";
   } | null>(null);
+  const [apolloProspectingPrefs, setApolloProspectingPrefs] = useState<ApolloRevenueFilterPrefs>({});
   const [apolloSearchOverrides, setApolloSearchOverrides] = useState<ApolloContactSearchOverrides>({});
+  const [refineSearchOpen, setRefineSearchOpen] = useState(false);
 
   useEffect(() => {
-    setApolloSearchOverrides(parseRevenueFilterBody(loadApolloRevenueFilterPrefs()));
+    const prefs = loadApolloRevenueFilterPrefs();
+    setApolloProspectingPrefs(prefs);
+    setApolloSearchOverrides(parseRevenueFilterBody(prefs));
   }, []);
+
+  function updateApolloProspectingPrefs(prefs: ApolloRevenueFilterPrefs) {
+    setApolloProspectingPrefs(prefs);
+    saveApolloRevenueFilterPrefs(prefs);
+    setApolloSearchOverrides(parseRevenueFilterBody(prefs));
+  }
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -569,13 +582,10 @@ export function AthleteTargetList({
     setGlobalError(null);
     const companyIds = [...new Set(rows.map((r) => r.company_id))];
     try {
-      const body: Record<string, unknown> = { company_ids: companyIds };
-      if (apolloSearchOverrides.organization_locations?.length) {
-        body.organization_locations = apolloSearchOverrides.organization_locations;
-      }
-      if (apolloSearchOverrides.revenue_range) {
-        body.revenue_range = apolloSearchOverrides.revenue_range;
-      }
+      const body: Record<string, unknown> = {
+        company_ids: companyIds,
+        ...contactSearchOverridesToRequestBody(apolloSearchOverrides),
+      };
       const res = await fetch("/api/apollo/companies/bulk-find-contacts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1009,6 +1019,13 @@ export function AthleteTargetList({
   }
 
   return (
+    <>
+    <ApolloRefineSearchDialog
+      open={refineSearchOpen}
+      prefs={apolloProspectingPrefs}
+      onClose={() => setRefineSearchOpen(false)}
+      onSave={updateApolloProspectingPrefs}
+    />
     <section className="rounded-lg border border-white/10 bg-[#151A17]">
       <header className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
         <div>
@@ -1018,16 +1035,6 @@ export function AthleteTargetList({
             changes sync to the CRM. Rows without a contact are highlighted.
           </p>
         </div>
-        <div className="flex w-full flex-col items-stretch gap-2 sm:w-auto">
-          {rows && rows.length > 0 ? (
-            <ApolloTargetListProspecting
-              athleteId={athleteId}
-              selectedCompanyIds={[...selectedCompanyIds]}
-              disabled={bulkFindContacts || bulkPartnershipResearch || researchingPipelineId != null || loading}
-              onError={(msg) => setGlobalError(msg)}
-              onPrefsChange={(p) => setApolloSearchOverrides(parseRevenueFilterBody(p))}
-            />
-          ) : null}
         <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3">
           {rows && rows.length > 0 ? (
             <span className="whitespace-nowrap text-xs text-[#B9B2A6]">
@@ -1113,7 +1120,6 @@ export function AthleteTargetList({
           >
             {exporting ? "Exporting…" : "Export to Excel"}
           </button>
-        </div>
         </div>
       </header>
 
@@ -1315,24 +1321,6 @@ export function AthleteTargetList({
                     <Td className={yellowCell}>
                       {fr.showCompany ? (
                         <div className="space-y-1">
-                          <label className="flex items-center gap-1.5 text-[10px] text-[#AEA79A]">
-                            <input
-                              type="checkbox"
-                              className="rounded border-white/20"
-                              checked={selectedCompanyIds.has(row.company_id)}
-                              onChange={(e) => {
-                                e.stopPropagation();
-                                setSelectedCompanyIds((prev) => {
-                                  const next = new Set(prev);
-                                  if (e.target.checked) next.add(row.company_id);
-                                  else next.delete(row.company_id);
-                                  return next;
-                                });
-                              }}
-                              onClick={(e) => e.stopPropagation()}
-                            />
-                            Select for expand
-                          </label>
                           <EditableCell
                             value={row.company_name}
                             placeholder="Company name"
@@ -1355,6 +1343,7 @@ export function AthleteTargetList({
                             companyId={row.company_id}
                             companyName={row.company_name}
                             searchOverrides={apolloSearchOverrides}
+                            onRefineSearchClick={() => setRefineSearchOpen(true)}
                             disabled={bulkFindContacts || removingPipelineId === row.pipeline_id}
                             onContacts={(contacts) => applyCompanyContactsToRows(row.company_id, contacts)}
                             onError={(msg) => setGlobalError(msg)}
@@ -1813,6 +1802,7 @@ export function AthleteTargetList({
         </div>
       )}
     </section>
+    </>
   );
 }
 

@@ -13,7 +13,8 @@ const PLACEHOLDER_PATTERNS: RegExp[] = [
 ];
 
 function hasPlaceholderText(value: string): boolean {
-  return PLACEHOLDER_PATTERNS.some((pattern) => pattern.test(value));
+  const withoutMarkdownLinks = value.replace(/\[[^\]]+\]\([^)]+\)/g, "");
+  return PLACEHOLDER_PATTERNS.some((pattern) => pattern.test(withoutMarkdownLinks));
 }
 
 export function validateEmailDraft(value: string): ValidationResult {
@@ -116,6 +117,13 @@ export function validateGroupedProspectingOutput(value: string): ValidationResul
       return {
         ok: false,
         error: "Prospecting table rows must have exactly four columns (Company, Match Score, Website, Partnership Justification).",
+      };
+    }
+    const scoreCell = cells[1] ?? "";
+    if (!/^\d{1,3}$/.test(scoreCell) || Number(scoreCell) > 100) {
+      return {
+        ok: false,
+        error: "Match Score must be an integer from 0 to 100 (no stars, labels, or text).",
       };
     }
   }

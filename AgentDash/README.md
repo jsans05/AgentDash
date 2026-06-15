@@ -56,8 +56,13 @@ AUTH_LOGIN_WINDOW_SECONDS=900
 AUTH_LOGIN_MAX_FAILURES=5
 AUTH_LOGIN_LOCKOUT_SECONDS=900
 
-# OpenAI (required for AI assistant)
-OPENAI_API_KEY=your_openai_key
+# Anthropic Claude (required for AI assistant)
+ANTHROPIC_API_KEY=your_anthropic_key
+
+# Flow mode enforcement (default: schema)
+# FLOW_MODE_ENFORCEMENT=schema   # mode chips block tools in schema (Phase 1–4 behavior)
+# FLOW_MODE_ENFORCEMENT=advisory # mode hints in prompt only; all tools visible
+# FLOW_MODE_ENFORCEMENT=off      # no mode hint; intent-based runtime guards only
 
 # Web Enrichment (default: Tavily)
 TAVILY_API_KEY=your_tavily_key

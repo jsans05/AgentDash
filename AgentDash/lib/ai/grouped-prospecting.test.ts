@@ -4,6 +4,7 @@ import {
   buildGroupedProspectsMarkdown,
   buildPartnershipJustification,
   flattenGroupedToRows,
+  matchScoreOutOf100,
   PROSPECTING_TABLE_HEADER,
   scoreCategoryCandidate,
   type ProspectCategoryCandidate,
@@ -45,7 +46,8 @@ test("buildGroupedProspectsMarkdown uses four-column contract and score order", 
   const lowIdx = md.indexOf("Low Brand");
   assert.ok(topIdx >= 0 && lowIdx >= 0);
   assert.ok(topIdx < lowIdx);
-  assert.ok(md.includes("| Top Brand | 9 | — |"));
+  assert.ok(md.includes("| Top Brand | 90 |"));
+  assert.ok(md.includes("[low.example](https://low.example)"));
   assert.ok(validateGroupedProspectingOutput(md).ok);
 });
 
@@ -65,7 +67,7 @@ test("flattenGroupedToRows preserves match_score and website", () => {
   });
   assert.equal(rows.length, 1);
   assert.equal(rows[0]?.company_name, "Nike");
-  assert.equal(rows[0]?.match_score, 7);
+  assert.equal(rows[0]?.match_score, 70);
   assert.equal(rows[0]?.website, "https://nike.com");
 });
 
@@ -103,4 +105,19 @@ test("validateGroupedProspectingOutput rejects legacy three-column tables", () =
 | Acme | Drinks | Good fit |
 `;
   assert.equal(validateGroupedProspectingOutput(legacy).ok, false);
+});
+
+test("validateGroupedProspectingOutput rejects non-numeric match scores", () => {
+  const bad = `## Energy
+${PROSPECTING_TABLE_HEADER}
+| --- | --- | --- | --- |
+| Acme | ⭐ High | [acme.com](https://acme.com) | Good fit |
+`;
+  assert.equal(validateGroupedProspectingOutput(bad).ok, false);
+});
+
+test("matchScoreOutOf100 maps internal rubric to 0-100", () => {
+  assert.equal(matchScoreOutOf100(10), 100);
+  assert.equal(matchScoreOutOf100(7), 70);
+  assert.equal(matchScoreOutOf100(0), 0);
 });

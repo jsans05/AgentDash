@@ -1,3 +1,4 @@
+import { getFlowModeEnforcement } from "@/lib/ai/feature-flags";
 import { ASK_USER_QUESTION_TOOL } from "@/lib/ai/user-question";
 import type { AIFlowIntent } from "@/lib/ai/flow-intent";
 import type { ResolvedFlowMode } from "@/lib/ai/flow-mode";
@@ -279,7 +280,8 @@ export function getMissingRequiredTools(
 ): string[] {
   const required: string[] = [];
   const selectedInterestsCount = context?.selectedInterestsCount ?? 0;
-  const flowMode = context?.flowMode;
+  const flowMode =
+    getFlowModeEnforcement() === "off" ? "default" : (context?.flowMode ?? "default");
   if (context?.emailRevisionMode) {
     return required;
   }

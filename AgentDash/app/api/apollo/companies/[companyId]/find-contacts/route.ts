@@ -4,7 +4,11 @@ import { createServiceRoleClient } from "@/lib/supabase/server";
 import { isApolloEnabled } from "@/lib/apollo/config";
 import { findContactsForCompany } from "@/lib/apollo/find-company-contacts";
 import { ApolloApiError } from "@/lib/apollo/client";
-import type { ApolloContactSearchMode, ApolloPeopleSearchOverrides } from "@/lib/apollo/search-defaults";
+import { parseContactSearchOverridesFromBody } from "@/lib/apollo/contact-search-api-body";
+import {
+  apolloContactOverridesToPeopleSearch,
+  type ApolloContactSearchMode,
+} from "@/lib/apollo/search-defaults";
 
 export async function POST(
   req: Request,
@@ -18,13 +22,9 @@ export async function POST(
   const { companyId } = await params;
   const body = await req.json().catch(() => ({}));
 
-  const overrides: ApolloPeopleSearchOverrides = {};
-  if (Array.isArray(body.organization_locations)) {
-    overrides.organization_locations = body.organization_locations.map(String);
-  }
-  if (body.revenue_range?.min != null) overrides.revenue_range_min = Number(body.revenue_range.min);
-  if (body.revenue_range?.max != null) overrides.revenue_range_max = Number(body.revenue_range.max);
-  if (body.page != null) overrides.page = Number(body.page);
+  const overrides = apolloContactOverridesToPeopleSearch(
+    parseContactSearchOverridesFromBody(body as Record<string, unknown>)
+  );
 
   const searchMode: ApolloContactSearchMode =
     body.search_mode === "all_verified" ? "all_verified" : "partnership";

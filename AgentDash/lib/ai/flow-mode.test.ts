@@ -10,6 +10,10 @@ import {
 import { getFlowIntentRoutingAddon, getMissingRequiredTools } from "@/lib/ai/flow-guards";
 import { buildSystemPrompt, filterToolDefinitions } from "@/lib/ai/prompts";
 
+test.beforeEach(() => {
+  delete process.env.FLOW_MODE_ENFORCEMENT;
+});
+
 test("resolveFlowMode prefers explicit outbound over auto classification", () => {
   assert.equal(
     resolveFlowMode({
@@ -187,4 +191,60 @@ test("filterToolDefinitions outbound blocks composePitchEmail", () => {
 
 test("blockedToolsForFlowMode email blocks generateAthleteProspectList", () => {
   assert.ok(blockedToolsForFlowMode("email").has("generateAthleteProspectList"));
+});
+
+test("filterToolDefinitions advisory returns all tools", () => {
+  process.env.FLOW_MODE_ENFORCEMENT = "advisory";
+  const tools = [
+    { function: { name: "composePitchEmail" } },
+    { function: { name: "generateAthleteProspectList" } },
+  ];
+  const filtered = filterToolDefinitions(tools, "outbound");
+  assert.equal(filtered.length, 2);
+});
+
+test("filterToolDefinitions advisory still applies blockedExtra", () => {
+  process.env.FLOW_MODE_ENFORCEMENT = "advisory";
+  const tools = [
+    { function: { name: "composePitchEmail" } },
+    { function: { name: "generateAthleteProspectList" } },
+  ];
+  const filtered = filterToolDefinitions(tools, "outbound", new Set(["composePitchEmail"]));
+  assert.equal(filtered.length, 1);
+  assert.equal(filtered[0]?.function?.name, "generateAthleteProspectList");
+});
+
+test("buildSystemPrompt advisory uses user-stated focus header", () => {
+  process.env.FLOW_MODE_ENFORCEMENT = "advisory";
+  const prompt = buildSystemPrompt({
+    role: "admin",
+    senderDisplayName: "Test User",
+    sportsListNumbered: "1. Surfing",
+    flowMode: "outbound",
+  });
+  assert.match(prompt, /User-stated focus: prospecting/);
+  assert.doesNotMatch(prompt, /ACTIVE MODE: OUTBOUND/);
+});
+
+test("buildSystemPrompt off ignores outbound mode header", () => {
+  process.env.FLOW_MODE_ENFORCEMENT = "off";
+  const prompt = buildSystemPrompt({
+    role: "admin",
+    senderDisplayName: "Test User",
+    sportsListNumbered: "1. Surfing",
+    flowMode: "outbound",
+  });
+  assert.match(prompt, /DEFAULT MODE/);
+  assert.doesNotMatch(prompt, /ACTIVE MODE: OUTBOUND/);
+  assert.doesNotMatch(prompt, /User-stated focus/);
+});
+
+test("getMissingRequiredTools off ignores outbound mode chip for required tools", () => {
+  process.env.FLOW_MODE_ENFORCEMENT = "off";
+  const missing = getMissingRequiredTools("email_single_athlete", new Set(), {
+    flowMode: "outbound",
+    selectedInterestsCount: 0,
+  });
+  assert.ok(missing.includes("curatePitchInterests"));
+  assert.ok(!missing.includes("getSponsorshipTargets"));
 });

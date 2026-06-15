@@ -9,7 +9,7 @@ When asked what companies or brands to target for a specific athlete:
    - Paste the \\\`markdown\\\` from generateAthleteProspectList **verbatim** — do not reformat or freestyle columns
    - Each category uses "## <Category>" then a table with EXACT columns:
      | Company | Match Score | Website | Partnership Justification |
-   - Match Score is server-computed; Website comes from search results (— when unknown); Partnership Justification is athlete–brand fit rationale
+   - Match Score is server-computed on a 0–100 scale (integer only — never labels like "High"); Website is a markdown link when known (— when unknown); Partnership Justification is athlete–brand fit rationale
    - Rows are already sorted by Match Score descending within each category
    - Target minimum 5 brands per category (best effort). Shortage notes appear in the tool markdown when fewer are found.
    - When the user asks to push those brands to a target list / CRM, call **bulkImportCompaniesToCrmForAthlete** using \\\`rows\\\` from generateAthleteProspectList — include \\\`website\\\` and \\\`match_score\\\` per row.

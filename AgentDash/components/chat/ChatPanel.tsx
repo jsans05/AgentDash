@@ -12,7 +12,7 @@ import type { Profile } from "@/lib/supabase/types";
 import type { PostAiChatResult } from "@/lib/ai/chat-fetch";
 import type { ChatSseEvent, ChatSseWebSource } from "@/lib/ai/chat-sse";
 import type { FlowMode } from "@/lib/ai/flow-mode";
-import { parseFlowMode } from "@/lib/ai/flow-mode";
+import { deriveRoutingFlowMode, type ChatUiContext } from "./chat-routing";
 import type { InteractionResponsePayload, UserQuestionPrompt } from "@/lib/ai/user-question";
 import { formatInteractionUserSummary } from "@/lib/ai/user-question";
 import {
@@ -23,6 +23,12 @@ import {
 import { ChatModelSelector } from "./ChatModelSelector";
 import { readStoredChatModelTier, type ChatModelTier } from "@/lib/ai/chat-model";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { ChatEmailDraftCard } from "./ChatEmailDraftCard";
+import {
+  parseEmailDraftContent,
+  rebuildEmailDraftContent,
+} from "@/lib/chat/email-draft";
+import { repairStreamingMarkdown } from "@/lib/chat/streaming-markdown";
 import { ChatMultiSelectCard } from "./ChatMultiSelectCard";
 import { createStreamTokenBatcher } from "@/lib/chat/stream-token-batcher";
 import { Copy, RefreshCw, Trash2, ArrowDown, Paperclip, X as XIcon, FileSpreadsheet, ImageIcon } from "lucide-react";
@@ -41,6 +47,17 @@ function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function readApiJson<T>(res: Response): Promise<T> {
+  if (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400)) {
+    throw new Error("Session expired");
+  }
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    throw new Error(`Unexpected response (${res.status})`);
+  }
+  return res.json() as Promise<T>;
 }
 
 export type Message = {
@@ -118,23 +135,47 @@ function createStreamTokenHandler(
 const AssistantMessageBody = memo(function AssistantMessageBody({
   content,
   isStreaming,
+  onEmailDraftChange,
 }: {
   content: string;
   isStreaming: boolean;
+  onEmailDraftChange?: (subject: string, body: string) => void;
 }) {
   if (!content.trim()) return null;
-  if (isStreaming) {
+
+  const emailDraft = !isStreaming ? parseEmailDraftContent(content) : null;
+
+  if (emailDraft) {
     return (
-      <div className="whitespace-pre-wrap text-[15px] leading-relaxed text-[#EFEAE1]">
-        {content}
+      <div className="relative">
+        {emailDraft.preamble ? (
+          <ChatMarkdown content={emailDraft.preamble} className="text-[15px] text-[#EFEAE1] mb-1" />
+        ) : null}
+        <ChatEmailDraftCard
+          subject={emailDraft.subject}
+          body={emailDraft.body}
+          disabled={isStreaming}
+          onChange={(subject, body) => onEmailDraftChange?.(subject, body)}
+        />
+        {emailDraft.postamble ? (
+          <ChatMarkdown content={emailDraft.postamble} className="text-[15px] text-[#EFEAE1] mt-2" />
+        ) : null}
+      </div>
+    );
+  }
+
+  const markdown = isStreaming ? repairStreamingMarkdown(content) : content;
+  return (
+    <div className="relative">
+      <ChatMarkdown content={markdown} className="text-[15px] text-[#EFEAE1]" />
+      {isStreaming ? (
         <span
           className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse bg-[#EFEAE1]/80"
           aria-hidden
         />
-      </div>
-    );
-  }
-  return <ChatMarkdown content={content} className="text-[15px] text-[#EFEAE1]" />;
+      ) : null}
+    </div>
+  );
 });
 
 export type ChatProject = {
@@ -148,7 +189,7 @@ export type ChatProject = {
 
 export type ChatFlowMode = FlowMode;
 
-export type ChatUiContext = "target_list" | "crm_pipeline" | "global";
+export type { ChatUiContext } from "./chat-routing";
 
 export type ChatPanelSendOptions = {
   signal?: AbortSignal;
@@ -162,6 +203,8 @@ export type ChatPanelSendOptions = {
   athleteId?: string;
   uiContext?: ChatUiContext;
 };
+
+export { deriveRoutingFlowMode } from "./chat-routing";
 
 function withChatRoutingOptions(
   options: ChatPanelSendOptions | undefined,
@@ -230,12 +273,18 @@ export type ChatPanelProps = {
   placeholder?: string;
   athleteId?: string;
   uiContext?: ChatUiContext;
-  /** Initial / default flow mode (outbound, inbound, email). */
-  flowMode?: ChatFlowMode;
+  /** Back-compat: explicit ?flow_mode= from URL (not user-toggled in UI). */
+  flowModeFromUrl?: ChatFlowMode;
+  /** Badge label for crm_pipeline embedded chat. */
+  contextCompanyName?: string;
+  /** Badge label for target_list chat (falls back to generic copy). */
+  contextAthleteName?: string;
   /** Hides project sidebar; use in embedded panels (e.g. CRM drafting). */
   layout?: "default" | "embedded";
   /** Fired after a successful assistant reply (send or regenerate). */
   onAssistantReply?: (content: string) => void;
+  /** Fired when the user edits an inline email draft card (subject/body). */
+  onEmailDraftChange?: (content: string) => void;
   /**
    * When set (e.g. with layout="embedded"), load or create an AI project with this exact name
    * and always use it — never the user's last-selected standalone Mystery Machine project.
@@ -252,10 +301,13 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
     placeholder = "Message...",
     layout = "default",
     onAssistantReply,
+    onEmailDraftChange,
     embeddedDedicatedProjectName,
     athleteId,
     uiContext,
-    flowMode: initialFlowMode = "auto",
+    flowModeFromUrl,
+    contextCompanyName,
+    contextAthleteName,
   },
   ref
 ) {
@@ -274,13 +326,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   const [streamingSources, setStreamingSources] = useState<string[]>([]);
   const [streamingWebSources, setStreamingWebSources] = useState<ChatSseWebSource[]>([]);
   const [streamingToolStatus, setStreamingToolStatus] = useState<string | null>(null);
-  const [sendMode, setSendMode] = useState<"default" | "deep_research" | "web_search">("default");
-  const [flowMode, setFlowMode] = useState<ChatFlowMode>(initialFlowMode);
+  const [sendMode] = useState<"default" | "deep_research" | "web_search">("default");
   const [chatModel, setChatModel] = useState<ChatModelTier>("sonnet");
-
-  useEffect(() => {
-    setFlowMode(initialFlowMode);
-  }, [initialFlowMode]);
+  const routingFlowMode = React.useMemo(
+    () => deriveRoutingFlowMode(uiContext, flowModeFromUrl),
+    [uiContext, flowModeFromUrl]
+  );
 
   useEffect(() => {
     setChatModel(readStoredChatModelTier());
@@ -310,9 +361,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
 
   const fetchProjects = useCallback(async () => {
-    const res = await fetch("/api/ai/projects", { credentials: "include" });
+    const res = await fetch("/api/ai/projects", { credentials: "include", redirect: "manual" });
     if (!res.ok) throw new Error("Failed to load projects");
-    const data = await res.json();
+    const data = await readApiJson<any[]>(res);
     const nextProjects: ChatProject[] = (Array.isArray(data) ? data : []).map((p: any) => ({
       id: p.project_id,
       name: p.name,
@@ -335,9 +386,14 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
         : "";
       const res = await fetch(`/api/ai/projects/${projectId}/conversation${qs}`, {
         credentials: "include",
+        redirect: "manual",
       });
       if (!res.ok) throw new Error("Failed to load conversation");
-      const data = await res.json();
+      const data = await readApiJson<{
+        conversation_id?: string;
+        messages?: unknown[];
+        pending_interaction?: { tool_call_id?: string; prompt?: UserQuestionPrompt } | null;
+      }>(res);
       const nextMessages: Message[] = (Array.isArray(data?.messages) ? data.messages : []).map((m: any) => ({
         id: String(m.id),
         role: m.role,
@@ -365,7 +421,6 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
           : null;
       }
       setActiveConversationId(String(data?.conversation_id ?? ""));
-      setFlowMode(parseFlowMode(data?.flow_mode) ?? "auto");
       setMessages(dedupeMessagesById(nextMessages));
       setShowJumpToLatest(false);
     } finally {
@@ -630,7 +685,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
         },
         athleteId,
         uiContext,
-        flowMode
+        routingFlowMode
           )
         );
         streamHandler.flushStream();
@@ -674,7 +729,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
       applyAssistantResult,
       athleteId,
       uiContext,
-      flowMode,
+      routingFlowMode,
     ]
   );
 
@@ -783,7 +838,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
         },
         athleteId,
         uiContext,
-        flowMode
+        routingFlowMode
       );
         // #region agent log
         fetch("http://127.0.0.1:7310/ingest/3db61d27-132c-4ea5-8254-c4515c90a750", {
@@ -847,8 +902,23 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
       projectLoading,
       athleteId,
       uiContext,
-      flowMode,
+      routingFlowMode,
     ]
+  );
+
+  const handleEmailDraftEdit = useCallback(
+    (messageId: string, subject: string, body: string) => {
+      setMessages((prev) => {
+        const msg = prev.find((m) => m.id === messageId);
+        if (!msg) return prev;
+        const parsed = parseEmailDraftContent(msg.content);
+        if (!parsed) return prev;
+        const newContent = rebuildEmailDraftContent({ ...parsed, subject, body });
+        onEmailDraftChange?.(newContent);
+        return prev.map((m) => (m.id === messageId ? { ...m, content: newContent } : m));
+      });
+    },
+    [onEmailDraftChange]
   );
 
   const handleSend = async () => {
@@ -962,7 +1032,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
           },
           athleteId,
           uiContext,
-          flowMode
+          routingFlowMode
         )
       );
       streamHandler.flushStream();
@@ -1339,6 +1409,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
                     <AssistantMessageBody
                       content={msg.content}
                       isStreaming={streamingAssistantId === msg.id}
+                      onEmailDraftChange={(subject, body) =>
+                        handleEmailDraftEdit(msg.id, subject, body)
+                      }
                     />
                     {msg.interaction && msg.interactionStatus === "expired" ? (
                       <p className="mt-2 text-sm text-[#C9A227]">
@@ -1611,12 +1684,11 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
                   disabled={loading || projectLoading || bootLoading}
                 />
                 <ChatFlowModeSelector
-                  flowMode={flowMode}
-                  onFlowModeChange={setFlowMode}
-                  sendMode={sendMode}
-                  onSendModeChange={setSendMode}
-                  disabled={loading || projectLoading || bootLoading}
-                  readOnlyEmail={layout === "embedded"}
+                  uiContext={uiContext}
+                  contextCompanyName={contextCompanyName}
+                  contextAthleteName={contextAthleteName}
+                  athleteId={athleteId}
+                  readOnlyEmail={layout === "embedded" && uiContext !== "crm_pipeline"}
                 />
               </div>
               <Button

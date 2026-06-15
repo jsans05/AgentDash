@@ -22,9 +22,8 @@ function AIChatClientInner({ role }: { role: string }) {
   const searchParams = useSearchParams();
   const athleteId = searchParams.get("athlete_id")?.trim() || undefined;
   const uiContext = parseUiContext(searchParams.get("context"));
-  const flowMode =
-    parseFlowModeParam(searchParams.get("flow_mode")) ??
-    (uiContext === "target_list" ? "outbound" : "auto");
+  const flowModeFromUrl = parseFlowModeParam(searchParams.get("flow_mode"));
+  const contextAthleteName = searchParams.get("athlete_name")?.trim() || undefined;
 
   const onSend = useCallback(
     async (
@@ -47,7 +46,7 @@ function AIChatClientInner({ role }: { role: string }) {
       const payload = messages.map((m) => ({ role: m.role, content: m.content }));
       const resolvedAthleteId = options?.athleteId ?? athleteId;
       const resolvedUiContext = options?.uiContext ?? uiContext;
-      const resolvedFlowMode = options?.flowMode ?? flowMode;
+      const resolvedFlowMode = options?.flowMode;
       return postAiChat(
         {
           messages: payload,
@@ -74,7 +73,7 @@ function AIChatClientInner({ role }: { role: string }) {
         }
       );
     },
-    [athleteId, uiContext, flowMode]
+    [athleteId, uiContext]
   );
 
   return (
@@ -85,7 +84,8 @@ function AIChatClientInner({ role }: { role: string }) {
       placeholder="Message Mystery Machine..."
       athleteId={athleteId}
       uiContext={uiContext}
-      flowMode={flowMode}
+      flowModeFromUrl={flowModeFromUrl}
+      contextAthleteName={contextAthleteName}
     />
   );
 }

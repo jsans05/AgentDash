@@ -4,7 +4,8 @@ import { createServiceRoleClient } from "@/lib/supabase/server";
 import { isApolloEnabled } from "@/lib/apollo/config";
 import { findContactsForCompany } from "@/lib/apollo/find-company-contacts";
 import { ApolloApiError } from "@/lib/apollo/client";
-import type { ApolloPeopleSearchOverrides } from "@/lib/apollo/search-defaults";
+import { parseContactSearchOverridesFromBody } from "@/lib/apollo/contact-search-api-body";
+import { apolloContactOverridesToPeopleSearch } from "@/lib/apollo/search-defaults";
 
 export async function POST(req: Request) {
   const profile = await requireProfile();
@@ -24,12 +25,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Max 80 companies per bulk request" }, { status: 400 });
   }
 
-  const overrides: ApolloPeopleSearchOverrides = {};
-  if (Array.isArray(body.organization_locations)) {
-    overrides.organization_locations = body.organization_locations.map(String);
-  }
-  if (body.revenue_range?.min != null) overrides.revenue_range_min = Number(body.revenue_range.min);
-  if (body.revenue_range?.max != null) overrides.revenue_range_max = Number(body.revenue_range.max);
+  const overrides = apolloContactOverridesToPeopleSearch(
+    parseContactSearchOverridesFromBody(body as Record<string, unknown>)
+  );
 
   const supabaseAdmin = await createServiceRoleClient();
   const results: Array<{

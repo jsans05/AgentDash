@@ -33,6 +33,16 @@ const TAG_TO_JUSTIFICATION: Record<string, string> = {
   "demographic fit": "Demographic signals suggest a strong audience fit",
 };
 
+/** Internal rubric max from scoreCategoryCandidate (4+3+2+1). */
+export const MAX_INTERNAL_PROSPECT_SCORE = 10;
+
+export function matchScoreOutOf100(internalScore: number): number {
+  const raw = Number(internalScore);
+  if (!Number.isFinite(raw)) return 0;
+  const normalized = Math.round((raw / MAX_INTERNAL_PROSPECT_SCORE) * 100);
+  return Math.min(100, Math.max(0, normalized));
+}
+
 function normalizeCategory(cat: string): string {
   return cat.toLowerCase().trim().replace(/\s+/g, " ");
 }
@@ -97,7 +107,16 @@ function escapeTableCell(value: string): string {
 
 function formatWebsite(website: string | undefined): string {
   const w = String(website ?? "").trim();
-  return w || "—";
+  if (!w) return "—";
+  let url = w;
+  if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+  let label = w;
+  try {
+    label = new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    label = w.replace(/^https?:\/\//i, "").replace(/^www\./, "").split("/")[0] ?? w;
+  }
+  return `[${escapeTableCell(label)}](${url})`;
 }
 
 export function flattenGroupedToRows(
@@ -110,7 +129,7 @@ export function flattenGroupedToRows(
       rows.push({
         company_name: c.name,
         category,
-        match_score: c.score,
+        match_score: matchScoreOutOf100(c.score),
         website: c.website?.trim() || null,
         justification: buildPartnershipJustification(c),
       });
@@ -139,8 +158,9 @@ export function buildGroupedProspectsMarkdown(params: {
     sections.push(PROSPECTING_TABLE_SEPARATOR);
     for (const candidate of entries) {
       const justification = buildPartnershipJustification(candidate);
+      const displayScore = matchScoreOutOf100(candidate.score);
       sections.push(
-        `| ${escapeTableCell(candidate.name)} | ${candidate.score} | ${escapeTableCell(formatWebsite(candidate.website))} | ${escapeTableCell(justification)} |`
+        `| ${escapeTableCell(candidate.name)} | ${displayScore} | ${formatWebsite(candidate.website)} | ${escapeTableCell(justification)} |`
       );
     }
     sections.push("");

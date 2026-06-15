@@ -1,6 +1,6 @@
 {
   "name": "agentdash",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -9,7 +9,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "test": "tsx --test lib/ai/*.test.ts lib/crm/*.test.ts",
+    "test": "tsx --test lib/ai/*.test.ts lib/crm/*.test.ts components/chat/*.test.ts",
     "ciq:refresh": "tsx scripts/ciq_monthly_refresh.ts"
   },
   "dependencies": {

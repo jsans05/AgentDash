@@ -46,3 +46,54 @@ export type ApolloPeopleSearchOverrides = {
   page?: number;
   per_page?: number;
 };
+
+/** Client / API request shape for Apollo contact search filters. */
+export type ApolloContactSearchOverrides = {
+  organization_locations?: string[];
+  person_locations?: string[];
+  person_titles?: string[];
+  person_seniorities?: string[];
+  q_keywords?: string;
+  revenue_range?: { min?: number; max?: number };
+  page?: number;
+};
+
+export function apolloContactOverridesToPeopleSearch(
+  overrides?: ApolloContactSearchOverrides
+): ApolloPeopleSearchOverrides {
+  if (!overrides) return {};
+  const out: ApolloPeopleSearchOverrides = {};
+  if (overrides.organization_locations?.length) {
+    out.organization_locations = overrides.organization_locations;
+  }
+  if (overrides.person_locations?.length) out.person_locations = overrides.person_locations;
+  if (overrides.person_titles?.length) out.person_titles = overrides.person_titles;
+  if (overrides.person_seniorities?.length) out.person_seniorities = overrides.person_seniorities;
+  if (overrides.q_keywords?.trim()) out.q_keywords = overrides.q_keywords.trim();
+  if (overrides.revenue_range?.min != null) out.revenue_range_min = overrides.revenue_range.min;
+  if (overrides.revenue_range?.max != null) out.revenue_range_max = overrides.revenue_range.max;
+  if (overrides.page != null) out.page = overrides.page;
+  return out;
+}
+
+export function formatApolloRefineSearchSummary(overrides?: ApolloContactSearchOverrides): string | null {
+  if (!overrides) return null;
+  const parts: string[] = [];
+  if (overrides.person_titles?.length) parts.push(`titles: ${overrides.person_titles.join(", ")}`);
+  if (overrides.person_locations?.length) parts.push(`contact location: ${overrides.person_locations.join(", ")}`);
+  if (overrides.organization_locations?.length) {
+    parts.push(`HQ: ${overrides.organization_locations.join(", ")}`);
+  }
+  if (overrides.person_seniorities?.length) {
+    parts.push(`seniority: ${overrides.person_seniorities.map((s) => s.replace(/_/g, " ")).join(", ")}`);
+  }
+  if (overrides.q_keywords?.trim()) parts.push(`keywords: ${overrides.q_keywords.trim()}`);
+  if (overrides.revenue_range?.min != null || overrides.revenue_range?.max != null) {
+    const min = overrides.revenue_range?.min;
+    const max = overrides.revenue_range?.max;
+    if (min != null && max != null) parts.push(`revenue $${min.toLocaleString()}–$${max.toLocaleString()}`);
+    else if (min != null) parts.push(`revenue min $${min.toLocaleString()}`);
+    else if (max != null) parts.push(`revenue max $${max.toLocaleString()}`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
+}

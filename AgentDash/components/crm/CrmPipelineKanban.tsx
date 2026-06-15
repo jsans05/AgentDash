@@ -1396,6 +1396,7 @@ function CompanySlideOver({
               role={role}
               onSendChat={onSendChat}
               onAssistantReply={(content) => setLastAssistantDraft(content)}
+              onEmailDraftChange={(content) => setLastAssistantDraft(content)}
               saveDraftFromChat={saveDraftFromChat}
               savePatch={savePatch}
               lastAssistantDraft={lastAssistantDraft}
@@ -2072,6 +2073,7 @@ function DraftingTab({
   role,
   onSendChat,
   onAssistantReply,
+  onEmailDraftChange,
   saveDraftFromChat,
   savePatch,
   lastAssistantDraft,
@@ -2093,6 +2095,7 @@ function DraftingTab({
     }
   ) => Promise<PostAiChatResult>;
   onAssistantReply: (content: string) => void;
+  onEmailDraftChange: (content: string) => void;
   saveDraftFromChat: () => Promise<void>;
   savePatch: (b: Record<string, unknown>) => Promise<void>;
   lastAssistantDraft: string | null;
@@ -2359,10 +2362,12 @@ function DraftingTab({
               roleScope={role}
               onSend={onSendChat}
               layout="embedded"
-              flowMode="email"
+              uiContext="crm_pipeline"
+              contextCompanyName={card.company_name}
               embeddedDedicatedProjectName={`Pipeline draft ${card.id}`}
               placeholder="Draft outreach…"
               onAssistantReply={onAssistantReply}
+              onEmailDraftChange={onEmailDraftChange}
             />
           </div>
           <div

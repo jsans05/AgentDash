@@ -38,3 +38,7 @@ export function internalServerError(cause?: unknown, context?: string, publicMes
     context,
   });
 }
+
+export function unauthorizedResponse(publicMessage = "Unauthorized") {
+  return apiErrorResponse({ status: 401, publicMessage });
+}

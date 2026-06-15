@@ -145,7 +145,7 @@ export function ChatMarkdown({ content, className }: { content: string; classNam
             <thead className="bg-muted/80">
               <tr>
                 {header.map((cell, c) => (
-                  <th key={c} className="border border-border px-3 py-2 text-left font-medium">{cell.trim()}</th>
+                  <th key={c} className="border border-border px-3 py-2 text-left font-medium">{renderInline(cell.trim())}</th>
                 ))}
               </tr>
             </thead>
@@ -153,7 +153,7 @@ export function ChatMarkdown({ content, className }: { content: string; classNam
               {rows.map((row, r) => (
                 <tr key={r}>
                   {row.map((cell, c) => (
-                    <td key={c} className="border border-border px-3 py-2">{cell.trim()}</td>
+                    <td key={c} className="border border-border px-3 py-2">{renderInline(cell.trim())}</td>
                   ))}
                 </tr>
               ))}
@@ -169,6 +169,10 @@ export function ChatMarkdown({ content, className }: { content: string; classNam
       const tableMatch = line.match(/^\|(.+)\|$/);
       if (tableMatch) {
         const cells = tableMatch[1].split(/\|/).map((s) => s.trim());
+        if (cells.every((cell) => /^-+$/.test(cell))) {
+          i++;
+          continue;
+        }
         if (!inTable) flushTable();
         inTable = true;
         tableRows.push(cells);

@@ -15,6 +15,7 @@ import {
   detectTargetListOutreachPushIntent,
   detectTargetListSaveIntent,
 } from "@/lib/ai/flow-intent";
+import { getFlowModeEnforcement } from "@/lib/ai/feature-flags";
 import {
   AI_CHAT_SSE_HEADERS,
   formatSseEvent,
@@ -651,7 +652,7 @@ const TOOLS = [
     function: {
       name: "generateAthleteProspectList",
       description:
-        "Build a grouped athlete prospect list with Company, Match Score, Website, and Partnership Justification columns per category. Call after getSponsorshipTargets. Return markdown verbatim to the user. Use rows for bulkImportCompaniesToCrmForAthlete.",
+        "Build a grouped athlete prospect list with Company, Match Score (0–100 integer), Website (markdown link), and Partnership Justification columns per category. Call after getSponsorshipTargets. Return markdown verbatim to the user. Use rows for bulkImportCompaniesToCrmForAthlete.",
       parameters: {
         type: "object",
         properties: {
@@ -1209,6 +1210,7 @@ type TurnTelemetry = {
   hit_iteration_cap: boolean;
   flow_mode: string;
   flow_intent: string;
+  flow_mode_enforcement: string;
 };
 
 const ATHLETE_ID_TOOL_NAMES = new Set([
@@ -1799,6 +1801,7 @@ REQUIRED behavior — do not deviate:
           hit_iteration_cap: hitIterationCap,
           flow_mode: resolvedFlowMode,
           flow_intent: flowIntent,
+          flow_mode_enforcement: getFlowModeEnforcement(),
         };
         console.log("[AI Chat] Turn summary", JSON.stringify(summary));
         return summary;
@@ -1939,7 +1942,7 @@ REQUIRED behavior — do not deviate:
             currentMessages.push({
               role: "system",
               content:
-                "Required: prospecting reply must include generateAthleteProspectList output verbatim. Call getSponsorshipTargets then generateAthleteProspectList if needed, then paste the tool markdown field exactly. Each category table must use: | Company | Match Score | Website | Partnership Justification | with rows sorted by Match Score descending within the category.",
+                "Required: prospecting reply must include generateAthleteProspectList output verbatim. Call getSponsorshipTargets then generateAthleteProspectList if needed, then paste the tool markdown field exactly. Each category table must use: | Company | Match Score | Website | Partnership Justification | with Match Score as an integer 0–100 (never stars or labels like High) and Website as markdown links; rows sorted by Match Score descending within the category.",
             });
             correctionInjections.push("outbound_prospect_validation_failed");
             continue;

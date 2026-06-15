@@ -3,15 +3,20 @@
 import { useState } from "react";
 import { ApolloOrgPickerDialog } from "@/components/crm/ApolloOrgPickerDialog";
 import { TargetListActionDialog } from "@/components/crm/TargetListActionDialog";
+import { contactSearchOverridesToRequestBody } from "@/lib/apollo/contact-search-api-body";
 import {
   formatApolloAllVerifiedSearchSummary,
   formatApolloPartnershipSearchSummary,
+  formatApolloRefineSearchSummary,
   type ApolloContactSearchMode,
+  type ApolloContactSearchOverrides,
 } from "@/lib/apollo/search-defaults";
 import {
   isTargetListDialogDismissed,
   TARGET_LIST_FIND_CONTACTS_DISMISS_KEY,
 } from "@/lib/crm/target-list-prefs";
+
+export type { ApolloContactSearchOverrides };
 
 function InlineSpinner() {
   return (
@@ -37,17 +42,12 @@ type FindContactsResult = {
   };
 };
 
-export type ApolloContactSearchOverrides = {
-  organization_locations?: string[];
-  revenue_range?: { min?: number; max?: number };
-  page?: number;
-};
-
 type ApolloFindContactsInlineProps = {
   companyId: string;
   companyName?: string;
   disabled?: boolean;
   searchOverrides?: ApolloContactSearchOverrides;
+  onRefineSearchClick?: () => void;
   onContacts: (contacts: unknown[]) => void;
   onError?: (message: string) => void;
 };
@@ -57,6 +57,7 @@ export function ApolloFindContactsInline({
   companyName,
   disabled,
   searchOverrides,
+  onRefineSearchClick,
   onContacts,
   onError,
 }: ApolloFindContactsInlineProps) {
@@ -72,6 +73,8 @@ export function ApolloFindContactsInline({
   );
   const [orgPickerOpen, setOrgPickerOpen] = useState(false);
 
+  const refineSummary = formatApolloRefineSearchSummary(searchOverrides);
+
   async function runSearch(searchMode: ApolloContactSearchMode, pageNum = 1) {
     setFinding(true);
     if (searchMode === "partnership") {
@@ -84,13 +87,8 @@ export function ApolloFindContactsInline({
       const body: Record<string, unknown> = {
         search_mode: searchMode,
         page: pageNum,
+        ...contactSearchOverridesToRequestBody(searchOverrides),
       };
-      if (searchOverrides?.organization_locations?.length) {
-        body.organization_locations = searchOverrides.organization_locations;
-      }
-      if (searchOverrides?.revenue_range) {
-        body.revenue_range = searchOverrides.revenue_range;
-      }
       const res = await fetch(`/api/apollo/companies/${companyId}/find-contacts`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -151,6 +149,7 @@ export function ApolloFindContactsInline({
           confirmIsAllVerified ? (
             <>
               <p>{formatApolloAllVerifiedSearchSummary()}</p>
+              {refineSummary ? <p className="text-[#E8D9A8]">Filters: {refineSummary}</p> : null}
               <p className="text-[#AEA79A]">
                 Apollo search does not use credits. Revealing an email later uses Apollo credits.
               </p>
@@ -158,6 +157,7 @@ export function ApolloFindContactsInline({
           ) : (
             <>
               <p>{formatApolloPartnershipSearchSummary()}</p>
+              {refineSummary ? <p className="text-[#E8D9A8]">Also applying: {refineSummary}</p> : null}
               <p className="text-[#AEA79A]">
                 Apollo search does not use credits. Revealing an email later uses Apollo credits.
               </p>
@@ -185,6 +185,17 @@ export function ApolloFindContactsInline({
         >
           {finding ? "Searching…" : "Find contacts"}
         </button>
+        {onRefineSearchClick ? (
+          <button
+            type="button"
+            className="rounded border border-[#3A4A5E]/60 bg-[#1A2028] px-1.5 py-0.5 text-[10px] font-medium text-[#B8C8DC] hover:bg-[#222A35] disabled:opacity-50"
+            disabled={disabled || finding}
+            title="Adjust job titles, country, seniority, and other Apollo filters"
+            onClick={onRefineSearchClick}
+          >
+            Refine search
+          </button>
+        ) : null}
         {partnershipNoMatch && !finding ? (
           <button
             type="button"
@@ -208,6 +219,11 @@ export function ApolloFindContactsInline({
           </button>
         ) : null}
       </div>
+      {refineSummary && !finding ? (
+        <p className="text-[10px] text-[#9BB8D4]" title="Active Apollo search filters">
+          Filters: {refineSummary}
+        </p>
+      ) : null}
       {finding ? (
         <p className="flex items-center gap-1.5 text-[10px] text-[#B9B2A6]">
           <InlineSpinner />
@@ -217,7 +233,19 @@ export function ApolloFindContactsInline({
       {partnershipNoMatch && !allVerifiedNoMatch ? (
         <p className="text-[10px] text-[#D4C48A]">
           No partnership/marketing contacts with verified email for {label}. Try{" "}
-          <span className="text-[#E8D9A8]">Any verified email</span> to search all titles.
+          <span className="text-[#E8D9A8]">Any verified email</span> to search all titles, or{" "}
+          {onRefineSearchClick ? (
+            <button
+              type="button"
+              className="text-[#B8C8DC] underline decoration-[#3A4A5E]/50 hover:text-[#DBEEE0]"
+              onClick={onRefineSearchClick}
+            >
+              refine search
+            </button>
+          ) : (
+            "refine search"
+          )}
+          .
         </p>
       ) : null}
       {allVerifiedNoMatch ? (
