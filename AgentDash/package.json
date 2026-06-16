@@ -1,12 +1,13 @@
 {
   "name": "agentdash",
-  "version": "2.2.4",
+  "version": "2.2.5",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "dev:local": "next dev --hostname 0.0.0.0 -p 4000",
     "run:local": "bash run-local.sh",
     "build": "next build",
+    "vercel-build": "next build && rm -rf ../.next && cp -R .next ../.next",
     "start": "next start",
     "lint": "eslint .",
     "test": "tsx --test lib/ai/*.test.ts lib/crm/*.test.ts lib/taxonomy.test.ts components/chat/*.test.ts",
