@@ -212,14 +212,29 @@ export function toAnthropicMessages(messages: ChatMessage[], useStructuredSystem
   if (useStructuredSystem) {
     return {
       system: systemBlocks.length ? systemBlocks : undefined,
-      messages: anthropicMessages,
+      messages: ensureAnthropicMessagesEndWithUser(anthropicMessages),
     };
   }
 
   return {
     system: systemParts.length ? systemParts.join("\n\n") : undefined,
-    messages: anthropicMessages,
+    messages: ensureAnthropicMessagesEndWithUser(anthropicMessages),
   };
+}
+
+/** Anthropic rejects requests whose message list ends with an assistant turn. */
+function ensureAnthropicMessagesEndWithUser(
+  messages: AnthropicMessageParam[]
+): AnthropicMessageParam[] {
+  if (messages.length === 0) return messages;
+  if (messages[messages.length - 1]?.role !== "assistant") return messages;
+  return [
+    ...messages,
+    {
+      role: "user",
+      content: "Continue with the required next step.",
+    },
+  ];
 }
 
 function mapStopReason(stopReason: string | null): string | null {

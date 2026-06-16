@@ -44,6 +44,7 @@ type BuildFlowContextInput = {
   sessionContextText?: string | null;
   flowMode: ResolvedFlowMode;
   athleteId?: string | null;
+  targetListContext?: boolean;
   /** Interests from ask_user_question interaction_response (client may not include them in messages yet). */
   interactionSelectedInterests?: ApprovedInterestCategory[];
   /** Multi-dimensional picker selections from ask_user_question. */
@@ -80,6 +81,7 @@ export function buildAIChatFlowContext(input: BuildFlowContextInput): AIChatFlow
   let flowIntent = resolveFlowIntentForMode(flowMode, trimmedMessages, {
     pipelineDrafting,
     athleteId: input.athleteId,
+    targetListContext: input.targetListContext === true,
   });
   if (
     flowMode === "email" &&

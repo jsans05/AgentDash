@@ -10,7 +10,7 @@ export function deriveRoutingFlowMode(
   flowModeFromUrl?: ChatFlowMode
 ): ChatFlowMode | undefined {
   if (uiContext === "crm_pipeline") return "email";
-  if (uiContext === "target_list") return "outbound";
+  if (uiContext === "target_list") return undefined;
   if (flowModeFromUrl && flowModeFromUrl !== "auto") return flowModeFromUrl;
   return undefined;
 }

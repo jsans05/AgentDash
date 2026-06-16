@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import {
   classifyFlowIntent,
   detectCompanyTargetsIntent,
+  detectExplicitProspectIntent,
   detectInboundCompanyAthleteMatchIntent,
   detectTargetListOutreachPushIntent,
+  detectTargetListSaveAffirmativeIntent,
   detectTargetListSaveIntent,
 } from "@/lib/ai/flow-intent";
 
@@ -72,4 +74,58 @@ test("detectTargetListSaveIntent still matches explicit target list saves", () =
     ]),
     true
   );
+});
+
+test("detectTargetListSaveAffirmativeIntent matches yes after save offer", () => {
+  assert.equal(
+    detectTargetListSaveAffirmativeIntent([
+      { role: "assistant", content: "Want me to save this to Hunter's target list under Blenders Eyewear?" },
+      { role: "user", content: "yes" },
+    ]),
+    true
+  );
+  assert.equal(
+    detectTargetListSaveAffirmativeIntent([
+      { role: "assistant", content: "Want me to save this to Hunter's target list under Blenders Eyewear?" },
+      { role: "user", content: "go ahead" },
+    ]),
+    true
+  );
+  assert.equal(
+    detectTargetListSaveAffirmativeIntent([
+      { role: "assistant", content: "Here is the draft email for Blenders." },
+      { role: "user", content: "yes" },
+    ]),
+    false
+  );
+});
+
+const targetListOpts = {
+  targetListContext: true,
+  athleteId: "athlete-uuid",
+};
+
+test("target list: draft outreach classifies as email not company_targets", () => {
+  const messages = [{ role: "user", content: "Draft outreach for Blenders Eyewear" }];
+  assert.equal(detectCompanyTargetsIntent(messages, targetListOpts), false);
+  assert.equal(classifyFlowIntent(messages, targetListOpts), "email_single_athlete");
+});
+
+test("target list: another eyewear brand does not trigger company_targets", () => {
+  const messages = [{ role: "user", content: "Move on to drafting for another eyewear brand" }];
+  assert.equal(detectCompanyTargetsIntent(messages, targetListOpts), false);
+  assert.notEqual(classifyFlowIntent(messages, targetListOpts), "company_targets");
+});
+
+test("target list: explicit find sponsors still classifies as company_targets", () => {
+  const messages = [{ role: "user", content: "Find more eyewear sponsors for Hunter Lawrence" }];
+  assert.equal(detectExplicitProspectIntent(messages), true);
+  assert.equal(detectCompanyTargetsIntent(messages, targetListOpts), true);
+  assert.equal(classifyFlowIntent(messages, targetListOpts), "company_targets");
+});
+
+test("target list: who should we pitch for still matches explicit prospect", () => {
+  const messages = [{ role: "user", content: "Who should we pitch for Jordan?" }];
+  assert.equal(detectExplicitProspectIntent(messages), true);
+  assert.equal(detectCompanyTargetsIntent(messages, targetListOpts), true);
 });

@@ -18,6 +18,7 @@ import {
   resolveAudiencePercentFraction,
 } from "@/lib/athlete-data";
 import { curatePitchInterests } from "@/lib/ai/pitch-interest-curation";
+import { generateSingleAthleteOutreachEmail } from "@/lib/ai/generate-single-athlete-outreach";
 import {
   composePitchEmail,
   composeMultiAthletePitchEmails,
@@ -925,6 +926,41 @@ export async function createAITools(profile: Profile) {
         return { error: "Cannot access this athlete" };
       }
 
+      const revisionHint = String(params.revision_hint ?? "").trim() || null;
+
+      if (pitch_type === "single_athlete" && athlete_id && !revisionHint) {
+        const composed = await generateSingleAthleteOutreachEmail({
+          supabase,
+          profile,
+          athlete_id,
+          company_name,
+          interest_names,
+          pitch_angles: pitch_angles?.length ? pitch_angles : undefined,
+          recipient_name: params.recipient_name,
+          target_industry_or_category: params.target_industry_or_category,
+          past_partnerships: params.past_partnerships,
+          company_description: params.company_description,
+          personal_notes: params.personal_notes,
+          open_category_reason: params.open_category_reason,
+          cta: params.cta,
+          sender_display_name: params.sender_display_name,
+          autoCurateInterests: false,
+        });
+        return {
+          subject: composed.subject,
+          body: composed.body,
+          body_markdown: composed.body_markdown,
+          pitch_type: composed.pitch_type,
+          used_interests: composed.used_interests,
+          word_count: composed.word_count,
+          max_words: composed.max_words,
+          within_word_limit: composed.within_word_limit,
+          curation_rationale: composed.curation_rationale,
+          polished: composed.polished ?? false,
+          fallback_used: composed.fallback_used ?? false,
+        };
+      }
+
       const composed = await composePitchEmail({
         supabase,
         profile,
@@ -937,12 +973,13 @@ export async function createAITools(profile: Profile) {
         athlete_id,
         athlete_ids: pitch_type === "multi_athlete_combined" ? athlete_ids : undefined,
         past_partnerships: params.past_partnerships,
-        company_description: [params.company_description, params.personal_notes].filter(Boolean).join(" ").trim() || null,
+        company_description: params.company_description,
+        personal_notes: params.personal_notes,
         open_category_reason: params.open_category_reason,
         cta: params.cta,
         sender_display_name: params.sender_display_name,
         toneSamples,
-        revisionHint: params.revision_hint,
+        revisionHint,
       });
 
       return {
@@ -2515,6 +2552,7 @@ export async function createAITools(profile: Profile) {
         ok: boolean;
         saved_to?: "pipeline" | "contact";
         contact_id?: string;
+        contact_count?: number;
         error?: string;
       }> = [];
 
@@ -2581,6 +2619,48 @@ export async function createAITools(profile: Profile) {
             ok: true,
             saved_to: "contact",
             contact_id: contactId,
+          });
+          continue;
+        }
+
+        // Target-list rows with CRM contacts display outreach on contact rows, not pipeline columns.
+        if (row.contacts.length > 0) {
+          let contactOk = 0;
+          const contactErrors: string[] = [];
+          for (const contact of row.contacts) {
+            const email_drafts = upsertContactOutreachDraft(
+              contact.email_drafts,
+              resolved.athleteId,
+              subject,
+              body
+            );
+            const { data: updatedRows, error: upCErr } = await supabase
+              .from("crm_contacts")
+              .update({ email_drafts })
+              .eq("contact_id", contact.contact_id)
+              .eq("created_by_user_id", profile.user_id)
+              .select("contact_id");
+            if (upCErr || !updatedRows?.length) {
+              contactErrors.push(
+                `${contact.contact_id}: ${upCErr?.message ?? "Failed to update contact outreach draft"}`
+              );
+              continue;
+            }
+            contactOk += 1;
+          }
+          if (contactOk === 0) {
+            results.push({
+              pipeline_id: pid,
+              ok: false,
+              error: contactErrors.join("; ") || "Failed to update contact outreach drafts",
+            });
+            continue;
+          }
+          results.push({
+            pipeline_id: pid,
+            ok: true,
+            saved_to: "contact",
+            contact_count: contactOk,
           });
           continue;
         }

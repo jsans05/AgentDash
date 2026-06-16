@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
-import { curatePitchInterests } from "@/lib/ai/pitch-interest-curation";
-import { composePitchEmail } from "@/lib/ai/pitch-composer";
+import { generateSingleAthleteOutreachEmail } from "@/lib/ai/generate-single-athlete-outreach";
 import { upsertContactOutreachDraft } from "@/lib/crm/target-list-outreach";
 import { formatContactDisplayName } from "@/lib/crm/contact-display-name";
 
@@ -151,27 +150,17 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       ? contact.notes ?? null
       : row.personal_notes ?? null;
 
-    const curation = await curatePitchInterests({
+    const composed = await generateSingleAthleteOutreachEmail({
       supabase,
       profile,
-      pitch_type: "single_athlete",
+      athlete_id: athleteId,
       company_name: companyName,
       target_industry_or_category: category,
-      athlete_id: athleteId,
-    });
-    const interest_names = curation.suggested_interests.map((s) => s.interest_name);
-    const composed = await composePitchEmail({
-      supabase,
-      profile,
-      pitch_type: "single_athlete",
-      company_name: companyName,
-      interest_names: interest_names.length ? interest_names : curation.mapped_valid_categories.slice(0, 3),
       recipient_name,
-      athlete_id: athleteId,
-      target_industry_or_category: category,
       past_partnerships: row.past_partnerships,
       company_description: row.company_description,
       personal_notes,
+      autoCurateInterests: true,
     });
 
     if (contact) {

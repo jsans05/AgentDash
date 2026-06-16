@@ -8,7 +8,6 @@ import type { ApolloRevealStatus } from "@/components/crm/ApolloContactActions";
 import { ContactEmailCell } from "@/components/crm/ContactEmailCell";
 import { ContactPhoneCell } from "@/components/crm/ContactPhoneCell";
 import { ApolloFindContactsInline } from "@/components/crm/ApolloFindContactsInline";
-import { ApolloEnrichHqPhoneInline } from "@/components/crm/ApolloEnrichHqPhoneInline";
 import { ApolloRefineSearchDialog } from "@/components/crm/ApolloRefineSearchDialog";
 import { contactSearchOverridesToRequestBody } from "@/lib/apollo/contact-search-api-body";
 import {
@@ -42,7 +41,6 @@ import {
   isTargetListDialogDismissed,
   TARGET_LIST_DELETE_CONTACTS_BULK_DISMISS_KEY,
   TARGET_LIST_FIND_CONTACTS_DISMISS_KEY,
-  TARGET_LIST_PULL_HQ_PHONE_DISMISS_KEY,
   TARGET_LIST_REMOVE_COMPANY_DISMISS_KEY,
 } from "@/lib/crm/target-list-prefs";
 import {
@@ -330,10 +328,6 @@ export function AthleteTargetList({
     Record<string, string>
   >({});
   const [bulkFindContacts, setBulkFindContacts] = useState(false);
-  const [bulkPullHqPhone, setBulkPullHqPhone] = useState(false);
-  const [bulkPullHqConfirmOpen, setBulkPullHqConfirmOpen] = useState(false);
-  const [generatingOutreach, setGeneratingOutreach] = useState(false);
-  const [generatingOutreachKey, setGeneratingOutreachKey] = useState<string | null>(null);
   const [searchDisclosureHtml, setSearchDisclosureHtml] = useState<string | null>(null);
   const [searchDisclosureCompany, setSearchDisclosureCompany] = useState<string | null>(null);
   const [searchQueries, setSearchQueries] = useState<string[]>([]);
@@ -366,10 +360,8 @@ export function AthleteTargetList({
 
   const bulkActionsDisabled =
     bulkFindContacts ||
-    bulkPullHqPhone ||
     bulkPartnershipResearch ||
     researchingPipelineId != null ||
-    generatingOutreach ||
     loading ||
     !rows ||
     rows.length === 0;
@@ -893,55 +885,6 @@ export function AthleteTargetList({
     }
   }
 
-  function requestBulkPullHqPhones() {
-    if (!rows || rows.length === 0) return;
-    if (isTargetListDialogDismissed(TARGET_LIST_PULL_HQ_PHONE_DISMISS_KEY)) {
-      void pullHqPhonesForAllCompanies();
-      return;
-    }
-    setBulkPullHqConfirmOpen(true);
-  }
-
-  async function pullHqPhonesForAllCompanies() {
-    if (!rows || rows.length === 0) return;
-    setBulkPullHqPhone(true);
-    setGlobalError(null);
-    const companyIds = [...new Set(rows.map((r) => r.company_id))];
-    try {
-      const res = await fetch("/api/apollo/companies/bulk-enrich-hq-phone", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ company_ids: companyIds }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Bulk HQ phone pull failed");
-      const byCompany = new Map<string, string | null>();
-      for (const result of Array.isArray(data.results) ? data.results : []) {
-        if (result?.ok && result.company_id) {
-          byCompany.set(String(result.company_id), result.hq_phone ?? null);
-        }
-      }
-      if (byCompany.size > 0) {
-        setRows((prev) =>
-          prev?.map((row) => {
-            const hq = byCompany.get(row.company_id);
-            return hq !== undefined ? { ...row, hq_phone: hq } : row;
-          }) ?? prev
-        );
-      }
-      if (data.summary?.failed > 0) {
-        setGlobalError(
-          `HQ phones: ${data.summary.updated ?? 0} updated, ${data.summary.found ?? 0} found (${data.summary.succeeded}/${data.summary.companies} companies succeeded).`
-        );
-      }
-    } catch (e) {
-      setGlobalError(e instanceof Error ? e.message : "HQ phone pull failed");
-    } finally {
-      setBulkPullHqPhone(false);
-    }
-  }
-
   async function handleExport() {
     if (!rows || rows.length === 0) return;
     setExporting(true);
@@ -1064,57 +1007,6 @@ export function AthleteTargetList({
     }
   }
 
-  function applyGeneratedOutreach(
-    generated: Array<{
-      pipeline_id?: string;
-      contact_id?: string;
-      outreach_email_subject?: string;
-      outreach_email?: string;
-    }>
-  ) {
-    if (!rows || generated.length === 0) return;
-    setRows((prev) => {
-      if (!prev) return prev;
-      return prev.map((row) => {
-        const forRow = generated.filter((g) => g.pipeline_id === row.pipeline_id);
-        if (forRow.length === 0) return row;
-
-        let nextRow = { ...row };
-        for (const g of forRow) {
-          const subject = g.outreach_email_subject ?? null;
-          const body = g.outreach_email ?? null;
-          if (g.contact_id) {
-            nextRow = {
-              ...nextRow,
-              contacts: nextRow.contacts.map((c) => {
-                if (c.contact_id !== g.contact_id) return c;
-                const email_drafts = upsertContactOutreachDraft(
-                  c.email_drafts,
-                  athleteId,
-                  subject ?? "",
-                  body ?? ""
-                );
-                return {
-                  ...c,
-                  email_drafts,
-                  outreach_email_subject: subject,
-                  outreach_email: body,
-                };
-              }),
-            };
-          } else {
-            nextRow = {
-              ...nextRow,
-              outreach_email_subject: subject ?? nextRow.outreach_email_subject,
-              outreach_email: body ?? nextRow.outreach_email,
-            };
-          }
-        }
-        return nextRow;
-      });
-    });
-  }
-
   async function saveContactOutreachDraft(
     rowIndex: number,
     contactIndex: number,
@@ -1135,89 +1027,6 @@ export function AthleteTargetList({
       outreach_email_subject: subject || null,
       outreach_email: body || null,
     });
-  }
-
-  function outreachGenerateKey(rowIndex: number, contactIndex: number | null) {
-    const row = rows?.[rowIndex];
-    if (!row) return "";
-    const contactId =
-      contactIndex != null ? row.contacts[contactIndex]?.contact_id ?? "none" : "company";
-    return `${row.pipeline_id}:${contactId}`;
-  }
-
-  function recipientNameForContact(rowIndex: number, contactIndex: number | null): string {
-    const row = rows?.[rowIndex];
-    if (!row || contactIndex == null) return "[Recipient Name]";
-    const c = row.contacts[contactIndex];
-    if (!c) return "[Recipient Name]";
-    const first = c.first_name?.trim();
-    if (first) return first;
-    return formatContactDisplayName(c.first_name, c.last_name) || "[Recipient Name]";
-  }
-
-  async function handleGenerateOutreachForRow(rowIndex: number, contactIndex: number | null) {
-    const row = rows?.[rowIndex];
-    if (!row) return;
-    const genKey = outreachGenerateKey(rowIndex, contactIndex);
-    setGeneratingOutreachKey(genKey);
-    setGlobalError(null);
-    try {
-      const res = await fetch(`/api/athletes/${athleteId}/target-list/outreach`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          pipeline_id: row.pipeline_id,
-          contact_id:
-            contactIndex != null ? row.contacts[contactIndex]?.contact_id ?? undefined : undefined,
-          recipient_name: recipientNameForContact(rowIndex, contactIndex),
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(data?.error || "Failed to generate outreach email");
-      }
-      const firstError = Array.isArray(data.errors) ? data.errors[0] : null;
-      if (firstError?.error) {
-        throw new Error(`${firstError.company_name || row.company_name}: ${firstError.error}`);
-      }
-      if ((data.updated ?? 0) === 0) {
-        throw new Error("No outreach email was generated for this company");
-      }
-      applyGeneratedOutreach(Array.isArray(data.generated) ? data.generated : []);
-    } catch (e) {
-      setGlobalError(e instanceof Error ? e.message : "Failed to generate outreach email");
-    } finally {
-      setGeneratingOutreachKey(null);
-    }
-  }
-
-  async function handleGenerateOutreachEmails() {
-    if (!rows || rows.length === 0) return;
-    setGeneratingOutreach(true);
-    setGlobalError(null);
-    try {
-      const res = await fetch(`/api/athletes/${athleteId}/target-list/outreach`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(data?.error || "Failed to generate outreach emails");
-      }
-      applyGeneratedOutreach(Array.isArray(data.generated) ? data.generated : []);
-      if (Array.isArray(data.errors) && data.errors.length > 0) {
-        const first = data.errors[0];
-        setGlobalError(
-          `Generated ${data.updated ?? 0}/${data.processed ?? 0} emails. ${first.company_name || "Company"}: ${first.error}`
-        );
-      }
-    } catch (e) {
-      setGlobalError(e instanceof Error ? e.message : "Failed to generate outreach emails");
-    } finally {
-      setGeneratingOutreach(false);
-    }
   }
 
   async function applyPartnershipResearchResult(
@@ -1385,7 +1194,7 @@ export function AthleteTargetList({
                 <button
                   type="button"
                   onClick={() => setBulkActionsOpen((o) => !o)}
-                  disabled={bulkActionsDisabled && !bulkPullHqPhone && !bulkFindContacts && !bulkPartnershipResearch && !generatingOutreach && !exporting}
+                  disabled={bulkActionsDisabled && !bulkFindContacts && !bulkPartnershipResearch && !exporting}
                   className={cn(
                     bulkActionBtnClass,
                     "border-white/15 bg-[#1A211D] text-[#D7D0C4] hover:bg-white/5"
@@ -1395,17 +1204,6 @@ export function AthleteTargetList({
                 </button>
                 {bulkActionsOpen ? (
                   <div className="absolute right-0 top-full z-50 mt-1 w-56 rounded-md border border-white/10 bg-[#151A17] py-1 shadow-xl">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setBulkActionsOpen(false);
-                        requestBulkPullHqPhones();
-                      }}
-                      disabled={bulkActionsDisabled}
-                      className="block w-full px-3 py-2 text-left text-xs text-[#D7D0C4] hover:bg-white/5 disabled:opacity-50"
-                    >
-                      {bulkPullHqPhone ? "Pulling HQ phones…" : "Pull HQ phones (all)"}
-                    </button>
                     <button
                       type="button"
                       onClick={() => {
@@ -1429,17 +1227,6 @@ export function AthleteTargetList({
                       {bulkPartnershipResearch
                         ? `Researching ${bulkPartnershipIndex}/${rows?.length ?? 0}…`
                         : "Research partnerships (all)"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setBulkActionsOpen(false);
-                        void handleGenerateOutreachEmails();
-                      }}
-                      disabled={bulkActionsDisabled || generatingOutreachKey != null}
-                      className="block w-full px-3 py-2 text-left text-xs text-[#D7D0C4] hover:bg-white/5 disabled:opacity-50"
-                    >
-                      {generatingOutreach ? "Generating…" : "Generate outreach emails"}
                     </button>
                     <button
                       type="button"
@@ -1492,7 +1279,21 @@ export function AthleteTargetList({
         ) : (
           <>
             <div>
-              <h3 className="text-base font-semibold text-[#F4F1EB]">Target List</h3>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-base font-semibold text-[#F4F1EB]">Target List</h3>
+                <button
+                  type="button"
+                  onClick={() => setFocusModePersisted(true)}
+                  className={cn(
+                    bulkActionBtnClass,
+                    "border-white/15 bg-[#1A211D] text-[#D7D0C4] hover:bg-white/5"
+                  )}
+                  title="Expand spreadsheet — hide athlete header and tabs"
+                >
+                  <Maximize2 className="h-3.5 w-3.5" aria-hidden />
+                  Expand
+                </button>
+              </div>
               <p className="mt-0.5 text-xs text-[#B9B2A6]">
                 Every company prospected and assigned to this athlete in your CRM pipeline. Click any cell to edit in
                 place; changes sync to the CRM. Rows without a contact are highlighted.
@@ -1514,18 +1315,6 @@ export function AthleteTargetList({
               ) : null}
               <button
                 type="button"
-                onClick={() => setFocusModePersisted(true)}
-                className={cn(
-                  bulkActionBtnClass,
-                  "border-white/15 bg-[#1A211D] text-[#D7D0C4] hover:bg-white/5"
-                )}
-                title="Expand spreadsheet — hide athlete header and tabs"
-              >
-                <Maximize2 className="h-3.5 w-3.5" aria-hidden />
-                Expand
-              </button>
-              <button
-                type="button"
                 onClick={() => setAiDockCollapsed((c) => !c)}
                 className={cn(
                   bulkActionBtnClass,
@@ -1540,18 +1329,6 @@ export function AthleteTargetList({
                 ) : (
                   "AI assistant open"
                 )}
-              </button>
-              <button
-                type="button"
-                onClick={() => requestBulkPullHqPhones()}
-                disabled={bulkActionsDisabled}
-                className={cn(
-                  bulkActionBtnClass,
-                  "border-[#3A4A5E]/60 bg-[#1A2028] text-[#B8C8DC] hover:bg-[#222A35]"
-                )}
-                title="Apollo organization enrich — corporate HQ / switchboard numbers"
-              >
-                {bulkPullHqPhone ? "Pulling HQ phones…" : "Pull HQ phones (all)"}
               </button>
               <button
                 type="button"
@@ -1591,17 +1368,6 @@ export function AthleteTargetList({
               </button>
               <button
                 type="button"
-                onClick={() => void handleGenerateOutreachEmails()}
-                disabled={bulkActionsDisabled || generatingOutreachKey != null}
-                className={cn(
-                  bulkActionBtnClass,
-                  "border-[#2E7040]/60 bg-[#173522] text-[#DBEEE0] hover:bg-[#1F4730]"
-                )}
-              >
-                {generatingOutreach ? "Generating…" : "Generate Outreach Emails"}
-              </button>
-              <button
-                type="button"
                 onClick={() => void handleExport()}
                 disabled={bulkActionsDisabled || exporting}
                 className={cn(
@@ -1615,30 +1381,6 @@ export function AthleteTargetList({
           </>
         )}
       </header>
-
-      <TargetListActionDialog
-        open={bulkPullHqConfirmOpen}
-        title="Pull HQ phones for all companies?"
-        description={
-          <>
-            <p>
-              Run Apollo organization enrichment for every company on this list ({rows?.length ?? 0}{" "}
-              {rows?.length === 1 ? "company" : "companies"}) to fetch corporate switchboard numbers.
-            </p>
-            <p className="text-[#AEA79A]">
-              Companies need a website on file. Existing HQ numbers are kept unless Apollo returns a new
-              value for blank cells. Uses Apollo enrichment credits.
-            </p>
-          </>
-        }
-        confirmLabel="Pull HQ phones (all)"
-        dismissStorageKey={TARGET_LIST_PULL_HQ_PHONE_DISMISS_KEY}
-        onCancel={() => setBulkPullHqConfirmOpen(false)}
-        onConfirm={() => {
-          setBulkPullHqConfirmOpen(false);
-          void pullHqPhonesForAllCompanies();
-        }}
-      />
 
       <TargetListActionDialog
         open={bulkFindConfirmOpen}
@@ -1950,19 +1692,10 @@ export function AthleteTargetList({
                             companyName={row.company_name}
                             searchOverrides={apolloSearchOverrides}
                             onRefineSearchClick={() => setRefineSearchOpen(true)}
-                            disabled={bulkFindContacts || bulkPullHqPhone || removingPipelineId === row.pipeline_id}
+                            disabled={bulkFindContacts || removingPipelineId === row.pipeline_id}
                             onContacts={(contacts, meta) =>
                               applyCompanyContactsToRows(row.company_id, contacts, meta)
                             }
-                            onError={(msg) => setGlobalError(msg)}
-                          />
-                          <ApolloEnrichHqPhoneInline
-                            companyId={row.company_id}
-                            companyName={row.company_name}
-                            hqPhone={row.hq_phone}
-                            website={row.website}
-                            disabled={bulkFindContacts || bulkPullHqPhone || removingPipelineId === row.pipeline_id}
-                            onHqPhone={(hqPhone) => patchRowLocal(fr.rowIndex, { hq_phone: hqPhone })}
                             onError={(msg) => setGlobalError(msg)}
                           />
                           <button
@@ -1970,7 +1703,6 @@ export function AthleteTargetList({
                             className="block w-full rounded border border-[#8C3A3A]/50 bg-[#2A1818] px-1.5 py-0.5 text-[10px] font-medium text-[#F1A2A2] hover:bg-[#3A1E1E] disabled:cursor-not-allowed disabled:opacity-50"
                             disabled={
                               bulkFindContacts ||
-                              bulkPullHqPhone ||
                               bulkPartnershipResearch ||
                               removingPipelineId === row.pipeline_id ||
                               deletingContactsCompanyId === row.company_id
@@ -1992,7 +1724,6 @@ export function AthleteTargetList({
                             deleting={deletingContactsCompanyId === row.company_id}
                             disabled={
                               bulkFindContacts ||
-                              bulkPullHqPhone ||
                               bulkPartnershipResearch ||
                               removingPipelineId === row.pipeline_id
                             }
@@ -2349,14 +2080,14 @@ export function AthleteTargetList({
                     <Td className={yellowCell}>
                       {fr.hasContact && contact ? (
                         <EditableCell
-                          value={contact.outreach_email_subject ?? ""}
+                          value={contact.outreach_email_subject ?? row.outreach_email_subject ?? ""}
                           placeholder="Outreach subject line…"
                           onSave={async (next) => {
                             await saveContactOutreachDraft(
                               fr.rowIndex,
                               fr.contactIndex!,
                               next,
-                              contact.outreach_email ?? ""
+                              contact.outreach_email ?? row.outreach_email ?? ""
                             );
                           }}
                         />
@@ -2376,75 +2107,49 @@ export function AthleteTargetList({
                     {/* Outreach Email */}
                     <Td className={`${yellowCell} w-72 min-w-[18rem] max-w-[24rem]`.trim()}>
                       {fr.showCompany || fr.hasContact ? (
-                        <div className="space-y-1">
-                          <button
-                            type="button"
-                            className="rounded border border-[#2E7040]/50 bg-[#1B2F21] px-1.5 py-0.5 text-[10px] font-medium text-[#DBEEE0] hover:bg-[#23452E] disabled:cursor-not-allowed disabled:opacity-50"
-                            disabled={
-                              generatingOutreach ||
-                              generatingOutreachKey === outreachGenerateKey(fr.rowIndex, fr.contactIndex) ||
-                              bulkFindContacts ||
-                              bulkPullHqPhone ||
-                              bulkPartnershipResearch
-                            }
-                            title={
-                              fr.hasContact
-                                ? `Generate outreach email addressed to ${recipientNameForContact(fr.rowIndex, fr.contactIndex)}`
-                                : "Generate athlete-to-company outreach email from template"
-                            }
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void handleGenerateOutreachForRow(fr.rowIndex, fr.contactIndex);
+                        fr.hasContact && contact ? (
+                          <EditableCell
+                            value={contact.outreach_email ?? row.outreach_email ?? ""}
+                            placeholder="Outreach email draft..."
+                            multiline
+                            className="block max-h-32 overflow-y-auto"
+                            onSave={async (next) => {
+                              await saveContactOutreachDraft(
+                                fr.rowIndex,
+                                fr.contactIndex!,
+                                contact.outreach_email_subject ?? row.outreach_email_subject ?? "",
+                                next
+                              );
                             }}
-                          >
-                            {generatingOutreachKey === outreachGenerateKey(fr.rowIndex, fr.contactIndex)
-                              ? "Generating…"
-                              : "Generate"}
-                          </button>
-                          {fr.hasContact && contact ? (
-                            <EditableCell
-                              value={contact.outreach_email ?? ""}
-                              placeholder="Generated outreach email draft..."
-                              multiline
-                              className="block max-h-32 overflow-y-auto"
-                              onSave={async (next) => {
-                                await saveContactOutreachDraft(
-                                  fr.rowIndex,
-                                  fr.contactIndex!,
-                                  contact.outreach_email_subject ?? "",
-                                  next
-                                );
-                              }}
-                              display={(v) =>
-                                v ? (
-                                  <pre className="whitespace-pre-wrap font-sans text-xs text-[#D7D0C4]">{v}</pre>
-                                ) : (
-                                  <span className="text-[#8E877A]">—</span>
-                                )
-                              }
-                            />
-                          ) : !fr.hasContact ? (
-                            <EditableCell
-                              value={row.outreach_email ?? ""}
-                              placeholder="Generated outreach email draft..."
-                              multiline
-                              className="block max-h-32 overflow-y-auto"
-                              onSave={async (next) => {
-                                await savePipelinePatch(fr.rowIndex, { outreach_email: next || null });
-                                patchRowLocal(fr.rowIndex, { outreach_email: next || null });
-                              }}
-                              display={(v) =>
-                                v ? (
-                                  <pre className="whitespace-pre-wrap font-sans text-xs text-[#D7D0C4]">{v}</pre>
-                                ) : (
-                                  <span className="text-[#8E877A]">—</span>
-                                )
-                              }
-                            />
-                          ) : (
-                            <span className="text-[#8E877A]">—</span>
-                          )}
-                        </div>
+                            display={(v) =>
+                              v ? (
+                                <pre className="whitespace-pre-wrap font-sans text-xs text-[#D7D0C4]">{v}</pre>
+                              ) : (
+                                <span className="text-[#8E877A]">—</span>
+                              )
+                            }
+                          />
+                        ) : !fr.hasContact ? (
+                          <EditableCell
+                            value={row.outreach_email ?? ""}
+                            placeholder="Outreach email draft..."
+                            multiline
+                            className="block max-h-32 overflow-y-auto"
+                            onSave={async (next) => {
+                              await savePipelinePatch(fr.rowIndex, { outreach_email: next || null });
+                              patchRowLocal(fr.rowIndex, { outreach_email: next || null });
+                            }}
+                            display={(v) =>
+                              v ? (
+                                <pre className="whitespace-pre-wrap font-sans text-xs text-[#D7D0C4]">{v}</pre>
+                              ) : (
+                                <span className="text-[#8E877A]">—</span>
+                              )
+                            }
+                          />
+                        ) : (
+                          <span className="text-[#8E877A]">—</span>
+                        )
                       ) : (
                         <span aria-hidden="true"></span>
                       )}

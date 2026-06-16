@@ -4,7 +4,7 @@ import { deriveRoutingFlowMode } from "@/components/chat/chat-routing";
 
 test("deriveRoutingFlowMode maps embedded contexts", () => {
   assert.equal(deriveRoutingFlowMode("crm_pipeline"), "email");
-  assert.equal(deriveRoutingFlowMode("target_list"), "outbound");
+  assert.equal(deriveRoutingFlowMode("target_list"), undefined);
 });
 
 test("deriveRoutingFlowMode uses URL flow mode only without embedded context", () => {
@@ -16,5 +16,5 @@ test("deriveRoutingFlowMode uses URL flow mode only without embedded context", (
 
 test("deriveRoutingFlowMode prefers embedded context over URL param", () => {
   assert.equal(deriveRoutingFlowMode("crm_pipeline", "outbound"), "email");
-  assert.equal(deriveRoutingFlowMode("target_list", "email"), "outbound");
+  assert.equal(deriveRoutingFlowMode("target_list", "email"), undefined);
 });

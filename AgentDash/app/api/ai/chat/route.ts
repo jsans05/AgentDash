@@ -2,6 +2,9 @@ import { getCurrentProfile } from "@/lib/auth";
 import type { Profile } from "@/lib/supabase/types";
 import { createAITools, FIND_ATHLETES_FOR_COMPANY_SPORTS } from "@/lib/ai/tools";
 import {
+  assistantClaimsTargetListSave,
+  assistantHasPresentableOutreachDraft,
+  EMAIL_PIPELINE_TOOL_NAMES,
   extractToolNames,
   getAthleteTargetListSessionAddon,
   getBulkImportFromChatAddon,
@@ -11,8 +14,10 @@ import {
 } from "@/lib/ai/flow-guards";
 import {
   detectChatBulkImportIntent,
+  detectExplicitProspectIntent,
   detectFlow5MultiCompanyTemplateIntent,
   detectTargetListOutreachPushIntent,
+  detectTargetListSaveAffirmativeIntent,
   detectTargetListSaveIntent,
 } from "@/lib/ai/flow-intent";
 import { getFlowModeEnforcement } from "@/lib/ai/feature-flags";
@@ -1126,7 +1131,7 @@ const TOOLS = [
     function: {
       name: "updateTargetListOutreach",
       description:
-        "Write Email Subject and Outreach Email on the athlete Target List (crm_companies_pipeline.outreach_email_subject / outreach_email, or per-contact target-list draft when contact_id is set). Use when the user asks to push/save an email to the target list — NOT pushEmailToCrm. Requires pipeline_id from getAthleteTargetList. Up to 80 updates per call.",
+        "Write Email Subject and Outreach Email on the athlete Target List. When the company row has CRM contacts, saves on contact rows (all contacts if contact_id omitted); otherwise writes pipeline outreach_email_subject / outreach_email. Use when the user asks to push/save an email to the target list — NOT pushEmailToCrm. Requires pipeline_id from getAthleteTargetList. Up to 80 updates per call.",
       parameters: {
         type: "object",
         properties: {
@@ -1669,6 +1674,8 @@ export async function POST(req: Request) {
     }
 
     const requestAthleteId = String(athlete_id ?? "").trim();
+    const targetListUiContext = ui_context === "target_list";
+    const explicitProspectIntent = detectExplicitProspectIntent(trimmedMessages);
     const resolvedFlowMode = resolveFlowMode({
       flowMode: flow_mode,
       conversationFlowMode,
@@ -1694,6 +1701,7 @@ export async function POST(req: Request) {
       sessionContextText: extraContext,
       flowMode: resolvedFlowMode,
       athleteId: requestAthleteId || undefined,
+      targetListContext: targetListUiContext,
       interactionSelectedInterests,
       interactionSelectedPitchAngles,
       forceComposeAfterInterests,
@@ -1722,14 +1730,15 @@ REQUIRED behavior — do not deviate:
         : "";
     const targetListOutreachPush = detectTargetListOutreachPushIntent(trimmedMessages);
     const targetListSaveIntent = detectTargetListSaveIntent(trimmedMessages);
-    const targetListUiContext = ui_context === "target_list";
+    const targetListSaveAffirmative = detectTargetListSaveAffirmativeIntent(trimmedMessages);
+    const activeTargetListSaveIntent =
+      targetListOutreachPush || targetListSaveIntent || targetListSaveAffirmative;
     const injectTargetListSession = targetListUiContext && Boolean(requestAthleteId);
     const targetListSessionAddon = injectTargetListSession
       ? `\n\n${getAthleteTargetListSessionAddon(requestAthleteId)}`
       : "";
     const injectTargetListPushGuard =
-      (targetListUiContext || resolvedFlowMode === "email") &&
-      (targetListOutreachPush || targetListSaveIntent);
+      (targetListUiContext || resolvedFlowMode === "email") && activeTargetListSaveIntent;
     const targetListOutreachAddon = injectTargetListPushGuard
       ? `\n\n${getTargetListOutreachPushAddon()}`
       : "";
@@ -1745,7 +1754,11 @@ REQUIRED behavior — do not deviate:
       flowMode: resolvedFlowMode,
       includeBulkImport,
     });
-    const activeToolDefinitions = filterToolDefinitions(TOOLS, resolvedFlowMode);
+    const targetListBlocked =
+      targetListUiContext && !explicitProspectIntent
+        ? new Set(["generateAthleteProspectList"])
+        : undefined;
+    const activeToolDefinitions = filterToolDefinitions(TOOLS, resolvedFlowMode, targetListBlocked);
     const dynamicSystemContext = `${userMemoryPrompt}${toneSamplePrompt}${projectPrompt}${extraPrompt}${crmPipelineAddon}${targetListSessionAddon}${modePromptAddon}${attachmentAddon}${chatBulkImportAddon}${targetListOutreachAddon}${
       flowPromptAddon ? `\n\n${flowPromptAddon}` : ""
     }${interestGateAddons ? `\n\n${interestGateAddons}` : ""}${emailInterestAddon ? `\n\n${emailInterestAddon}` : ""}`;
@@ -1870,6 +1883,7 @@ REQUIRED behavior — do not deviate:
         return summary;
       };
       const usedToolNames = new Set<string>();
+      let targetListOutreachRowsUpdated = 0;
       let composePitchEmailCallCount = 0;
       let askUserQuestionCallCount = 0;
       const multiCompanyEmailIntent = detectFlow5MultiCompanyTemplateIntent(trimmedMessages, {
@@ -1967,20 +1981,33 @@ REQUIRED behavior — do not deviate:
           selectedInterestsCount: runtimeSelectedInterestsCount,
           pipelineDrafting,
           emailRevisionMode,
+          targetListSaveIntent: activeTargetListSaveIntent,
+          targetListContext: targetListUiContext,
+          explicitProspectIntent,
           skipInterestPicker: skipPickerThisRun,
           composeAfterInterestSelection: composeAfterInterestsThisRun,
           lastAssistantContent: String(lastMessage?.content ?? ""),
           multiCompanyEmailIntent,
           composePitchEmailCallCount,
           askUserQuestionCallCount,
+          usedToolNames,
         });
+        const skipTargetListDraftToolCorrection =
+          targetListUiContext &&
+          !explicitProspectIntent &&
+          toolCalls.length === 0 &&
+          missingRequiredTools.length > 0 &&
+          missingRequiredTools.every((name) => EMAIL_PIPELINE_TOOL_NAMES.has(name)) &&
+          assistantHasPresentableOutreachDraft(String(lastMessage?.content ?? ""));
         const missingToolsCondition =
-          toolCalls.length === 0 && missingRequiredTools.length > 0;
+          toolCalls.length === 0 &&
+          missingRequiredTools.length > 0 &&
+          !skipTargetListDraftToolCorrection;
         if (missingToolsCondition && !injectedCorrections.has("missing_required_tools")) {
           injectedCorrections.add("missing_required_tools");
           currentMessages.push(lastMessage);
           currentMessages.push({
-            role: "system",
+            role: "user",
             content: `Required before finishing this turn: call these tool(s): ${missingRequiredTools.join(
               ", "
             )}.`,
@@ -1994,7 +2021,14 @@ REQUIRED behavior — do not deviate:
           correctionInjections.push("missing_required_tools_repeated_skip");
         }
 
-        if (toolCalls.length === 0 && resolvedFlowMode === "outbound") {
+        const skipOutboundProspectValidation =
+          targetListUiContext || isEmailFlowIntent;
+
+        if (
+          toolCalls.length === 0 &&
+          resolvedFlowMode === "outbound" &&
+          !skipOutboundProspectValidation
+        ) {
           const prospectValidation = validateGroupedProspectingOutput(
             String(lastMessage?.content ?? "")
           );
@@ -2006,7 +2040,7 @@ REQUIRED behavior — do not deviate:
             injectedCorrections.add("outbound_prospect_validation_failed");
             currentMessages.push(lastMessage);
             currentMessages.push({
-              role: "system",
+              role: "user",
               content:
                 "Required: prospecting reply must include generateAthleteProspectList output verbatim. Call getSponsorshipTargets then generateAthleteProspectList if needed, then paste the tool markdown field exactly. Each category table must use: | Company | Match Score | Website | Partnership Justification | with Match Score as an integer 0–100 (never stars or labels like High) and Website as markdown links; rows sorted by Match Score descending within the category.",
             });
@@ -2033,7 +2067,7 @@ REQUIRED behavior — do not deviate:
           injectedCorrections.add("email_enrichment_missing_compose");
           currentMessages.push(lastMessage);
           currentMessages.push({
-            role: "system",
+            role: "user",
             content:
               "Required: call composePitchEmail (or mergePitchEmails) with revision_hint set to the user's latest message for email enrichment or rewrite. Output only body_markdown from the tool — no standalone stats analysis.",
           });
@@ -2057,7 +2091,7 @@ REQUIRED behavior — do not deviate:
           injectedCorrections.add("target_list_push_missing_update");
           currentMessages.push(lastMessage);
           currentMessages.push({
-            role: "system",
+            role: "user",
             content:
               "Required: save this email on the athlete Target List (Outreach Email / Email Subject columns). Call getAthleteTargetList if you need pipeline_id, then updateTargetListOutreach with outreach_email_subject and outreach_email. Do not use pushEmailToCrm for target-list saves.",
           });
@@ -2068,6 +2102,31 @@ REQUIRED behavior — do not deviate:
           injectedCorrections.has("target_list_push_missing_update")
         ) {
           correctionInjections.push("target_list_push_missing_update_repeated_skip");
+        }
+
+        const targetListFalseSaveClaimCondition =
+          toolCalls.length === 0 &&
+          targetListUiContext &&
+          assistantClaimsTargetListSave(String(lastMessage?.content ?? "")) &&
+          (!usedToolNames.has("updateTargetListOutreach") || targetListOutreachRowsUpdated === 0);
+        if (
+          targetListFalseSaveClaimCondition &&
+          !injectedCorrections.has("target_list_false_save_claim")
+        ) {
+          injectedCorrections.add("target_list_false_save_claim");
+          currentMessages.push(lastMessage);
+          currentMessages.push({
+            role: "user",
+            content:
+              "You claimed the outreach email was saved on the target list but updateTargetListOutreach did not succeed (need ok:true and updated > 0). Call getAthleteTargetList with include_contacts:true for pipeline_id; when the row has contacts, pass contact_id from focused row or omit to save all contact rows. Do not tell the user it is saved until the tool confirms updated > 0.",
+          });
+          correctionInjections.push("target_list_false_save_claim");
+          continue;
+        } else if (
+          targetListFalseSaveClaimCondition &&
+          injectedCorrections.has("target_list_false_save_claim")
+        ) {
+          correctionInjections.push("target_list_false_save_claim_repeated_skip");
         }
 
         currentMessages.push(lastMessage);
@@ -2236,6 +2295,13 @@ REQUIRED behavior — do not deviate:
             }
             if (name === "pushCompanyToCrmPipeline" && result && !result.error) {
               sources.push(`CRM pipeline company: ${parsedArgs.company_name}`);
+            }
+            if (name === "updateTargetListOutreach" && result && typeof result === "object") {
+              const r = result as { ok?: boolean; updated?: number };
+              if (r.ok && typeof r.updated === "number" && r.updated > 0) {
+                targetListOutreachRowsUpdated += r.updated;
+                sources.push(`Target list outreach updated: ${r.updated} row(s)`);
+              }
             }
             if (name === "pushEmailToCrm" && result && typeof result === "object") {
               const r = result as {
@@ -2417,7 +2483,7 @@ REQUIRED behavior — do not deviate:
             ...currentMessages,
             hitIterationCap
               ? {
-                  role: "system" as const,
+                  role: "user" as const,
                   content:
                     "Tool budget exhausted for this turn. Give the user a clear status update on what was accomplished and what still needs to happen — do not call more tools.",
                 }

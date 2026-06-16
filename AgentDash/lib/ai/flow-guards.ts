@@ -1,4 +1,5 @@
 import { getFlowModeEnforcement } from "@/lib/ai/feature-flags";
+import { isEmailDraftContent } from "@/lib/chat/email-draft";
 import { ASK_USER_QUESTION_TOOL } from "@/lib/ai/user-question";
 import type { AIFlowIntent } from "@/lib/ai/flow-intent";
 import type { ResolvedFlowMode } from "@/lib/ai/flow-mode";
@@ -15,13 +16,57 @@ type FlowGuardContext = {
   selectedInterestsCount?: number;
   pipelineDrafting?: boolean;
   emailRevisionMode?: boolean;
+  targetListSaveIntent?: boolean;
+  targetListContext?: boolean;
+  explicitProspectIntent?: boolean;
   skipInterestPicker?: boolean;
   composeAfterInterestSelection?: boolean;
   lastAssistantContent?: string;
   multiCompanyEmailIntent?: boolean;
   composePitchEmailCallCount?: number;
   askUserQuestionCallCount?: number;
+  usedToolNames?: Set<string>;
 };
+
+/** User-visible outreach copy is already present — do not re-open the interest/compose correction loop. */
+export function assistantHasPresentableOutreachDraft(content: string | undefined): boolean {
+  const text = String(content ?? "").trim();
+  if (!text) return false;
+  if (isEmailDraftContent(text)) return true;
+  return (
+    text.length >= 120 &&
+    /Looking forward to hearing from you,/m.test(text) &&
+    /(Hope you|I'm reaching out|on behalf of|nice to meet you)/i.test(text)
+  );
+}
+
+/** Assistant claims a target-list save happened without updateTargetListOutreach. */
+export function assistantClaimsTargetListSave(content: string | undefined): boolean {
+  const text = String(content ?? "").trim();
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  const claimsDone =
+    /\b(saved|updated|pushed|added|is live|on the target list|to the target list)\b/.test(lower) ||
+    /^✅\s*saved\b/i.test(text);
+  const mentionsTargetList =
+    /\btarget list\b/.test(lower) ||
+    /\boutreach email\b/.test(lower) ||
+    /\boutreach column\b/.test(lower);
+  const askingPermission =
+    /\b(shall i|want me to|should i|can i|would you like me to)\b.*\b(save|push|add|update)\b/.test(
+      lower
+    );
+  if (askingPermission) return false;
+  return claimsDone && mentionsTargetList;
+}
+
+export const EMAIL_PIPELINE_TOOL_NAMES = new Set([
+  "curatePitchInterests",
+  "getDistinctAudienceInterests",
+  ASK_USER_QUESTION_TOOL,
+  "composePitchEmail",
+  "mergePitchEmails",
+]);
 
 function isClarifyingAssistantQuestion(content: string | undefined): boolean {
   const text = String(content ?? "").trim();
@@ -127,11 +172,15 @@ The user opened Mystery Machine from this athlete's **Target List / Outreach** t
 You MUST in **this** assistant turn when saving outreach copy:
 1) Call **getAthleteTargetList** with \`athlete_id: "${id}"\` (\`include_contacts: true\` when saving per-contact copy) → \`pipeline_id\` for each company.
 2) Call **updateTargetListOutreach** with \`updates: [{ pipeline_id, outreach_email_subject, outreach_email, contact_id? }]\` using the approved subject/body from the thread. Up to 80 rows per call.
+- When **getAthleteTargetList** shows **contacts** on a row, outreach appears on **contact** rows in the spreadsheet — pass \`contact_id\` from SESSION CONTEXT focused row when set; if omitted, the tool saves on **all contacts** for that company (not pipeline-only columns).
 
 You must **NOT** use **pushEmailToCrm** for target-list saves (that writes CRM drafting only).
 Do not claim the email is on the target list unless **updateTargetListOutreach** returned \`ok: true\` and \`updated\` > 0.
-If SESSION CONTEXT lists selected \`pipeline_id\` values or a focused row, prefer those over asking which company — use them directly when the user says "this company" or "selected companies".
+If SESSION CONTEXT lists selected \`pipeline_id\` values or a focused row, prefer those over asking which company — use them directly when the user says "this company" or "selected companies". Do not say a company must be added to the list first when SESSION CONTEXT or **getAthleteTargetList** already shows that company.
 If a company is missing from the list, use **bulkImportCompaniesToCrmForAthlete** or **pushCompanyToCrmPipeline** with \`athlete_id: "${id}"\`, then **updateTargetListOutreach**.
+- Default workflow here is **outreach drafting** for companies already on the list: **curatePitchInterests** → **composePitchEmail**; user-visible copy must be the tool's \`body_markdown\` — never hand-crafted parallel drafts.
+- Do **not** call **generateAthleteProspectList** unless the user explicitly asks to find new sponsors or brands to add.
+- The email **ends** at **Looking forward to hearing from you,** — put save offers, questions, or next steps **after** a blank line below that closing (never inside the email body).
 `.trim();
 }
 
@@ -286,8 +335,30 @@ export function getMissingRequiredTools(
   if (context?.emailRevisionMode) {
     return required;
   }
+  if (context?.targetListSaveIntent) {
+    return required;
+  }
 
-  const isCompanyTargets = flowIntent === "company_targets" || flowMode === "outbound";
+  if (
+    context?.targetListContext &&
+    !context?.explicitProspectIntent &&
+    assistantHasPresentableOutreachDraft(context.lastAssistantContent)
+  ) {
+    return required;
+  }
+
+  if (
+    context?.targetListContext &&
+    !context?.explicitProspectIntent &&
+    context.usedToolNames?.has("curatePitchInterests") &&
+    context.usedToolNames?.has("composePitchEmail")
+  ) {
+    return required;
+  }
+
+  const isCompanyTargets =
+    (flowIntent === "company_targets" || flowMode === "outbound") &&
+    !(context?.targetListContext && !context?.explicitProspectIntent);
   const isInboundMatch =
     flowIntent === "inbound_company_athlete_match" || flowMode === "inbound";
   const isEmailPitchFlow =

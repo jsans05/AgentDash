@@ -1,7 +1,11 @@
 import { createServerClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
 import { fetchPipelineCardsForUser } from "@/lib/features/crm-pipeline/service";
+import { chunkArray } from "@/lib/import/chunk";
 import { NextResponse } from "next/server";
+
+/** PostgREST `.in()` on company_id blows URL limits when many pipeline cards exist. */
+const CONTACT_COMPANY_IN_CHUNK = 200;
 
 export type ContactDraftListItem = {
   contact_id: string;
@@ -48,17 +52,21 @@ export async function GET() {
   let contactRows: Record<string, unknown>[] = [];
 
   if (companyIds.length > 0) {
-    let contactQuery = supabase.from("crm_contacts").select(contactSelect).in("company_id", companyIds);
+    for (const companyIdBatch of chunkArray(companyIds, CONTACT_COMPANY_IN_CHUNK)) {
+      let contactQuery = supabase.from("crm_contacts").select(contactSelect).in("company_id", companyIdBatch);
 
-    if (profile.role === "agent") {
-      contactQuery = contactQuery.eq("created_by_user_id", profile.user_id);
-    }
+      if (profile.role === "agent") {
+        contactQuery = contactQuery.eq("created_by_user_id", profile.user_id);
+      }
 
-    const { data, error: cErr } = await contactQuery;
-    if (cErr) {
-      return NextResponse.json({ error: cErr.message }, { status: 500 });
+      const { data, error: cErr } = await contactQuery;
+      if (cErr) {
+        return NextResponse.json({ error: cErr.message }, { status: 500 });
+      }
+      if (data?.length) {
+        contactRows.push(...(data as Record<string, unknown>[]));
+      }
     }
-    contactRows = (data ?? []) as Record<string, unknown>[];
   } else if (profile.role === "agent") {
     const { data, error: cErr } = await supabase
       .from("crm_contacts")

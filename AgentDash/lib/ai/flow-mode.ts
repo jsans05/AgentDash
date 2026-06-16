@@ -102,7 +102,6 @@ export function resolveFlowMode(input: FlowModeResolutionInput): ResolvedFlowMod
   if (persisted && persisted !== "auto") return persisted;
 
   if (input.pipelineDrafting) return "email";
-  if (input.uiContext === "target_list" && String(input.athleteId ?? "").trim()) return "outbound";
   if (input.uiContext === "crm_pipeline") return "email";
 
   return "default";

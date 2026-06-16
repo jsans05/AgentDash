@@ -13,6 +13,8 @@ export type ClassifyFlowIntentOptions = {
   pipelineDrafting?: boolean;
   /** When set (e.g. from Outreach tab), casual prospecting phrases route to outbound. */
   athleteId?: string | null;
+  /** Mystery Machine opened from athlete Target List — default to outreach drafting, not prospecting. */
+  targetListContext?: boolean;
 };
 
 export type ChatBulkImportIntent = {
@@ -127,6 +129,26 @@ export function detectInboundCompanyAthleteMatchIntent(messages: any[]): boolean
   );
 }
 
+/** User explicitly asks to find new sponsors/brands (not draft outreach for companies already on a list). */
+export function detectExplicitProspectIntent(messages: any[]): boolean {
+  const text = latestUserText(messages);
+  if (!text) return false;
+
+  return (
+    /\blet'?s prospect\b/.test(text) ||
+    /\bprospect(ing)?\b/.test(text) ||
+    /find\b.*\b(more\s+)?(sponsors?|sponsorships?|brands?|companies|targets)\b/.test(text) ||
+    /(get|give|list|suggest)\b.*\b(new\s+)?(sponsors?|brands?|companies|targets)\b/.test(text) ||
+    /\bwho should (they|we) pitch for\b/.test(text) ||
+    /\bgenerate\b.*\bprospect\b/.test(text) ||
+    /\bnew companies to target\b/.test(text) ||
+    /\bsponsor targets\b/.test(text) ||
+    /(what|which)\b.*\b(companies|brands|sponsors|sponsorships|targets)\b.*\b(should|to pitch|to target)\b/.test(
+      text
+    )
+  );
+}
+
 export function detectCompanyTargetsIntent(
   messages: any[],
   options?: ClassifyFlowIntentOptions
@@ -137,6 +159,8 @@ export function detectCompanyTargetsIntent(
   // Email-draft phrasing wins over outbound prospecting.
   if (/(draft|write|compose|send).*(email|outreach)/.test(text)) return false;
   if (/\bemail\b.*(for|to)\b/.test(text)) return false;
+
+  const targetListContext = options?.targetListContext === true;
 
   const hasAthleteContext =
     Boolean(String(options?.athleteId ?? "").trim()) ||
@@ -152,7 +176,10 @@ export function detectCompanyTargetsIntent(
     /\bfocus on\b.*\bcompanies\b/.test(text) ||
     /who should (they|we) pitch for\b/.test(text);
 
-  if (mentionsTargets && hasAthleteContext) return true;
+  if (mentionsTargets && hasAthleteContext) {
+    if (targetListContext && !detectExplicitProspectIntent(messages)) return false;
+    return true;
+  }
 
   // Casual outbound phrasing when athlete is scoped via session/query param.
   if (
@@ -161,6 +188,7 @@ export function detectCompanyTargetsIntent(
       /\bprospect\b/.test(text) ||
       /\b(sponsors?|brands?|companies)\b/.test(text))
   ) {
+    if (targetListContext) return detectExplicitProspectIntent(messages);
     return true;
   }
 
@@ -330,6 +358,42 @@ export function detectTargetListSaveIntent(messages: any[]): boolean {
     /\b(outreach|email|subject|body|draft|spreadsheet)\b/.test(text);
 
   return outreachColumn || saveOutreach;
+}
+
+const AFFIRMATIVE_SAVE_RE =
+  /^(yes|yep|yeah|yup|sure|ok(?:ay)?|go ahead|do it|save it|please do|sounds good|that works|let'?s do it|please save|save now|go for it)[.!?\s]*$/i;
+
+/** User affirmed a prior assistant offer to save outreach to the target list (e.g. "yes" after "Want me to save?"). */
+export function detectTargetListSaveAffirmativeIntent(messages: any[]): boolean {
+  if (!Array.isArray(messages) || messages.length < 2) return false;
+
+  const latestUser = [...messages]
+    .reverse()
+    .find((m: any) => m?.role === "user" && toTextContent(m?.content).trim());
+  const userText = toTextContent(latestUser?.content).trim();
+  if (!userText || !AFFIRMATIVE_SAVE_RE.test(userText)) return false;
+
+  const latestUserIdx = messages.lastIndexOf(latestUser);
+  if (latestUserIdx <= 0) return false;
+
+  for (let i = latestUserIdx - 1; i >= 0; i--) {
+    const row = messages[i];
+    if (row?.role !== "assistant") continue;
+    const prevText = normalize(toTextContent(row?.content));
+    if (!prevText) continue;
+
+    const offeredSave =
+      /\b(save|push|add|put|update|store)\b/.test(prevText) &&
+      (/\btarget list\b/.test(prevText) ||
+        /\boutreach email\b/.test(prevText) ||
+        /\bemail subject\b/.test(prevText) ||
+        /\bwant me to save\b/.test(prevText) ||
+        /\bshall i save\b/.test(prevText));
+
+    return offeredSave;
+  }
+
+  return false;
 }
 
 export function detectChatBulkImportIntent(messages: any[]): ChatBulkImportIntent {

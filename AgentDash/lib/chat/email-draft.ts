@@ -10,6 +10,25 @@ export type ParsedEmailDraft = {
 const SUBJECT_LINE_RE = /(?:^|\n)(?:\*\*)?Subject:(?:\*\*)?\s*(.+)$/im;
 const EMAIL_CLOSING_RE = /Looking forward to hearing from you,/m;
 
+/** Strip server-appended sources blocks from chat tail text. */
+export function stripChatSourcesFooter(text: string): string {
+  return String(text ?? "")
+    .replace(/\n{0,2}---\n\*\*Sources used:\*\*[\s\S]*$/i, "")
+    .replace(/\n{0,2}\*\*Web sources:\*\*[\s\S]*$/i, "")
+    .trim();
+}
+
+function splitAtEmailClosing(raw: string): { body: string; tail: string } | null {
+  const text = String(raw ?? "");
+  const match = text.match(EMAIL_CLOSING_RE);
+  if (!match || match.index === undefined) return null;
+  const endIdx = match.index + match[0].length;
+  return {
+    body: text.slice(0, endIdx).trimEnd(),
+    tail: text.slice(endIdx).replace(/^\s*\n?/, "").trim(),
+  };
+}
+
 export function parseEmailDraftContent(text: string): ParsedEmailDraft | null {
   const trimmed = String(text ?? "").trim();
   if (!trimmed) return null;
@@ -21,13 +40,13 @@ export function parseEmailDraftContent(text: string): ParsedEmailDraft | null {
   if (!subject) return null;
 
   const subjectLineStart = subjectMatch.index + (subjectMatch[0].startsWith("\n") ? 1 : 0);
-  const afterSubjectLine = trimmed.slice(subjectMatch.index + subjectMatch[0].length);
-  const body = afterSubjectLine.replace(/^\s*\n/, "").trimEnd();
-  if (!body.trim()) return null;
-  if (!EMAIL_CLOSING_RE.test(body)) return null;
+  const afterSubjectLine = trimmed.slice(subjectMatch.index + subjectMatch[0].length).replace(/^\s*\n/, "");
+  const split = splitAtEmailClosing(afterSubjectLine);
+  if (!split?.body.trim()) return null;
 
   const preamble = trimmed.slice(0, subjectLineStart).trim();
-  return { preamble, subject, body, postamble: "" };
+  const postamble = stripChatSourcesFooter(split.tail);
+  return { preamble, subject, body: split.body, postamble };
 }
 
 export function rebuildEmailDraftContent(parsed: ParsedEmailDraft): string {

@@ -84,6 +84,21 @@ test("toAnthropicTools marks only the last tool when cache_tools is true", () =>
   assert.deepEqual(tools![1].cache_control, { type: "ephemeral" });
 });
 
+test("toAnthropicMessages appends user turn when conversation ends with assistant", () => {
+  withPromptCacheEnabled(false, () => {
+    const { messages } = toAnthropicMessages(
+      [
+        { role: "user", content: "Draft email" },
+        { role: "assistant", content: "Here is a draft..." },
+        { role: "system", content: "Required: call updateTargetListOutreach" },
+      ],
+      false
+    );
+    assert.equal(messages[messages.length - 1]?.role, "user");
+    assert.match(String(messages[messages.length - 1]?.content ?? ""), /Continue with the required next step/);
+  });
+});
+
 test("buildRequestParams uses plain system string when caching disabled", () => {
   withPromptCacheEnabled(false, () => {
     const params = buildRequestParams({

@@ -7,7 +7,12 @@ import {
   interestPickerAllowed,
   resolveFlowMode,
 } from "@/lib/ai/flow-mode";
-import { getFlowIntentRoutingAddon, getMissingRequiredTools } from "@/lib/ai/flow-guards";
+import {
+  assistantClaimsTargetListSave,
+  assistantHasPresentableOutreachDraft,
+  getFlowIntentRoutingAddon,
+  getMissingRequiredTools,
+} from "@/lib/ai/flow-guards";
 import { buildSystemPrompt, filterToolDefinitions } from "@/lib/ai/prompts";
 
 test.beforeEach(() => {
@@ -34,14 +39,14 @@ test("resolveFlowMode auto with no messages resolves to default", () => {
   );
 });
 
-test("resolveFlowMode defaults target_list + athlete to outbound", () => {
+test("resolveFlowMode defaults target_list + athlete to default (intent-based)", () => {
   assert.equal(
     resolveFlowMode({
       uiContext: "target_list",
       athleteId: "athlete-uuid",
       messages: [],
     }),
-    "outbound"
+    "default"
   );
 });
 
@@ -124,9 +129,110 @@ test("buildSystemPrompt default uses minimal guardrails module", () => {
   assert.doesNotMatch(prompt, /ACTIVE MODE: EMAIL/);
 });
 
+test("getMissingRequiredTools skips prospect tools when targetListSaveIntent is active", () => {
+  const missing = getMissingRequiredTools("company_targets", new Set(), {
+    flowMode: "outbound",
+    targetListSaveIntent: true,
+  });
+  assert.deepEqual(missing, []);
+});
+
 test("getMissingRequiredTools outbound requires prospect tools", () => {
   const missing = getMissingRequiredTools("company_targets", new Set(), { flowMode: "outbound" });
   assert.deepEqual(missing, ["getSponsorshipTargets", "generateAthleteProspectList"]);
+});
+
+test("getMissingRequiredTools target list without explicit prospect skips prospect tools", () => {
+  const missing = getMissingRequiredTools(
+    "company_targets",
+    new Set(["getSponsorshipTargets"]),
+    {
+      flowMode: "default",
+      targetListContext: true,
+      explicitProspectIntent: false,
+    }
+  );
+  assert.deepEqual(missing, []);
+});
+
+test("getMissingRequiredTools target list with explicit prospect still requires prospect list", () => {
+  const missing = getMissingRequiredTools("company_targets", new Set(), {
+    flowMode: "default",
+    targetListContext: true,
+    explicitProspectIntent: true,
+  });
+  assert.deepEqual(missing, ["getSponsorshipTargets", "generateAthleteProspectList"]);
+});
+
+test("filterToolDefinitions blocks generateAthleteProspectList via blockedExtra", () => {
+  const tools = [
+    { function: { name: "composePitchEmail" } },
+    { function: { name: "generateAthleteProspectList" } },
+    { function: { name: "getSponsorshipTargets" } },
+  ];
+  const filtered = filterToolDefinitions(
+    tools,
+    "default",
+    new Set(["generateAthleteProspectList"])
+  );
+  assert.equal(filtered.length, 2);
+  assert.ok(!filtered.some((t) => t.function?.name === "generateAthleteProspectList"));
+});
+
+test("assistantHasPresentableOutreachDraft accepts standard email draft", () => {
+  const draft = `Subject: Hunter x Brand
+
+Hi there,
+
+Hope you are well.
+
+Looking forward to hearing from you,`;
+  assert.equal(assistantHasPresentableOutreachDraft(draft), true);
+});
+
+test("assistantHasPresentableOutreachDraft accepts outreach without Subject line", () => {
+  const draft = `Hope you're well — nice to meet you!
+
+I'm reaching out on behalf of Hunter Lawrence.
+
+Looking forward to hearing from you,`;
+  assert.equal(assistantHasPresentableOutreachDraft(draft), true);
+});
+
+test("assistantClaimsTargetListSave ignores permission asks", () => {
+  assert.equal(
+    assistantClaimsTargetListSave("Shall I save this to the target list now?"),
+    false
+  );
+});
+
+test("assistantClaimsTargetListSave detects false save claims", () => {
+  assert.equal(
+    assistantClaimsTargetListSave("Saved the outreach email to Hunter's target list."),
+    true
+  );
+  assert.equal(
+    assistantClaimsTargetListSave("✅ Saved! The email has been updated on Hunter's Target List."),
+    true
+  );
+});
+
+test("getMissingRequiredTools target list skips pipeline when draft already shown", () => {
+  const draft = `Subject: Test
+
+Hi,
+
+Hope you are well.
+
+Looking forward to hearing from you,`;
+  const missing = getMissingRequiredTools("email_single_athlete", new Set(), {
+    flowMode: "default",
+    targetListContext: true,
+    explicitProspectIntent: false,
+    lastAssistantContent: draft,
+    selectedInterestsCount: 0,
+  });
+  assert.deepEqual(missing, []);
 });
 
 test("getMissingRequiredTools inbound requires interest catalog first", () => {
