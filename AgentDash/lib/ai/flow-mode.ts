@@ -30,6 +30,7 @@ export type FlowModeResolutionInput = {
 export type ClassifyFlowIntentOptions = {
   pipelineDrafting?: boolean;
   athleteId?: string | null;
+  targetListContext?: boolean;
 };
 
 const FLOW_MODE_VALUES: FlowMode[] = ["outbound", "inbound", "email", "auto"];
