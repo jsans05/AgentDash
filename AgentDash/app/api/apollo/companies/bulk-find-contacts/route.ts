@@ -37,6 +37,7 @@ export async function POST(req: Request) {
     created?: number;
     updated?: number;
     contacts?: unknown[];
+    hq_phone?: string | null;
     error?: string;
   }> = [];
 

@@ -1,6 +1,6 @@
 import { requireRole } from "@/lib/auth";
 import { enforceContentLengthLimit, enforceFileSizeLimit, MAX_API_PAYLOAD_BYTES } from "@/lib/api/request-limits";
-import { createServerClient } from "@/lib/supabase/server";
+import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
 import Papa from "papaparse";
 import readXlsxFile, { readSheet } from "read-excel-file/node";
@@ -20,6 +20,8 @@ import {
   type SheetImportSummary,
 } from "@/lib/import/social-audience";
 import { processTalentInfoRows } from "@/lib/import/talent-info";
+import { AgentDirectoryCache } from "@/lib/import/agent-directory-cache";
+import { AthleteRosterCache } from "@/lib/import/athlete-roster-cache";
 
 function rowsToObjects(rows: unknown[][]): Record<string, unknown>[] {
   if (rows.length === 0) return [];
@@ -739,11 +741,15 @@ export async function POST(req: Request) {
       const sourceFileName = file.name || null;
 
       if (talentInfoSheetName) {
+        const supabaseBulk = await createServiceRoleClient();
+        const roster = await AthleteRosterCache.load(supabaseBulk);
+        const agents = await AgentDirectoryCache.load(supabaseBulk);
         await processTalentInfoRows(
-          supabase,
+          supabaseBulk,
+          roster,
+          agents,
           talentRowsRaw,
           talentRowIndexForObject,
-          resolveAgentValue,
           talentSummary,
           failures
         );

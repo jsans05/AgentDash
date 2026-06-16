@@ -114,10 +114,18 @@ export async function discoverAthleteProspects(
   const restrictedTaxonomyIds = new Set(
     (exclusivitiesRaw || []).map((e: { taxonomy_id: string }) => e.taxonomy_id)
   );
+  const taxonomyCategory = (
+    rel: { category?: string } | { category?: string }[] | null | undefined
+  ): string | undefined => {
+    if (!rel) return undefined;
+    if (Array.isArray(rel)) return rel[0]?.category;
+    return rel.category;
+  };
+
   let existingCategories = [
     ...new Set(
       (exclusivitiesRaw || [])
-        .map((e: { sponsorship_taxonomies?: { category?: string } | null }) => e.sponsorship_taxonomies?.category)
+        .map((e) => taxonomyCategory(e.sponsorship_taxonomies))
         .filter(Boolean)
     ),
   ] as string[];
@@ -128,7 +136,10 @@ export async function discoverAthleteProspects(
     .eq("athlete_id", athleteId);
   for (const row of coveredRaw || []) {
     restrictedTaxonomyIds.add((row as { taxonomy_id: string }).taxonomy_id);
-    const cat = (row as { sponsorship_taxonomies?: { category?: string } }).sponsorship_taxonomies?.category;
+    const cat = taxonomyCategory(
+      (row as { sponsorship_taxonomies?: { category?: string } | { category?: string }[] | null })
+        .sponsorship_taxonomies
+    );
     if (cat) existingCategories.push(cat);
   }
   existingCategories = [...new Set(existingCategories)];

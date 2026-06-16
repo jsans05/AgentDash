@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import Link from "next/link";
 import { ChevronLeft, Maximize2, Minimize2 } from "lucide-react";
-import type { ApolloRevealStatus } from "@/components/crm/ApolloContactActions";
 import { ContactEmailCell } from "@/components/crm/ContactEmailCell";
 import { ContactPhoneCell } from "@/components/crm/ContactPhoneCell";
 import { ApolloFindContactsInline } from "@/components/crm/ApolloFindContactsInline";
@@ -58,41 +57,12 @@ import {
 } from "@/lib/ai/partnership-research";
 import { sleepMs } from "@/lib/ai/gemini-call";
 import { safeHttpUrl } from "@/lib/security/url";
-import { sortTargetListRows } from "@/lib/crm/athlete-target-list";
+import {
+  sortTargetListRows,
+  type TargetListContact,
+  type TargetListRow,
+} from "@/lib/crm/athlete-target-list";
 import { upsertContactOutreachDraft } from "@/lib/crm/target-list-outreach";
-
-type Contact = {
-  contact_id: string;
-  first_name: string;
-  last_name: string;
-  role: string | null;
-  email: string | null;
-  phone: string | null;
-  notes: string | null;
-  linkedin_url: string | null;
-  apollo_person_id: string | null;
-  apollo_reveal_status: ApolloRevealStatus;
-  apollo_phone_reveal_status: "pending" | "revealed" | null;
-  outreach_email_subject: string | null;
-  outreach_email: string | null;
-  email_drafts?: unknown;
-};
-
-type TargetListRow = {
-  pipeline_id: string;
-  company_id: string;
-  company_name: string;
-  category: string | null;
-  match_score: number | null;
-  website: string | null;
-  hq_phone: string | null;
-  company_description: string | null;
-  past_partnerships: string | null;
-  personal_notes: string | null;
-  outreach_email_subject: string | null;
-  outreach_email: string | null;
-  contacts: Contact[];
-};
 
 const UNCATEGORIZED_LABEL = "Uncategorized";
 
@@ -635,7 +605,7 @@ export function AthleteTargetList({
         : next;
     });
   }
-  function patchContactLocal(rowIndex: number, contactIndex: number, patch: Partial<Contact>) {
+  function patchContactLocal(rowIndex: number, contactIndex: number, patch: Partial<TargetListContact>) {
     setRows((prev) => {
       if (!prev) return prev;
       const next = prev.slice();

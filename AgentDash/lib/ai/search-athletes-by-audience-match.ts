@@ -133,7 +133,7 @@ async function searchGroupedBySport(
   if (athletesInSportsList.length === 0) return { sports: [] };
 
   const athletesInSportsIds = athletesInSportsList.map((a: { athlete_id: string }) => a.athlete_id);
-  const athleteById = new Map(athletesInSportsList.map((a: { athlete_id: string }) => [a.athlete_id, a]));
+  const athleteById = new Map(athletesInSportsList.map((a) => [a.athlete_id, a]));
 
   const { data: audienceRows } = await supabase
     .from("athlete_audience_data")
@@ -175,7 +175,9 @@ async function searchGroupedBySport(
     .from("athlete_social_data")
     .select("athlete_id, total_followers, ig_followers, tt_followers, fb_followers, x_followers")
     .in("athlete_id", scoredAthleteIds);
-  const socialById = new Map((socialRows ?? []).map((s: { athlete_id: string }) => [String(s.athlete_id), s]));
+  const socialById = new Map(
+    (socialRows ?? []).map((s) => [String(s.athlete_id), s])
+  );
 
   const sportGroupMap = new Map<string, AthleteScore[]>();
   for (const [athlete_id, score] of scoreMap.entries()) {
@@ -256,7 +258,9 @@ async function searchFlat(
     .from("athlete_social_data")
     .select("athlete_id, total_followers, ig_followers, tt_followers, fb_followers, x_followers")
     .in("athlete_id", candidateIds);
-  const socialById = new Map((socialRows ?? []).map((s: { athlete_id: string }) => [String(s.athlete_id), s]));
+  const socialById = new Map(
+    (socialRows ?? []).map((s) => [String(s.athlete_id), s])
+  );
 
   if (minFollowers != null) {
     candidates = candidates.filter((a: { athlete_id: string }) => {
@@ -267,7 +271,7 @@ async function searchFlat(
   if (!candidates.length) return { athletes: [] };
 
   const filteredIds = candidates.map((a: { athlete_id: string }) => a.athlete_id);
-  const athleteById = new Map(candidates.map((a: { athlete_id: string }) => [a.athlete_id, a]));
+  const athleteById = new Map(candidates.map((a) => [a.athlete_id, a]));
 
   if (interestNames.length === 0 && expandedKeywords.length === 0) {
     const athletes = candidates
