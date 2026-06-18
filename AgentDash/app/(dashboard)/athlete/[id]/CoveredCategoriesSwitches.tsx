@@ -155,11 +155,30 @@ export function CoveredCategoriesSwitches({ athleteId, sport, canEdit }: Props) 
       });
     }
 
+    async function handleCoveredCategoriesRefresh(event: Event) {
+      const customEvent = event as CustomEvent<{ athleteId?: unknown }>;
+      if (customEvent.detail?.athleteId !== athleteId) return;
+
+      try {
+        const res = await fetch(`/api/athletes/${athleteId}/covered-categories`, {
+          credentials: "include",
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) return;
+        const ids = Array.isArray(data?.taxonomy_ids) ? data.taxonomy_ids : [];
+        setCoveredIds(new Set(ids));
+      } catch {
+        /* ignore */
+      }
+    }
+
     window.addEventListener("athlete-covered-categories:contract-selected", handleContractCategorySelected);
+    window.addEventListener("athlete-covered-categories:refresh", handleCoveredCategoriesRefresh);
     return () => {
       window.removeEventListener("athlete-covered-categories:contract-selected", handleContractCategorySelected);
+      window.removeEventListener("athlete-covered-categories:refresh", handleCoveredCategoriesRefresh);
     };
-  }, []);
+  }, [athleteId]);
 
   async function persistCoveredIds(next: Set<string>, prevIds: Set<string>) {
     setCoveredIds(next);

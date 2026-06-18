@@ -8,10 +8,12 @@ export function ArchiveContractButton({
   contractId,
   archived,
   label = false,
+  athleteId,
 }: {
   contractId: string;
   archived: boolean;
   label?: boolean;
+  athleteId?: string;
 }) {
   const [loading, setLoading] = useState(false);
   const router = useRouter();
@@ -26,7 +28,16 @@ export function ArchiveContractButton({
         body: JSON.stringify({ archived: !archived }),
         credentials: "include",
       });
-      if (res.ok) router.refresh();
+      if (res.ok) {
+        if (athleteId && typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("athlete-covered-categories:refresh", {
+              detail: { athleteId },
+            })
+          );
+        }
+        router.refresh();
+      }
     } finally {
       setLoading(false);
     }

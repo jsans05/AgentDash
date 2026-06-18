@@ -1,6 +1,7 @@
 import { createServerClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
 import { internalErrorResponse, logServerError } from "@/lib/api-errors";
+import { ensureAthleteAccess } from "@/lib/features/contracts/service";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -29,17 +30,10 @@ export async function POST(
   const { accolade } = parsedBody.data;
   const { id: athleteId } = await params;
 
-  // Check access
-  const { data: athlete } = await supabase
-    .from("athletes")
-    .select("current_agent_id")
-    .eq("athlete_id", athleteId)
-    .single();
-
-  if (!athlete) return NextResponse.json({ error: "Not found" }, { status: 404 });
-
-  const canEdit = profile.role === "admin" || (profile.role === "agent" && athlete.current_agent_id === profile.user_id);
-  if (!canEdit) return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+  const access = await ensureAthleteAccess(supabase, profile, athleteId);
+  if (!access.ok) {
+    return NextResponse.json({ error: access.error }, { status: access.status });
+  }
 
   const { data: current } = await supabase
     .from("athletes")
@@ -74,16 +68,10 @@ export async function DELETE(
   const { index } = parsedBody.data;
   const { id: athleteId } = await params;
 
-  const { data: athlete } = await supabase
-    .from("athletes")
-    .select("current_agent_id")
-    .eq("athlete_id", athleteId)
-    .single();
-
-  if (!athlete) return NextResponse.json({ error: "Not found" }, { status: 404 });
-
-  const canEdit = profile.role === "admin" || (profile.role === "agent" && athlete.current_agent_id === profile.user_id);
-  if (!canEdit) return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+  const access = await ensureAthleteAccess(supabase, profile, athleteId);
+  if (!access.ok) {
+    return NextResponse.json({ error: access.error }, { status: access.status });
+  }
 
   const { data: current } = await supabase
     .from("athletes")
@@ -91,7 +79,7 @@ export async function DELETE(
     .eq("athlete_id", athleteId)
     .single();
 
-  const updated = (current?.accolades || []).filter((_: any, i: number) => i !== index);
+  const updated = (current?.accolades || []).filter((_: unknown, i: number) => i !== index);
 
   const { error } = await supabase
     .from("athletes")

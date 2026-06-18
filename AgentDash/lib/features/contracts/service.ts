@@ -102,3 +102,67 @@ export async function markAthleteCategoriesCovered(
 
   if (error) throw new Error(error.message);
 }
+
+export async function syncCoveredCategoriesOnArchiveChange(
+  supabase: SupabaseClientLike,
+  athleteId: string,
+  contractId: string,
+  archived: boolean
+): Promise<void> {
+  const { data: exclusivities, error: exclError } = await supabase
+    .from("contract_exclusivities")
+    .select("taxonomy_id")
+    .eq("contract_id", contractId);
+
+  if (exclError) throw new Error(exclError.message);
+
+  const taxonomyIds = (exclusivities ?? [])
+    .map((row: { taxonomy_id: string }) => row.taxonomy_id)
+    .filter(Boolean);
+
+  if (taxonomyIds.length === 0) return;
+
+  if (!archived) {
+    await markAthleteCategoriesCovered(supabase, athleteId, taxonomyIds);
+    return;
+  }
+
+  const { data: otherContracts, error: contractsError } = await supabase
+    .from("contracts")
+    .select("contract_id")
+    .eq("athlete_id", athleteId)
+    .eq("archived", false)
+    .neq("contract_id", contractId);
+
+  if (contractsError) throw new Error(contractsError.message);
+
+  const otherContractIds = (otherContracts ?? []).map(
+    (row: { contract_id: string }) => row.contract_id
+  );
+
+  let stillClaimed = new Set<string>();
+  if (otherContractIds.length > 0) {
+    const { data: otherExclusivities, error: otherExclError } = await supabase
+      .from("contract_exclusivities")
+      .select("taxonomy_id")
+      .in("contract_id", otherContractIds)
+      .in("taxonomy_id", taxonomyIds);
+
+    if (otherExclError) throw new Error(otherExclError.message);
+
+    stillClaimed = new Set(
+      (otherExclusivities ?? []).map((row: { taxonomy_id: string }) => row.taxonomy_id)
+    );
+  }
+
+  const toRemove = taxonomyIds.filter((id) => !stillClaimed.has(id));
+  if (toRemove.length === 0) return;
+
+  const { error: deleteError } = await supabase
+    .from("athlete_covered_categories")
+    .delete()
+    .eq("athlete_id", athleteId)
+    .in("taxonomy_id", toRemove);
+
+  if (deleteError) throw new Error(deleteError.message);
+}

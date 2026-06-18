@@ -2,6 +2,11 @@
 
 import { useState, useEffect, useRef } from "react";
 import { X } from "lucide-react";
+import {
+  buildTaxonomyTree,
+  collectLeafIds,
+  type TaxonomyTreeNode,
+} from "@/lib/taxonomy-tree";
 
 type TaxonomyNode = {
   id: string;
@@ -9,6 +14,7 @@ type TaxonomyNode = {
   tier: string;
   category: string;
   sort_order: number;
+  parent_id?: string | null;
   is_group?: boolean;
 };
 
@@ -35,6 +41,12 @@ type CategoryOption = {
   searchText: string;
 };
 
+type SelectedChip = {
+  key: string;
+  label: string;
+  taxonomyIds: string[];
+};
+
 const EYEWEAR_CATEGORY_LABEL = "Eyewear";
 const EYEWEAR_KEYWORDS = ["eyewear", "eye wear", "goggle", "goggles", "sunglass", "sunglasses", "glasses"];
 
@@ -45,6 +57,90 @@ function normalizeCategory(s: string) {
 function isEyewearCategory(category: string) {
   const normalized = normalizeCategory(category);
   return EYEWEAR_KEYWORDS.some((keyword) => normalized.includes(keyword));
+}
+
+function collectGroupOptions(nodes: TaxonomyTreeNode[], valueSet: Set<string>): CategoryOption[] {
+  const options: CategoryOption[] = [];
+
+  function walk(treeNodes: TaxonomyTreeNode[]) {
+    for (const node of treeNodes) {
+      if (node.isGroup) {
+        const leafIds = collectLeafIds(node);
+        if (leafIds.length > 0 && !leafIds.every((id) => valueSet.has(id))) {
+          options.push({
+            key: `group:${node.id}`,
+            label: node.category,
+            tier: node.tier,
+            sort_order: node.sort_order,
+            taxonomyIds: leafIds,
+            searchText: node.category,
+          });
+        }
+        walk(node.children);
+      }
+    }
+  }
+
+  walk(nodes);
+  return options;
+}
+
+function buildSelectedChips(
+  value: string[],
+  availableTaxonomy: TaxonomyNode[],
+  eyewearIds: string[]
+): SelectedChip[] {
+  const valueSet = new Set(value);
+  const consumed = new Set<string>();
+  const chips: SelectedChip[] = [];
+
+  const eyewearSelected = eyewearIds.length > 0 && eyewearIds.every((id) => valueSet.has(id));
+  if (eyewearSelected) {
+    chips.push({
+      key: "__eyewear__",
+      label: EYEWEAR_CATEGORY_LABEL,
+      taxonomyIds: eyewearIds,
+    });
+    eyewearIds.forEach((id) => consumed.add(id));
+  }
+
+  const nonEyewearTaxonomy = availableTaxonomy.filter(
+    (node) => !isEyewearCategory(node.category) || node.is_group
+  );
+  const trees = [
+    ...buildTaxonomyTree(nonEyewearTaxonomy, "ENDEMIC"),
+    ...buildTaxonomyTree(nonEyewearTaxonomy, "NON_ENDEMIC"),
+  ];
+
+  function addGroupChips(treeNodes: TaxonomyTreeNode[]) {
+    for (const node of treeNodes) {
+      if (!node.isGroup) continue;
+      const leafIds = collectLeafIds(node);
+      if (leafIds.length > 0 && leafIds.every((id) => valueSet.has(id))) {
+        chips.push({
+          key: `group:${node.id}`,
+          label: node.category,
+          taxonomyIds: leafIds,
+        });
+        leafIds.forEach((id) => consumed.add(id));
+      }
+      addGroupChips(node.children);
+    }
+  }
+
+  addGroupChips(trees);
+
+  for (const id of value) {
+    if (consumed.has(id)) continue;
+    const node = availableTaxonomy.find((t) => t.id === id);
+    chips.push({
+      key: id,
+      label: node?.category ?? "—",
+      taxonomyIds: [id],
+    });
+  }
+
+  return chips;
 }
 
 export function ContractCategoriesEditor({
@@ -62,7 +158,6 @@ export function ContractCategoriesEditor({
   const categoryPickerRef = useRef<HTMLDivElement>(null);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
 
-  // Load taxonomy nodes for the athlete's sport
   useEffect(() => {
     if (!athleteSport?.trim()) {
       setAvailableTaxonomy([]);
@@ -82,7 +177,6 @@ export function ContractCategoriesEditor({
       .finally(() => setLoading(false));
   }, [athleteSport]);
 
-  // For existing contract: load exclusivities (categories) and sync to parent
   useEffect(() => {
     if (!contractId || !athleteSport) {
       setInitialLoadDone(true);
@@ -97,7 +191,6 @@ export function ContractCategoriesEditor({
         if (ids.length > 0) {
           onChange(ids);
         } else if (initialCategoryNames.length > 0 && availableTaxonomy.length > 0) {
-          // Legacy: contract has category name(s) but no exclusivities; resolve to taxonomy IDs
           const resolved = initialCategoryNames
             .map((name) => {
               const norm = normalizeCategory(name);
@@ -113,7 +206,6 @@ export function ContractCategoriesEditor({
       .finally(() => setLoading(false));
   }, [contractId, athleteSport]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // When taxonomy loads and we have legacy initialCategoryNames but no value yet, resolve
   useEffect(() => {
     if (!initialLoadDone || value.length > 0 || initialCategoryNames.length === 0 || availableTaxonomy.length === 0) return;
     const resolved = initialCategoryNames
@@ -166,7 +258,12 @@ export function ContractCategoriesEditor({
     }
   }, [eyewearIds.join(","), eyewearSelected, valueSet, value, onChange]);
 
-  const availableToAdd = availableTaxonomy.filter((t) => !valueSet.has(t.id));
+  const nonEyewearTaxonomy = availableTaxonomy.filter(
+    (node) => !isEyewearCategory(node.category) || node.is_group
+  );
+  const endemicTree = buildTaxonomyTree(nonEyewearTaxonomy, "ENDEMIC");
+  const nonEndemicTree = buildTaxonomyTree(nonEyewearTaxonomy, "NON_ENDEMIC");
+
   const options: CategoryOption[] = [];
   const hasEyewearAvailable = !eyewearSelected && eyewearNodes.length > 0;
 
@@ -183,9 +280,13 @@ export function ContractCategoriesEditor({
     });
   }
 
-  for (const node of availableToAdd) {
+  options.push(...collectGroupOptions(endemicTree, valueSet));
+  options.push(...collectGroupOptions(nonEndemicTree, valueSet));
+
+  for (const node of availableTaxonomy) {
     if (node.is_group) continue;
     if (isEyewearCategory(node.category)) continue;
+    if (valueSet.has(node.id)) continue;
     options.push({
       key: node.id,
       label: node.category,
@@ -203,23 +304,8 @@ export function ContractCategoriesEditor({
   const firstFilteredId =
     endemicFiltered[0]?.key ?? nonEndemicFiltered[0]?.key ?? null;
 
-  const selectedNodes: { key: string; label: string; taxonomyIds: string[] }[] = [];
-  if (eyewearSelected && eyewearIds.length > 0) {
-    selectedNodes.push({
-      key: "__eyewear__",
-      label: EYEWEAR_CATEGORY_LABEL,
-      taxonomyIds: eyewearIds,
-    });
-  }
-  for (const id of value) {
-    if (eyewearIds.includes(id)) continue;
-    const node = availableTaxonomy.find((t) => t.id === id);
-    selectedNodes.push({
-      key: id,
-      label: node?.category ?? "—",
-      taxonomyIds: [id],
-    });
-  }
+  const selectedNodes = buildSelectedChips(value, availableTaxonomy, eyewearIds);
+  const hasAddableOptions = options.length > 0;
 
   return (
     <div className="space-y-2">
@@ -255,7 +341,7 @@ export function ContractCategoriesEditor({
         </div>
       )}
 
-      {availableToAdd.length > 0 && (
+      {hasAddableOptions && (
         <div ref={categoryPickerRef} className="relative">
           <input
             type="text"
@@ -340,7 +426,7 @@ export function ContractCategoriesEditor({
         </div>
       )}
 
-      {availableToAdd.length === 0 && athleteSport && value.length > 0 && (
+      {!hasAddableOptions && athleteSport && value.length > 0 && (
         <p className="text-xs text-[#9E978B]">All categories for this sport are selected.</p>
       )}
 

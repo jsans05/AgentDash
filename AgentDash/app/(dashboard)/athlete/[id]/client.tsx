@@ -161,10 +161,13 @@ export function AthleteProfileClient({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ accolade: newAccolade.trim() }),
     });
+    const data = await res.json().catch(() => ({}));
     if (res.ok) {
       setAccolades([...accolades, newAccolade.trim()]);
       setNewAccolade("");
       router.refresh();
+    } else {
+      alert(data.error || "Failed to add accolade");
     }
   }
 
@@ -175,9 +178,12 @@ export function AthleteProfileClient({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ index }),
     });
+    const data = await res.json().catch(() => ({}));
     if (res.ok) {
       setAccolades(accolades.filter((_, i) => i !== index));
       router.refresh();
+    } else {
+      alert(data.error || "Failed to remove accolade");
     }
   }
 
@@ -414,6 +420,7 @@ export function AthleteProfileClient({
                           <ArchiveContractButton
                             contractId={contract.contract_id}
                             archived={contract.archived === true}
+                            athleteId={athleteId}
                             label
                           />
                           {canEdit && (

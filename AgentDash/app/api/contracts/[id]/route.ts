@@ -5,6 +5,7 @@ import {
   getContractCategoryDisplay,
   markAthleteCategoriesCovered,
   resolveOrCreateCompanyId,
+  syncCoveredCategoriesOnArchiveChange,
 } from "@/lib/features/contracts/service";
 import { NextResponse } from "next/server";
 
@@ -116,6 +117,21 @@ export async function PATCH(
         );
       }
       return NextResponse.json({ error: updateError.message }, { status: 500 });
+    }
+  }
+
+  if (body.archived !== undefined) {
+    try {
+      await syncCoveredCategoriesOnArchiveChange(
+        supabase,
+        athleteId,
+        contractId,
+        Boolean(body.archived)
+      );
+    } catch (e: unknown) {
+      const message =
+        e instanceof Error ? e.message : "Failed to update athlete prospecting categories";
+      return NextResponse.json({ error: message }, { status: 500 });
     }
   }
 
