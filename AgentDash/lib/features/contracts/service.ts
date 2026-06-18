@@ -116,9 +116,9 @@ export async function syncCoveredCategoriesOnArchiveChange(
 
   if (exclError) throw new Error(exclError.message);
 
-  const taxonomyIds = (exclusivities ?? [])
+  const taxonomyIds: string[] = (exclusivities ?? [])
     .map((row: { taxonomy_id: string }) => row.taxonomy_id)
-    .filter(Boolean);
+    .filter((id: string) => id.length > 0);
 
   if (taxonomyIds.length === 0) return;
 
