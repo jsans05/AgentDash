@@ -19,9 +19,10 @@ export async function upsertApolloPendingContacts(
     userId: string;
     companyId: string;
     people: ApolloSearchPerson[];
+    consultingProfileId?: string | null;
   }
 ): Promise<{ created: number; updated: number; contacts: SyncedApolloContact[] }> {
-  const { userId, companyId, people } = params;
+  const { userId, companyId, people, consultingProfileId } = params;
   let created = 0;
   let updated = 0;
   const contacts: SyncedApolloContact[] = [];
@@ -37,13 +38,20 @@ export async function upsertApolloPendingContacts(
     apollo_reveal_status: string | null;
   };
 
-  const { data: existingRows } = await supabaseAdmin
+  let existingQuery = supabaseAdmin
     .from("crm_contacts")
     .select(
       "contact_id, first_name, last_name, role, email, linkedin_url, apollo_person_id, apollo_reveal_status"
     )
-    .eq("company_id", companyId)
-    .eq("created_by_user_id", userId);
+    .eq("company_id", companyId);
+
+  if (consultingProfileId) {
+    existingQuery = existingQuery.eq("consulting_profile_id", consultingProfileId);
+  } else {
+    existingQuery = existingQuery.eq("created_by_user_id", userId);
+  }
+
+  const { data: existingRows } = await existingQuery;
 
   const byApolloId = new Map<string, ExistingRow>();
   const byName = new Map<string, ExistingRow>();
@@ -63,6 +71,7 @@ export async function upsertApolloPendingContacts(
     const payload = {
       company_id: companyId,
       created_by_user_id: userId,
+      consulting_profile_id: consultingProfileId ?? null,
       first_name: person.first_name,
       last_name,
       role: person.title || null,

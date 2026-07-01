@@ -9,7 +9,7 @@ import { ChatPanel, type ChatFlowMode, type ChatProject, type ChatUiContext, typ
 import { parseFlowMode } from "@/lib/ai/flow-mode";
 
 function parseUiContext(raw: string | null): ChatUiContext | undefined {
-  if (raw === "target_list" || raw === "crm_pipeline" || raw === "global") return raw;
+  if (raw === "target_list" || raw === "consulting_target_list" || raw === "crm_pipeline" || raw === "global") return raw;
   return undefined;
 }
 

@@ -4,7 +4,13 @@ export async function logApolloUsage(
   supabaseAdmin: SupabaseClient,
   entry: {
     user_id: string;
-    endpoint: "api_search" | "people/match" | "mixed_companies/search" | "organizations/enrich";
+    endpoint:
+      | "api_search"
+      | "people/match"
+      | "mixed_companies/search"
+      | "organizations/enrich"
+      | "organizations/{id}"
+      | "news_articles/search";
     company_id?: string | null;
     apollo_person_id?: string | null;
   }

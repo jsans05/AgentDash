@@ -13,6 +13,7 @@ export async function findContactsForCompany(
     companyId: string;
     overrides?: ApolloPeopleSearchOverrides;
     searchMode?: ApolloContactSearchMode;
+    consultingProfileId?: string | null;
   }
 ) {
   if (!isApolloEnabled()) {
@@ -34,18 +35,26 @@ export async function findContactsForCompany(
     userId: params.userId,
     companyId: params.companyId,
     people,
+    consultingProfileId: params.consultingProfileId,
   });
 
-  const { data: allContacts, error: listErr } = await supabaseAdmin
+  let contactsQuery = supabaseAdmin
     .from("crm_contacts")
     .select(
       "contact_id, first_name, last_name, role, email, phone, notes, linkedin_url, apollo_person_id, apollo_reveal_status, apollo_phone_reveal_status"
     )
     .eq("company_id", params.companyId)
-    .eq("created_by_user_id", params.userId)
     .eq("archived", false)
     .order("last_name", { ascending: true })
     .order("first_name", { ascending: true });
+
+  if (params.consultingProfileId) {
+    contactsQuery = contactsQuery.eq("consulting_profile_id", params.consultingProfileId);
+  } else {
+    contactsQuery = contactsQuery.eq("created_by_user_id", params.userId);
+  }
+
+  const { data: allContacts, error: listErr } = await contactsQuery;
 
   if (listErr) throw new Error(listErr.message);
 

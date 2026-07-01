@@ -464,26 +464,6 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
     setBulkMoving(true);
     setCards((c) => c.map((x) => (idSet.has(x.id) ? { ...x, pipeline_stage: "outreach" } : x)));
     try {
-      // #region agent log
-      fetch("http://127.0.0.1:7310/ingest/3db61d27-132c-4ea5-8254-c4515c90a750", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a18aef" },
-        body: JSON.stringify({
-          sessionId: "a18aef",
-          runId: "post-fix",
-          hypothesisId: "P1-A",
-          location: "CrmPipelineKanban.tsx:confirmOutreachMove",
-          message: "outreach move without auto mark sent",
-          data: {
-            cardIds: toMove.map((c) => c.id),
-            unsentDraftCounts: toMove.map((c) =>
-              (c.draft_messages ?? []).filter((d) => !d.sent_at).length
-            ),
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       const results = await Promise.allSettled(
         toMove.map((c) =>
           patchCard(c.id, {

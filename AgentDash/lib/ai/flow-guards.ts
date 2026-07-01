@@ -184,6 +184,33 @@ If a company is missing from the list, use **bulkImportCompaniesToCrmForAthlete*
 `.trim();
 }
 
+export function getConsultingTargetListSessionAddon(
+  consultingProfileId: string,
+  profileName?: string | null
+): string {
+  const id = String(consultingProfileId ?? "").trim();
+  if (!id) return "";
+  const nameLine = profileName?.trim()
+    ? `Consulting profile: ${profileName.trim()} (\`consulting_profile_id\`: ${id}).`
+    : `Consulting profile UUID (\`consulting_profile_id\`): ${id}.`;
+
+  return `
+
+━━━ CONSULTING TARGET LIST SESSION ━━━
+${nameLine}
+The user opened Mystery Machine from a **Consulting Target List** page (inline AI panel). Use consulting-specific tools only — not athlete target list tools.
+
+You MUST:
+1) Call **getConsultingTargetList** with \`consulting_profile_id: "${id}"\` when you need live list rows (entry_id = pipeline_id in responses).
+2) Bulk-add companies with **bulkImportCompaniesToConsultingTargetList** (same companies[] shape as athlete bulk import, without outreach fields).
+3) Fix categories with **updateConsultingTargetListCategories** (entry_id + industry_category).
+4) Find lookalikes with **apolloExpandSimilarForConsulting** (seed entry_ids or seed company_ids).
+
+Do **not** use getAthleteTargetList, bulkImportCompaniesToCrmForAthlete, updateTargetListOutreach, or generateAthleteProspectList unless the user explicitly switches to an athlete list.
+If SESSION CONTEXT lists selected entry_id values or a focused row, prefer those when the user says "this company" or "selected companies".
+`.trim();
+}
+
 export function getTargetListOutreachPushAddon(): string {
   return `
 

@@ -1,6 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { readMatchScoreForAthlete } from "@/lib/crm/potential-athletes";
 import { pickContactOutreachDraft } from "@/lib/crm/target-list-outreach";
+import type { CompanyAgencyActivity } from "@/lib/crm/company-agency-activity";
+import {
+  COMPANY_FIRMOGRAPHICS_DB_COLUMNS,
+  mapCompanyFirmographics,
+  type CompanyFirmographics,
+} from "@/lib/crm/company-firmographics";
 
 export type TargetListContact = {
   contact_id: string;
@@ -34,7 +40,8 @@ export type TargetListRow = {
   outreach_email_subject: string | null;
   outreach_email: string | null;
   contacts: TargetListContact[];
-};
+  agency_activity?: CompanyAgencyActivity | null;
+} & CompanyFirmographics;
 
 function normalizeText(value: unknown): string {
   return String(value ?? "").trim().toLowerCase();
@@ -118,7 +125,7 @@ export async function fetchAthleteTargetListRows(
         outreach_email_subject,
         outreach_email,
         archived,
-        companies(name, website, hq_phone, product_category, notes)
+        companies(name, website, hq_phone, product_category, notes, ${COMPANY_FIRMOGRAPHICS_DB_COLUMNS})
       `
     )
     .eq("created_by_user_id", createdByUserId)
@@ -197,6 +204,7 @@ export async function fetchAthleteTargetListRows(
       outreach_email_subject: r.outreach_email_subject ?? null,
       outreach_email: r.outreach_email ?? null,
       contacts,
+      ...mapCompanyFirmographics(company as Record<string, unknown> | undefined),
     };
   });
 

@@ -173,26 +173,6 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     const normalizedStage = normalizePipelineStage(stage);
     updates.pipeline_stage = normalizedStage;
     updates.funnel_stage = pipelineStageToFunnel(normalizedStage);
-    // #region agent log
-    fetch("http://127.0.0.1:7310/ingest/3db61d27-132c-4ea5-8254-c4515c90a750", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a18aef" },
-      body: JSON.stringify({
-        sessionId: "a18aef",
-        runId: "post-fix",
-        hypothesisId: "P1-B",
-        location: "pipeline/[id]/route.ts:stage-sync",
-        message: "pipeline stage update with funnel sync",
-        data: {
-          cardId: id,
-          pipeline_stage: normalizedStage,
-          funnel_stage: updates.funnel_stage,
-          prior_funnel_stage: current.funnel_stage ?? null,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
   }
 
   if (

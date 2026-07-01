@@ -92,8 +92,98 @@ export function mapRawOrganization(raw: Record<string, unknown>): import("@/lib/
 }
 
 import { extractOrgPhone } from "@/lib/apollo/phone-utils";
+import type {
+  ApolloEnrichedOrganization,
+  ApolloFundingEvent,
+} from "@/lib/apollo/org-search-types";
 
-export function mapEnrichedOrganization(org: Record<string, unknown>): import("@/lib/apollo/org-search-types").ApolloEnrichedOrganization {
+function parseGrowthPercent(raw: unknown): number | null {
+  if (typeof raw === "number" && !Number.isNaN(raw)) return raw;
+  return null;
+}
+
+function mapFundingEvents(raw: unknown): ApolloFundingEvent[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item): ApolloFundingEvent | null => {
+      if (!item || typeof item !== "object") return null;
+      const row = item as Record<string, unknown>;
+      return {
+        date: row.date != null ? String(row.date) : undefined,
+        type: row.type != null ? String(row.type) : undefined,
+        amount: row.amount != null ? String(row.amount) : undefined,
+        investors: row.investors != null ? String(row.investors) : undefined,
+        currency: row.currency != null ? String(row.currency) : undefined,
+      };
+    })
+    .filter((e): e is ApolloFundingEvent => e != null);
+}
+
+function mapDepartmentalHeadCount(raw: unknown): Record<string, number> | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const out: Record<string, number> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === "number" && !Number.isNaN(value)) out[key] = value;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+export function emptyApolloEnrichedOrganization(
+  partial?: Partial<ApolloEnrichedOrganization>
+): ApolloEnrichedOrganization {
+  return {
+    apollo_organization_id: null,
+    name: null,
+    website: null,
+    industry: null,
+    description: null,
+    primary_domain: null,
+    hq_phone: null,
+    estimated_num_employees: null,
+    annual_revenue: null,
+    annual_revenue_printed: null,
+    total_funding: null,
+    total_funding_printed: null,
+    latest_funding_stage: null,
+    latest_funding_round_date: null,
+    funding_events: [],
+    headcount_six_month_growth: null,
+    headcount_twelve_month_growth: null,
+    headcount_twenty_four_month_growth: null,
+    departmental_head_count: null,
+    city: null,
+    state: null,
+    country: null,
+    keyword_tags: [],
+    ...partial,
+  };
+}
+
+export function mapHeadcountTrendsFromOrg(
+  org: Record<string, unknown>
+): Pick<
+  ApolloEnrichedOrganization,
+  | "headcount_six_month_growth"
+  | "headcount_twelve_month_growth"
+  | "headcount_twenty_four_month_growth"
+  | "departmental_head_count"
+  | "estimated_num_employees"
+> {
+  return {
+    headcount_six_month_growth: parseGrowthPercent(org.organization_headcount_six_month_growth),
+    headcount_twelve_month_growth: parseGrowthPercent(
+      org.organization_headcount_twelve_month_growth
+    ),
+    headcount_twenty_four_month_growth: parseGrowthPercent(
+      org.organization_headcount_twenty_four_month_growth
+    ),
+    departmental_head_count: mapDepartmentalHeadCount(org.departmental_head_count),
+    estimated_num_employees:
+      typeof org.estimated_num_employees === "number" ? org.estimated_num_employees : null,
+  };
+}
+
+export function mapEnrichedOrganization(org: Record<string, unknown>): ApolloEnrichedOrganization {
   const primary_domain =
     org.primary_domain != null ? String(org.primary_domain).replace(/^www\./i, "") : null;
   const tags: string[] = [];
@@ -127,9 +217,18 @@ export function mapEnrichedOrganization(org: Record<string, unknown>): import("@
           : null,
     primary_domain,
     hq_phone: extractOrgPhone(org),
-    estimated_num_employees:
-      typeof org.estimated_num_employees === "number" ? org.estimated_num_employees : null,
     annual_revenue: typeof org.annual_revenue === "number" ? org.annual_revenue : null,
+    annual_revenue_printed:
+      org.annual_revenue_printed != null ? String(org.annual_revenue_printed) : null,
+    total_funding: typeof org.total_funding === "number" ? org.total_funding : null,
+    total_funding_printed:
+      org.total_funding_printed != null ? String(org.total_funding_printed) : null,
+    latest_funding_stage:
+      org.latest_funding_stage != null ? String(org.latest_funding_stage) : null,
+    latest_funding_round_date:
+      org.latest_funding_round_date != null ? String(org.latest_funding_round_date) : null,
+    funding_events: mapFundingEvents(org.funding_events),
+    ...mapHeadcountTrendsFromOrg(org),
     city: org.city != null ? String(org.city) : null,
     state: org.state != null ? String(org.state) : null,
     country: org.country != null ? String(org.country) : null,

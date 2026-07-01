@@ -18,6 +18,13 @@ export const TARGET_LIST_MUTATING_TOOLS = new Set([
   "updateTargetListOutreach",
 ]);
 
+/** Tools that mutate consulting target-list data — refresh spreadsheet when these run. */
+export const CONSULTING_TARGET_LIST_MUTATING_TOOLS = new Set([
+  "bulkImportCompaniesToConsultingTargetList",
+  "updateConsultingTargetListCategories",
+  "apolloExpandSimilarForConsulting",
+]);
+
 export function clampTargetListPanelWidth(px: number): number {
   if (typeof window === "undefined") return px;
   const maxFromViewport = Math.floor(window.innerWidth * 0.95);

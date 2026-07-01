@@ -17,6 +17,10 @@ type ChatCompletionChunk = {
     cache_creation_input_tokens: number;
     cache_read_input_tokens: number;
   };
+  id?: string;
+  diagnostics?: {
+    cache_miss_reason: { type: string; cache_missed_input_tokens?: number } | null;
+  } | null;
 };
 
 export type StreamedAssistantMessage = {
@@ -44,6 +48,10 @@ export async function streamChatCompletionToMessage(
     cache_creation_input_tokens: number;
     cache_read_input_tokens: number;
   };
+  id?: string;
+  diagnostics?: {
+    cache_miss_reason: { type: string; cache_missed_input_tokens?: number } | null;
+  } | null;
 }> {
   const stream = await createStream();
   let content = "";
@@ -61,10 +69,23 @@ export async function streamChatCompletionToMessage(
         cache_read_input_tokens: number;
       }
     | undefined;
+  let id: string | undefined;
+  let diagnostics:
+    | {
+        cache_miss_reason: { type: string; cache_missed_input_tokens?: number } | null;
+      }
+    | null
+    | undefined;
 
   for await (const chunk of stream) {
     if (chunk.usage) {
       usage = chunk.usage;
+    }
+    if (chunk.id) {
+      id = chunk.id;
+    }
+    if ("diagnostics" in chunk) {
+      diagnostics = chunk.diagnostics;
     }
     const choice = chunk.choices[0];
     if (!choice) continue;
@@ -114,5 +135,7 @@ export async function streamChatCompletionToMessage(
     },
     finishReason,
     usage,
+    id,
+    diagnostics,
   };
 }

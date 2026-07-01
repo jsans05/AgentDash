@@ -12,8 +12,14 @@ supabase.env
 !.env.example
 !supabase.env.example
 
+# Next.js build output
+.next/
+out/
+
 # Python
 venv/
+.venv*/
+.venv-export/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -26,6 +32,9 @@ __pycache__/
 /#/
 Insights/supabasevenv/
 
+# Generated exports
+AgentDash/exports/
+
 # Browser/session data (may contain cookies, tokens)
 ContactScraping/zoominfo_session/
 
@@ -35,3 +44,4 @@ ContactScraping/zoominfo_session/
 # IDE
 .cursor/
 .vscode/
+.vercel

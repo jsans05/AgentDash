@@ -22,6 +22,12 @@ function mysteryMachineEmptyStateLines(uiContext?: ChatUiContext): string[] {
         "Draft or improve outreach for listed companies",
         "Use quick actions above to categorize or bulk-edit",
       ];
+    case "consulting_target_list":
+      return [
+        "Prospect companies for this consulting profile",
+        "Bulk-import from a spreadsheet or pasted list",
+        "Categorize uncategorized companies",
+      ];
     case "crm_pipeline":
       return [
         "Draft outreach for this pipeline company",
@@ -865,24 +871,6 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
         uiContext,
         routingFlowMode
       );
-        // #region agent log
-        fetch("http://127.0.0.1:7310/ingest/3db61d27-132c-4ea5-8254-c4515c90a750", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a18aef" },
-          body: JSON.stringify({
-            sessionId: "a18aef",
-            runId: "post-fix",
-            hypothesisId: "P2-A",
-            location: "ChatPanel.tsx:sendWithText",
-            message: "chat send routing options",
-            data: {
-              athleteId: routingOptions?.athleteId ?? null,
-              uiContext: routingOptions?.uiContext ?? null,
-            },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {});
-        // #endregion
         const result = await onSend(fullHistory, activeProject, activeConversationId, routingOptions);
         streamHandler.flushStream();
         applyAssistantResult(result, streamMsgId, streamHandler.getStreamStarted());

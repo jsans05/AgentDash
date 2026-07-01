@@ -74,10 +74,47 @@ export type CompanyContact = {
   created_at: string;
 };
 
+export type ConsultingProfile = {
+  id: string;
+  name: string;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ConsultingProfileMember = {
+  profile_id: string;
+  user_id: string;
+  role: "member" | "lead";
+  created_at: string;
+};
+
+export type ConsultingTargetListEntry = {
+  id: string;
+  consulting_profile_id: string;
+  company_id: string;
+  industry_category: string | null;
+  match_score: number | null;
+  company_description: string | null;
+  personal_notes: string | null;
+  added_by_user_id: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ConsultingProfileSeed = {
+  id: string;
+  profile_id: string;
+  company_id: string;
+  label: string | null;
+  created_at: string;
+};
+
 export type CrmContact = {
   contact_id: string;
   company_id: string;
   created_by_user_id: string;
+  consulting_profile_id: string | null;
 
   first_name: string;
   last_name: string;

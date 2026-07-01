@@ -1,3 +1,20 @@
+export type ApolloFundingEvent = {
+  date?: string;
+  type?: string;
+  amount?: string;
+  investors?: string;
+  currency?: string;
+};
+
+export type ApolloNewsArticle = {
+  id: string;
+  title: string;
+  url: string;
+  snippet: string | null;
+  published_at: string | null;
+  event_categories: string[];
+};
+
 export type ApolloOrganizationResult = {
   apollo_organization_id: string | null;
   name: string;
@@ -46,6 +63,16 @@ export type ApolloEnrichedOrganization = {
   hq_phone: string | null;
   estimated_num_employees: number | null;
   annual_revenue: number | null;
+  annual_revenue_printed: string | null;
+  total_funding: number | null;
+  total_funding_printed: string | null;
+  latest_funding_stage: string | null;
+  latest_funding_round_date: string | null;
+  funding_events: ApolloFundingEvent[];
+  headcount_six_month_growth: number | null;
+  headcount_twelve_month_growth: number | null;
+  headcount_twenty_four_month_growth: number | null;
+  departmental_head_count: Record<string, number> | null;
   city: string | null;
   state: string | null;
   country: string | null;

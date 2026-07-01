@@ -14,11 +14,15 @@ type ChatCompletionChunk = {
     finish_reason?: string | null;
   }>;
   usage?: ChatCompletionUsage;
+  id?: string;
+  diagnostics?: AnthropicCacheDiagnostics | null;
 };
 import {
+  ANTHROPIC_CACHE_DIAGNOSIS_BETA,
   ANTHROPIC_CHAT_MODEL,
   ANTHROPIC_MAX_TOKENS,
   getAnthropicApiKey,
+  isAnthropicCacheDiagnosticsEnabled,
   isAnthropicPromptCacheEnabled,
 } from "@/lib/ai/llm-chat-defaults";
 
@@ -55,6 +59,8 @@ export type ChatCompletionBody = {
   stream?: boolean;
   /** When true, marks the last tool with cache_control (requires prompt cache enabled). */
   cache_tools?: boolean;
+  /** Prior Anthropic response id for cache diagnostics chaining (null opts in on first call). */
+  previous_message_id?: string | null;
 };
 
 export type ChatCompletionUsage = {
@@ -62,6 +68,25 @@ export type ChatCompletionUsage = {
   output_tokens: number;
   cache_creation_input_tokens: number;
   cache_read_input_tokens: number;
+};
+
+export type AnthropicCacheMissReason = {
+  type: string;
+  cache_missed_input_tokens?: number;
+};
+
+export type AnthropicCacheDiagnostics = {
+  cache_miss_reason: AnthropicCacheMissReason | null;
+};
+
+export type ChatCompletionResult = {
+  id?: string;
+  diagnostics?: AnthropicCacheDiagnostics | null;
+  choices: Array<{
+    message: OpenAICompatibleAssistantMessage;
+    finish_reason: string | null;
+  }>;
+  usage?: ChatCompletionUsage;
 };
 
 export type OpenAICompatibleAssistantMessage = {
@@ -260,6 +285,51 @@ function fromAnthropicUsage(usage: AnthropicUsageLike): ChatCompletionUsage {
   };
 }
 
+function mapDiagnostics(
+  diagnostics: Anthropic.Beta.Messages.BetaDiagnostics | null | undefined
+): AnthropicCacheDiagnostics | null {
+  if (diagnostics == null) return null;
+  const reason = diagnostics.cache_miss_reason;
+  if (reason == null) {
+    return { cache_miss_reason: null };
+  }
+  return {
+    cache_miss_reason: {
+      type: reason.type,
+      ...("cache_missed_input_tokens" in reason
+        ? { cache_missed_input_tokens: reason.cache_missed_input_tokens }
+        : {}),
+    },
+  };
+}
+
+export function logAnthropicCacheDiagnostics(
+  context: string,
+  diagnostics: AnthropicCacheDiagnostics | null | undefined,
+  usage?: ChatCompletionUsage
+): void {
+  if (!diagnostics?.cache_miss_reason) return;
+  const reason = diagnostics.cache_miss_reason;
+  console.log(
+    `[Anthropic] Cache diagnostics (${context})`,
+    JSON.stringify({
+      cache_miss_reason: reason.type,
+      cache_missed_input_tokens: reason.cache_missed_input_tokens ?? null,
+      cache_read_input_tokens: usage?.cache_read_input_tokens ?? null,
+    })
+  );
+}
+
+function buildBetaExtras(body: ChatCompletionBody): {
+  betas: [typeof ANTHROPIC_CACHE_DIAGNOSIS_BETA];
+  diagnostics: { previous_message_id: string | null };
+} {
+  return {
+    betas: [ANTHROPIC_CACHE_DIAGNOSIS_BETA],
+    diagnostics: { previous_message_id: body.previous_message_id ?? null },
+  };
+}
+
 function fromAnthropicMessage(message: Anthropic.Messages.Message): {
   message: OpenAICompatibleAssistantMessage;
   finish_reason: string | null;
@@ -318,15 +388,44 @@ export function buildRequestParams(
   };
 }
 
-export async function createChatCompletion(body: ChatCompletionBody) {
+export async function createChatCompletion(body: ChatCompletionBody): Promise<ChatCompletionResult> {
   const anthropic = getClient();
-  const response = await anthropic.messages.create(buildRequestParams(body));
+  const params = buildRequestParams(body);
+  const useDiagnostics = isAnthropicCacheDiagnosticsEnabled();
+
+  if (useDiagnostics) {
+    const response = await anthropic.beta.messages.create({
+      ...params,
+      ...buildBetaExtras(body),
+    });
+    const mapped = fromAnthropicMessage(response as Anthropic.Messages.Message);
+    const usage = fromAnthropicUsage(response.usage);
+    const diagnostics = mapDiagnostics(response.diagnostics);
+    if (usage.cache_creation_input_tokens > 0 || usage.cache_read_input_tokens > 0) {
+      console.log("[Anthropic] Prompt cache usage", JSON.stringify(usage));
+    }
+    logAnthropicCacheDiagnostics("completion", diagnostics, usage);
+    return {
+      id: response.id,
+      diagnostics,
+      choices: [
+        {
+          message: mapped.message,
+          finish_reason: mapped.finish_reason,
+        },
+      ],
+      usage,
+    };
+  }
+
+  const response = await anthropic.messages.create(params);
   const mapped = fromAnthropicMessage(response);
   const usage = fromAnthropicUsage(response.usage);
   if (usage.cache_creation_input_tokens > 0 || usage.cache_read_input_tokens > 0) {
     console.log("[Anthropic] Prompt cache usage", JSON.stringify(usage));
   }
   return {
+    id: response.id,
     choices: [
       {
         message: mapped.message,
@@ -338,7 +437,8 @@ export async function createChatCompletion(body: ChatCompletionBody) {
 }
 
 async function* anthropicStreamToOpenAIChunks(
-  stream: AsyncIterable<Anthropic.Messages.MessageStreamEvent>
+  stream: AsyncIterable<Anthropic.Messages.MessageStreamEvent | Anthropic.Beta.Messages.BetaRawMessageStreamEvent>,
+  options?: { diagnostics?: boolean }
 ): AsyncIterable<ChatCompletionChunk> {
   const toolCallsByIndex: Record<
     number,
@@ -346,10 +446,20 @@ async function* anthropicStreamToOpenAIChunks(
   > = {};
   let finishReason: string | null = null;
   let usage: ChatCompletionUsage | undefined;
+  let messageId: string | undefined;
+  let diagnostics: AnthropicCacheDiagnostics | null | undefined;
 
   for await (const event of stream) {
-    if (event.type === "message_start" && event.message.usage) {
-      usage = fromAnthropicUsage(event.message.usage);
+    if (event.type === "message_start") {
+      if (event.message.usage) {
+        usage = fromAnthropicUsage(event.message.usage);
+      }
+      messageId = event.message.id;
+      if (options?.diagnostics && "diagnostics" in event.message) {
+        diagnostics = mapDiagnostics(
+          (event.message as Anthropic.Beta.Messages.BetaMessage).diagnostics
+        );
+      }
     }
 
     if (event.type === "content_block_start" && event.content_block.type === "tool_use") {
@@ -438,6 +548,8 @@ async function* anthropicStreamToOpenAIChunks(
         },
       ],
       ...(usage ? { usage } : {}),
+      ...(messageId ? { id: messageId } : {}),
+      ...(options?.diagnostics ? { diagnostics: diagnostics ?? null } : {}),
     } as ChatCompletionChunk;
   }
 }
@@ -446,15 +558,29 @@ export async function createChatCompletionStream(
   body: ChatCompletionBody
 ): Promise<AsyncIterable<ChatCompletionChunk>> {
   const anthropic = getClient();
+  const params = buildRequestParams(body);
+  const useDiagnostics = isAnthropicCacheDiagnosticsEnabled();
+
+  if (useDiagnostics) {
+    const stream = await anthropic.beta.messages.create({
+      ...params,
+      ...buildBetaExtras(body),
+      stream: true,
+    });
+    return anthropicStreamToOpenAIChunks(stream, { diagnostics: true });
+  }
+
   const stream = await anthropic.messages.create({
-    ...buildRequestParams(body),
+    ...params,
     stream: true,
   });
   return anthropicStreamToOpenAIChunks(stream);
 }
 
 /** Drop-in replacements for the former OpenAI reasoning-compat helpers. */
-export async function createChatCompletionWithReasoningCompat(body: ChatCompletionBody) {
+export async function createChatCompletionWithReasoningCompat(
+  body: ChatCompletionBody
+): Promise<ChatCompletionResult> {
   return createChatCompletion(body);
 }
 

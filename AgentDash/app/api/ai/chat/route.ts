@@ -7,6 +7,7 @@ import {
   EMAIL_PIPELINE_TOOL_NAMES,
   extractToolNames,
   getAthleteTargetListSessionAddon,
+  getConsultingTargetListSessionAddon,
   getBulkImportFromChatAddon,
   getCrmPipelineDraftingSystemAddon,
   getMissingRequiredTools,
@@ -31,6 +32,8 @@ import { parseChatModelTier, resolveChatModelId } from "@/lib/ai/chat-model";
 import {
   createChatCompletionStreamWithReasoningCompat,
   createChatCompletionWithReasoningCompat,
+  logAnthropicCacheDiagnostics,
+  type AnthropicCacheDiagnostics,
   type ChatCompletionUsage,
   type ChatMessage,
 } from "@/lib/ai/anthropic-chat-client";
@@ -96,7 +99,7 @@ type UploadedImage = {
 
 const chatModeSchema = z.enum(["default", "deep_research", "web_search"]);
 const chatModelTierSchema = z.enum(["sonnet", "opus"]);
-const chatUiContextSchema = z.enum(["target_list", "crm_pipeline", "global"]);
+const chatUiContextSchema = z.enum(["target_list", "consulting_target_list", "crm_pipeline", "global"]);
 const flowModeSchema = z.enum(["outbound", "inbound", "email", "auto"]);
 const chatMessageSchema = z
   .object({
@@ -121,6 +124,7 @@ const chatPayloadSchema = z
     extra_system_context: z.string().trim().max(40_000).optional(),
     pipeline_drafting: z.boolean().optional(),
     athlete_id: z.string().trim().max(120).optional(),
+    consulting_profile_id: z.string().trim().max(120).optional(),
     ui_context: chatUiContextSchema.optional(),
     flow_mode: flowModeSchema.optional(),
     chat_model: chatModelTierSchema.optional(),
@@ -1163,6 +1167,118 @@ const TOOLS = [
   {
     type: "function" as const,
     function: {
+      name: "getConsultingTargetList",
+      description:
+        "Read the live consulting target list for one consulting profile: entry_id (same as pipeline_id), company name, industry category, website, hq_phone, descriptions, and contact_count or full contacts. Use before categorizing or bulk operations on a consulting list.",
+      parameters: {
+        type: "object",
+        properties: {
+          consulting_profile_id: { type: "string", description: "Consulting profile UUID." },
+          uncategorized_only: { type: "boolean" },
+          category_filter: { type: "string" },
+          include_contacts: { type: "boolean" },
+        },
+        required: ["consulting_profile_id"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "bulkImportCompaniesToConsultingTargetList",
+      description:
+        "Bulk import companies onto a consulting profile's shared target list. companies[] fields: company_name (required), industry_category, website, hq_phone, company_description, personal_notes, match_score, contacts[]. Use after apolloSearchCompanies or parsed spreadsheet/chat list.",
+      parameters: {
+        type: "object",
+        properties: {
+          consulting_profile_id: { type: "string" },
+          companies: {
+            type: "array",
+            maxItems: 300,
+            items: {
+              type: "object",
+              properties: {
+                company_name: { type: "string" },
+                industry_category: { type: "string" },
+                website: { type: "string" },
+                hq_phone: { type: "string" },
+                company_description: { type: "string" },
+                personal_notes: { type: "string" },
+                match_score: { type: "number" },
+                contacts: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      first_name: { type: "string" },
+                      last_name: { type: "string" },
+                      role: { type: "string" },
+                      email: { type: "string" },
+                      phone: { type: "string" },
+                    },
+                    required: ["first_name", "last_name"],
+                  },
+                },
+              },
+              required: ["company_name"],
+            },
+          },
+        },
+        required: ["consulting_profile_id", "companies"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "updateConsultingTargetListCategories",
+      description:
+        "Set industry_category on consulting target list entries. Pass entry_id from getConsultingTargetList. Up to 80 updates per call.",
+      parameters: {
+        type: "object",
+        properties: {
+          consulting_profile_id: { type: "string" },
+          updates: {
+            type: "array",
+            maxItems: 80,
+            items: {
+              type: "object",
+              properties: {
+                entry_id: { type: "string" },
+                pipeline_id: { type: "string", description: "Alias for entry_id." },
+                industry_category: { type: "string" },
+              },
+              required: ["industry_category"],
+            },
+          },
+        },
+        required: ["consulting_profile_id", "updates"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "apolloExpandSimilarForConsulting",
+      description:
+        "Find Apollo lookalike companies from seed brands and optionally add them to a consulting target list. Requires industry_category and consulting_profile_id. Seeds: seed_company_ids and/or seed_entry_ids; falls back to profile seed clients.",
+      parameters: {
+        type: "object",
+        properties: {
+          consulting_profile_id: { type: "string" },
+          industry_category: { type: "string" },
+          seed_entry_ids: { type: "array", items: { type: "string" } },
+          seed_company_ids: { type: "array", items: { type: "string" } },
+          add_to_target_list: { type: "boolean" },
+          limit_per_seed: { type: "number" },
+        },
+        required: ["consulting_profile_id", "industry_category"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
       name: "getAthleteIntelligence",
       description:
         "Server-side athlete rollup in one call: athlete record, contracts (current/expired/upcoming), social_data, audience summary, accolades, sponsorship conflicts, and open taxonomy categories. Prefer this for high-level questions like 'tell me about [athlete]' or when you need the full prospecting picture. Use getAthlete, getAthleteContracts, or getAthleteFullAudienceProfile only when you need one slice without the rest.",
@@ -1258,6 +1374,7 @@ type TurnTelemetry = {
   output_tokens: number;
   cache_creation_input_tokens: number;
   cache_read_input_tokens: number;
+  cache_miss_reasons: string[];
 };
 
 const ATHLETE_ID_TOOL_NAMES = new Set([
@@ -1340,6 +1457,7 @@ export async function POST(req: Request) {
     let extra_system_context: any;
     let pipeline_drafting: any;
     let athlete_id: string | undefined;
+    let consulting_profile_id: string | undefined;
     let ui_context: z.infer<typeof chatUiContextSchema> | undefined;
     let flow_mode: FlowMode | undefined;
     let chat_model: z.infer<typeof chatModelTierSchema> | undefined;
@@ -1357,6 +1475,7 @@ export async function POST(req: Request) {
       extra_system_context = payload.extra_system_context;
       pipeline_drafting = payload.pipeline_drafting;
       athlete_id = payload.athlete_id;
+      consulting_profile_id = payload.consulting_profile_id;
       ui_context = payload.ui_context;
       flow_mode = parseFlowMode(payload.flow_mode);
       chat_model = payload.chat_model;
@@ -1674,7 +1793,9 @@ export async function POST(req: Request) {
     }
 
     const requestAthleteId = String(athlete_id ?? "").trim();
+    const requestConsultingProfileId = String(consulting_profile_id ?? "").trim();
     const targetListUiContext = ui_context === "target_list";
+    const consultingTargetListUiContext = ui_context === "consulting_target_list";
     const explicitProspectIntent = detectExplicitProspectIntent(trimmedMessages);
     const resolvedFlowMode = resolveFlowMode({
       flowMode: flow_mode,
@@ -1737,6 +1858,11 @@ REQUIRED behavior — do not deviate:
     const targetListSessionAddon = injectTargetListSession
       ? `\n\n${getAthleteTargetListSessionAddon(requestAthleteId)}`
       : "";
+    const injectConsultingTargetListSession =
+      consultingTargetListUiContext && Boolean(requestConsultingProfileId);
+    const consultingTargetListSessionAddon = injectConsultingTargetListSession
+      ? `\n\n${getConsultingTargetListSessionAddon(requestConsultingProfileId)}`
+      : "";
     const injectTargetListPushGuard =
       (targetListUiContext || resolvedFlowMode === "email") && activeTargetListSaveIntent;
     const targetListOutreachAddon = injectTargetListPushGuard
@@ -1758,8 +1884,37 @@ REQUIRED behavior — do not deviate:
       targetListUiContext && !explicitProspectIntent
         ? new Set(["generateAthleteProspectList"])
         : undefined;
-    const activeToolDefinitions = filterToolDefinitions(TOOLS, resolvedFlowMode, targetListBlocked);
-    const dynamicSystemContext = `${userMemoryPrompt}${toneSamplePrompt}${projectPrompt}${extraPrompt}${crmPipelineAddon}${targetListSessionAddon}${modePromptAddon}${attachmentAddon}${chatBulkImportAddon}${targetListOutreachAddon}${
+    const consultingTargetListBlocked = consultingTargetListUiContext
+      ? new Set([
+          "getAthleteTargetList",
+          "updateTargetListCompanyCategories",
+          "updateTargetListMatchScores",
+          "removeAthleteFromTargetListCards",
+          "bulkImportCompaniesToCrmForAthlete",
+          "updateTargetListOutreach",
+          "generateAthleteProspectList",
+          "pushCompanyToCrmPipeline",
+        ])
+      : undefined;
+    const athleteTargetListBlocked = targetListUiContext
+      ? new Set([
+          "getConsultingTargetList",
+          "bulkImportCompaniesToConsultingTargetList",
+          "updateConsultingTargetListCategories",
+          "apolloExpandSimilarForConsulting",
+        ])
+      : undefined;
+    const mergedBlocked = new Set<string>([
+      ...(targetListBlocked ?? []),
+      ...(consultingTargetListBlocked ?? []),
+      ...(athleteTargetListBlocked ?? []),
+    ]);
+    const activeToolDefinitions = filterToolDefinitions(
+      TOOLS,
+      resolvedFlowMode,
+      mergedBlocked.size > 0 ? mergedBlocked : undefined
+    );
+    const dynamicSystemContext = `${userMemoryPrompt}${toneSamplePrompt}${projectPrompt}${extraPrompt}${crmPipelineAddon}${targetListSessionAddon}${consultingTargetListSessionAddon}${modePromptAddon}${attachmentAddon}${chatBulkImportAddon}${targetListOutreachAddon}${
       flowPromptAddon ? `\n\n${flowPromptAddon}` : ""
     }${interestGateAddons ? `\n\n${interestGateAddons}` : ""}${emailInterestAddon ? `\n\n${emailInterestAddon}` : ""}`;
     const initialSystemMessages: ChatMessage[] = [
@@ -1852,6 +2007,22 @@ REQUIRED behavior — do not deviate:
       const MAX_TOOL_ITERATIONS = 6;
       let maxIterations = MAX_TOOL_ITERATIONS;
       let lastMessage: any = null;
+      let previousAnthropicMessageId: string | null = null;
+      const cacheMissReasons: string[] = [];
+      const applyAnthropicDiagnostics = (
+        result: {
+          id?: string;
+          diagnostics?: AnthropicCacheDiagnostics | null;
+          usage?: ChatCompletionUsage;
+        },
+        context: string
+      ) => {
+        if (result.id) previousAnthropicMessageId = result.id;
+        if (result.diagnostics?.cache_miss_reason?.type) {
+          cacheMissReasons.push(result.diagnostics.cache_miss_reason.type);
+        }
+        logAnthropicCacheDiagnostics(context, result.diagnostics, result.usage);
+      };
       const usageTotals: ChatCompletionUsage = {
         input_tokens: 0,
         output_tokens: 0,
@@ -1878,6 +2049,7 @@ REQUIRED behavior — do not deviate:
           output_tokens: usageTotals.output_tokens,
           cache_creation_input_tokens: usageTotals.cache_creation_input_tokens,
           cache_read_input_tokens: usageTotals.cache_read_input_tokens,
+          cache_miss_reasons: cacheMissReasons,
         };
         console.log("[AI Chat] Turn summary", JSON.stringify(summary));
         return summary;
@@ -1933,7 +2105,6 @@ REQUIRED behavior — do not deviate:
 
       const completionBody = {
         model: resolvedChatModel,
-        messages: currentMessages,
         tools: activeToolDefinitions,
         tool_choice: "auto" as const,
         cache_tools: true,
@@ -1945,11 +2116,12 @@ REQUIRED behavior — do not deviate:
           `[AI Chat] Iteration ${MAX_TOOL_ITERATIONS - maxIterations}, messages: ${currentMessages.length}`
         );
         if (sseEmit) {
-          const { message, finishReason, usage } = await streamChatCompletionToMessage(
+          const streamResult = await streamChatCompletionToMessage(
             () =>
               createChatCompletionStreamWithReasoningCompat({
                 ...completionBody,
                 messages: currentMessages,
+                previous_message_id: previousAnthropicMessageId,
               }),
             {
               onToken: (text) => sseEmit({ type: "token", text }),
@@ -1957,17 +2129,20 @@ REQUIRED behavior — do not deviate:
                 sseEmit({ type: "meta", phase: "tools", tools }),
             }
           );
-          accumulateUsage(usage);
-          lastMessage = message;
+          accumulateUsage(streamResult.usage);
+          applyAnthropicDiagnostics(streamResult, `iteration-${iterationCount}`);
+          lastMessage = streamResult.message;
           console.log(
-            `[AI Chat] Response finish_reason: ${finishReason}, tool_calls: ${lastMessage.tool_calls?.length ?? 0}`
+            `[AI Chat] Response finish_reason: ${streamResult.finishReason}, tool_calls: ${lastMessage.tool_calls?.length ?? 0}`
           );
         } else {
           const completion = await createChatCompletionWithReasoningCompat({
             ...completionBody,
             messages: currentMessages,
+            previous_message_id: previousAnthropicMessageId,
           });
           accumulateUsage(completion.usage);
+          applyAnthropicDiagnostics(completion, `iteration-${iterationCount}`);
           lastMessage = completion.choices[0].message;
           console.log(
             `[AI Chat] Response finish_reason: ${completion.choices[0]?.finish_reason}, tool_calls: ${lastMessage.tool_calls?.length ?? 0}`
@@ -2495,7 +2670,7 @@ REQUIRED behavior — do not deviate:
           ];
           const forcedToolChoice = hitIterationCap ? ("none" as const) : ("auto" as const);
           if (sseEmit) {
-            const { message, usage } = await streamChatCompletionToMessage(
+            const streamResult = await streamChatCompletionToMessage(
               () =>
                 createChatCompletionStreamWithReasoningCompat({
                   model: resolvedChatModel,
@@ -2503,13 +2678,15 @@ REQUIRED behavior — do not deviate:
                   tools: activeToolDefinitions,
                   tool_choice: forcedToolChoice,
                   cache_tools: true,
+                  previous_message_id: previousAnthropicMessageId,
                 }),
               {
                 onToken: (text) => sseEmit({ type: "token", text }),
               }
             );
-            accumulateUsage(usage);
-            lastMessage = message;
+            accumulateUsage(streamResult.usage);
+            applyAnthropicDiagnostics(streamResult, "forced-completion");
+            lastMessage = streamResult.message;
           } else {
             const completion = await createChatCompletionWithReasoningCompat({
               model: resolvedChatModel,
@@ -2517,8 +2694,10 @@ REQUIRED behavior — do not deviate:
               tools: activeToolDefinitions,
               tool_choice: forcedToolChoice,
               cache_tools: true,
+              previous_message_id: previousAnthropicMessageId,
             });
             accumulateUsage(completion.usage);
+            applyAnthropicDiagnostics(completion, "forced-completion");
             lastMessage = completion.choices[0].message;
           }
         } catch {

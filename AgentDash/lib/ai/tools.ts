@@ -32,6 +32,12 @@ import { computeRosterAudienceSummary, formatRosterAudienceCountDisplay } from "
 import { APPROVED_INTEREST_CATEGORIES } from "@/lib/ai/interest-taxonomy";
 import { ilikeContains, normalizeOrIlikeFragment } from "@/lib/supabase/ilike";
 import { fetchAthleteTargetListRows } from "@/lib/crm/athlete-target-list";
+import { upsertConsultingTargetListRows, normalizeJsonImportRow } from "@/lib/consulting/import-target-list";
+import { requireConsultingProfileAccess, ConsultingAccessError } from "@/lib/consulting/access";
+import { expandSimilarCompanies, loadExpandSeedsFromCompanyIds } from "@/lib/apollo/expand-similar";
+import { getConsultingTargetListDomains, fetchConsultingTargetListRows } from "@/lib/crm/consulting-target-list";
+import { getOrCreateCompanyByName } from "@/lib/consulting/companies";
+import { domainFromWebsite, normalizeDomainForCompare } from "@/lib/apollo/org-search-utils";
 import { isEffectivelyUncategorizedCompanyCategory } from "@/lib/crm/company-category";
 import { discoverAthleteProspects } from "@/lib/ai/athlete-prospect-discovery";
 import { mergeAthleteIntoPotentialAthletes, parseOptionalMatchScore, setMatchScoreForAthlete } from "@/lib/crm/potential-athletes";
@@ -2691,6 +2697,324 @@ export async function createAITools(profile: Profile) {
         failed: results.filter((r) => !r.ok).length,
         results,
       };
+    },
+
+    getConsultingTargetList: async (params: {
+      consulting_profile_id?: string;
+      uncategorized_only?: boolean;
+      category_filter?: string;
+      include_contacts?: boolean;
+    }) => {
+      const consultingProfileId = String(params.consulting_profile_id ?? "").trim();
+      if (!consultingProfileId) {
+        return { ok: false as const, error: "consulting_profile_id is required" };
+      }
+      try {
+        await requireConsultingProfileAccess(supabase, profile, consultingProfileId);
+      } catch (e) {
+        if (e instanceof ConsultingAccessError) {
+          return { ok: false as const, error: e.message };
+        }
+        throw e;
+      }
+
+      let rows;
+      try {
+        rows = await fetchConsultingTargetListRows(supabaseCompanies, consultingProfileId);
+      } catch (e: any) {
+        return { ok: false as const, error: e?.message ?? "Failed to load consulting target list" };
+      }
+
+      if (params.uncategorized_only) {
+        rows = rows.filter((r) => isEffectivelyUncategorizedCompanyCategory(r.category));
+      }
+      const categoryFilter = String(params.category_filter ?? "").trim();
+      if (categoryFilter) {
+        const needle = categoryFilter.toLowerCase();
+        rows = rows.filter((r) => String(r.category ?? "").trim().toLowerCase() === needle);
+      }
+
+      const includeContacts = Boolean(params.include_contacts);
+      const slim = rows.map((r) => ({
+        entry_id: r.pipeline_id,
+        pipeline_id: r.pipeline_id,
+        company_id: r.company_id,
+        company_name: r.company_name,
+        category: r.category,
+        website: r.website,
+        hq_phone: r.hq_phone,
+        company_description: r.company_description,
+        personal_notes: r.personal_notes,
+        ...(includeContacts ? { contacts: r.contacts } : { contact_count: r.contacts.length }),
+      }));
+
+      const { data: profileRow } = await supabase
+        .from("consulting_profiles")
+        .select("name")
+        .eq("id", consultingProfileId)
+        .maybeSingle();
+
+      return {
+        ok: true as const,
+        consulting_profile_id: consultingProfileId,
+        profile_name: profileRow?.name ?? null,
+        row_count: slim.length,
+        rows: slim,
+      };
+    },
+
+    bulkImportCompaniesToConsultingTargetList: async (params: {
+      consulting_profile_id?: string;
+      companies: Array<Record<string, unknown>>;
+    }) => {
+      const consultingProfileId = String(params.consulting_profile_id ?? "").trim();
+      if (!consultingProfileId) {
+        return { ok: false as const, error: "consulting_profile_id is required" };
+      }
+      try {
+        await requireConsultingProfileAccess(supabase, profile, consultingProfileId);
+      } catch (e) {
+        if (e instanceof ConsultingAccessError) {
+          return { ok: false as const, error: e.message };
+        }
+        throw e;
+      }
+
+      const rawRows = Array.isArray(params.companies) ? params.companies : [];
+      if (rawRows.length === 0) {
+        return { ok: false as const, error: "companies is required (empty list)" };
+      }
+      if (rawRows.length > 300) {
+        return { ok: false as const, error: "Too many rows (max 300 per call)" };
+      }
+
+      const rows = rawRows
+        .map((r) => normalizeJsonImportRow(r))
+        .filter((r): r is NonNullable<typeof r> => r != null);
+
+      if (rows.length === 0) {
+        return { ok: false as const, error: "No valid company rows (company_name required)" };
+      }
+
+      try {
+        const summary = await upsertConsultingTargetListRows(supabaseCompanies, {
+          consultingProfileId,
+          userId: profile.user_id,
+          rows,
+        });
+        return {
+          ok: true as const,
+          consulting_profile_id: consultingProfileId,
+          summary,
+        };
+      } catch (e: any) {
+        return { ok: false as const, error: e?.message ?? "Bulk import failed" };
+      }
+    },
+
+    updateConsultingTargetListCategories: async (params: {
+      consulting_profile_id?: string;
+      updates: Array<{ entry_id?: string; pipeline_id?: string; industry_category: string }>;
+    }) => {
+      const consultingProfileId = String(params.consulting_profile_id ?? "").trim();
+      if (!consultingProfileId) {
+        return { ok: false as const, error: "consulting_profile_id is required" };
+      }
+      try {
+        await requireConsultingProfileAccess(supabase, profile, consultingProfileId);
+      } catch (e) {
+        if (e instanceof ConsultingAccessError) {
+          return { ok: false as const, error: e.message };
+        }
+        throw e;
+      }
+
+      const updates = Array.isArray(params.updates) ? params.updates : [];
+      if (updates.length === 0) return { ok: false as const, error: "updates array is required" };
+      if (updates.length > 80) return { ok: false as const, error: "Too many updates (max 80 per call)" };
+
+      let rows;
+      try {
+        rows = await fetchConsultingTargetListRows(supabaseCompanies, consultingProfileId);
+      } catch (e: any) {
+        return { ok: false as const, error: e?.message ?? "Failed to verify target list" };
+      }
+      const allowed = new Set(rows.map((r) => r.pipeline_id));
+      const results: Array<{ entry_id: string; ok: boolean; error?: string }> = [];
+
+      for (const u of updates) {
+        const entryId = String(u.entry_id ?? u.pipeline_id ?? "").trim();
+        const cat = String(u.industry_category ?? "").trim();
+        if (!entryId || !cat) {
+          results.push({
+            entry_id: entryId || "(missing)",
+            ok: false,
+            error: "entry_id and non-empty industry_category are required",
+          });
+          continue;
+        }
+        if (!allowed.has(entryId)) {
+          results.push({
+            entry_id: entryId,
+            ok: false,
+            error: "Entry not on this consulting target list",
+          });
+          continue;
+        }
+        const row = rows.find((r) => r.pipeline_id === entryId);
+        const { error: upErr } = await supabaseCompanies
+          .from("consulting_target_list")
+          .update({ industry_category: cat })
+          .eq("id", entryId)
+          .eq("consulting_profile_id", consultingProfileId);
+        if (upErr) {
+          results.push({ entry_id: entryId, ok: false, error: upErr.message });
+          continue;
+        }
+        if (row?.company_id) {
+          await supabaseCompanies
+            .from("companies")
+            .update({ product_category: cat })
+            .eq("company_id", row.company_id);
+        }
+        results.push({ entry_id: entryId, ok: true });
+      }
+
+      return {
+        ok: true as const,
+        consulting_profile_id: consultingProfileId,
+        updated: results.filter((r) => r.ok).length,
+        failed: results.filter((r) => !r.ok).length,
+        results,
+      };
+    },
+
+    apolloExpandSimilarForConsulting: async (params: {
+      consulting_profile_id?: string;
+      industry_category?: string;
+      seed_entry_ids?: string[];
+      seed_company_ids?: string[];
+      add_to_target_list?: boolean;
+      limit_per_seed?: number;
+    }) => {
+      if (!isApolloEnabled()) {
+        return { ok: false as const, error: "Apollo API is not configured on this server." };
+      }
+      const consultingProfileId = String(params.consulting_profile_id ?? "").trim();
+      if (!consultingProfileId) {
+        return { ok: false as const, error: "consulting_profile_id is required" };
+      }
+      const industryCategory = String(params.industry_category ?? "").trim();
+      if (!industryCategory) {
+        return { ok: false as const, error: "industry_category is required" };
+      }
+      try {
+        await requireConsultingProfileAccess(supabase, profile, consultingProfileId);
+      } catch (e) {
+        if (e instanceof ConsultingAccessError) {
+          return { ok: false as const, error: e.message };
+        }
+        throw e;
+      }
+
+      let seedCompanyIds = Array.isArray(params.seed_company_ids)
+        ? [...new Set(params.seed_company_ids.map((id) => String(id)).filter(Boolean))]
+        : [];
+
+      if (seedCompanyIds.length === 0 && Array.isArray(params.seed_entry_ids)) {
+        const entryIds = params.seed_entry_ids.map((id) => String(id)).filter(Boolean);
+        const listRows = await fetchConsultingTargetListRows(supabaseCompanies, consultingProfileId);
+        for (const eid of entryIds) {
+          const row = listRows.find((r) => r.pipeline_id === eid);
+          if (row?.company_id) seedCompanyIds.push(row.company_id);
+        }
+        seedCompanyIds = [...new Set(seedCompanyIds)];
+      }
+
+      if (seedCompanyIds.length === 0) {
+        const { data: seeds } = await supabaseCompanies
+          .from("consulting_profile_seeds")
+          .select("company_id")
+          .eq("profile_id", consultingProfileId);
+        for (const s of seeds ?? []) {
+          if (s.company_id) seedCompanyIds.push(String(s.company_id));
+        }
+        seedCompanyIds = [...new Set(seedCompanyIds)];
+      }
+
+      if (seedCompanyIds.length === 0) {
+        return { ok: false as const, error: "No seed companies (pass seed_company_ids or seed_entry_ids)" };
+      }
+
+      try {
+        const seeds = await loadExpandSeedsFromCompanyIds(supabaseCompanies, seedCompanyIds);
+        const exclude_domains = await getConsultingTargetListDomains(
+          supabaseCompanies,
+          consultingProfileId
+        );
+        for (const s of seeds) {
+          const d = domainFromWebsite(s.website);
+          if (d) exclude_domains.push(normalizeDomainForCompare(d));
+        }
+
+        const groups = await expandSimilarCompanies({
+          seeds,
+          category: industryCategory,
+          limit_per_seed: params.limit_per_seed != null ? Number(params.limit_per_seed) : 5,
+          exclude_domains: [...new Set(exclude_domains.map(normalizeDomainForCompare).filter(Boolean))],
+        });
+
+        let added = 0;
+        const preview: Array<{ name: string; website: string | null }> = [];
+        const addToList = params.add_to_target_list !== false;
+
+        if (addToList) {
+          for (const group of groups) {
+            for (const org of group.similar) {
+              const name = String(org.name ?? "").trim();
+              if (!name) continue;
+              const companyId = await getOrCreateCompanyByName(supabaseCompanies, name);
+              if (org.website) {
+                await supabaseCompanies
+                  .from("companies")
+                  .update({ website: org.website, product_category: industryCategory })
+                  .eq("company_id", companyId);
+              }
+              const { error } = await supabaseCompanies.from("consulting_target_list").upsert(
+                {
+                  consulting_profile_id: consultingProfileId,
+                  company_id: companyId,
+                  industry_category: industryCategory,
+                  added_by_user_id: profile.user_id,
+                },
+                { onConflict: "consulting_profile_id,company_id" }
+              );
+              if (!error) added++;
+            }
+          }
+        } else {
+          for (const group of groups) {
+            for (const org of group.similar) {
+              preview.push({
+                name: String(org.name ?? ""),
+                website: org.website ?? null,
+              });
+            }
+          }
+        }
+
+        return {
+          ok: true as const,
+          consulting_profile_id: consultingProfileId,
+          industry_category: industryCategory,
+          seeds: seeds.length,
+          total_similar: groups.reduce((n, g) => n + g.similar.length, 0),
+          added,
+          preview: preview.length > 0 ? preview : undefined,
+        };
+      } catch (e: any) {
+        return { ok: false as const, error: e?.message ?? "Expand similar failed" };
+      }
     },
 
     apolloFindContactsForCompany: async (params: { company_id?: string; company_name?: string }) => {

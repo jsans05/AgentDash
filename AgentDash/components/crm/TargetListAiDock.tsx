@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, Sparkles, X } from "lucide-react";
 import { useAuth } from "@/app/providers";
-import { ChatPanel, type ChatPanelHandle, type ChatProject, type Message } from "@/components/chat/ChatPanel";
+import { ChatPanel, type ChatPanelHandle, type ChatProject, type Message, type ChatPanelSendOptions } from "@/components/chat/ChatPanel";
 import { postAiChat, type PostAiChatResult } from "@/lib/ai/chat-fetch";
 import type { ChatSseEvent } from "@/lib/ai/chat-sse";
 import type { InteractionResponsePayload } from "@/lib/ai/user-question";
@@ -213,18 +213,7 @@ function TargetListAiPanelInner({
       messages: Message[],
       project: ChatProject,
       conversationId: string,
-      options?: {
-        signal?: AbortSignal;
-        mode?: "default" | "deep_research" | "web_search";
-        attachments?: File[];
-        onStreamToken?: (text: string) => void;
-        onStreamEvent?: (event: ChatSseEvent) => void;
-        interactionResponse?: InteractionResponsePayload;
-        athleteId?: string;
-        uiContext?: "target_list" | "crm_pipeline" | "global";
-        flowMode?: "outbound" | "inbound" | "email" | "auto";
-        chatModel?: "sonnet" | "opus";
-      }
+      options?: ChatPanelSendOptions
     ): Promise<PostAiChatResult> => {
       toolsUsedRef.current = new Set();
       const extraContext = getSessionContext();

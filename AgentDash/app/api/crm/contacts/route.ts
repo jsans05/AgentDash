@@ -143,6 +143,8 @@ export async function POST(req: Request) {
   const first_name = String(body.first_name ?? "").trim();
   const last_name = String(body.last_name ?? "").trim();
   const company_name = String(body.company_name ?? "").trim();
+  const consulting_profile_id =
+    body.consulting_profile_id != null ? String(body.consulting_profile_id).trim() || null : null;
   const role = body.role != null ? String(body.role) : null;
   const email = body.email != null ? String(body.email) : null;
   const phone = body.phone != null ? String(body.phone) : null;
@@ -180,6 +182,7 @@ export async function POST(req: Request) {
   const insertPayload = {
     company_id,
     created_by_user_id: profile.user_id,
+    consulting_profile_id,
     first_name,
     last_name,
     role,
@@ -198,15 +201,19 @@ export async function POST(req: Request) {
   const normalizedLast = normalizeText(last_name);
   const normalizedEmail = normalizeText(email);
 
-  const { data: existingRows, error: existingError } = await supabase
+  let existingQuery = supabase
     .from("crm_contacts")
     .select(
       "contact_id, first_name, last_name, role, email, phone, linkedin_url, zoominfo_url, taxonomy_id, category, product_description, notes, outreach_mode"
     )
     .eq("company_id", company_id)
-    .eq("created_by_user_id", profile.user_id)
-    .eq("archived", false)
-    .limit(200);
+    .eq("archived", false);
+  if (consulting_profile_id) {
+    existingQuery = existingQuery.eq("consulting_profile_id", consulting_profile_id);
+  } else {
+    existingQuery = existingQuery.eq("created_by_user_id", profile.user_id);
+  }
+  const { data: existingRows, error: existingError } = await existingQuery.limit(200);
   if (existingError) return internalServerError(existingError, "crm-contacts:post:existing-lookup");
 
   const duplicate = (existingRows ?? []).find((row: any) => {

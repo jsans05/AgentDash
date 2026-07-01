@@ -28,6 +28,8 @@ export async function POST(req: Request) {
   const overrides = apolloContactOverridesToPeopleSearch(
     parseContactSearchOverridesFromBody(body as Record<string, unknown>)
   );
+  const consultingProfileId =
+    body.consulting_profile_id != null ? String(body.consulting_profile_id).trim() || null : null;
 
   const supabaseAdmin = await createServiceRoleClient();
   const results: Array<{
@@ -47,6 +49,7 @@ export async function POST(req: Request) {
         userId: profile.user_id,
         companyId,
         overrides,
+        consultingProfileId: consultingProfileId ?? undefined,
       });
       results.push({
         company_id: companyId,

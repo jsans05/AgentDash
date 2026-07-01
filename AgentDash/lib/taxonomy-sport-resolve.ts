@@ -32,6 +32,9 @@ const SPORT_ALIAS_TO_CANONICAL: Record<string, string> = {
   "lifestyle / broadcast / chef / personality": LIFESTYLE_CANONICAL,
   cycling: "Cycling",
   diving: "Diving",
+  surf: "Surf",
+  "surf - freediving": "Surf",
+  "surf - wake surf": "Surf",
   kitesurfing: "Kitesurfing",
   softball: "Softball",
   "lifestyle - breakdancing": "Lifestyle - Breakdancing",
@@ -46,6 +49,28 @@ const SPORT_ALIAS_TO_CANONICAL: Record<string, string> = {
 };
 
 const PARTIAL_MATCH_EXCLUDED_ALIASES = new Set(["moto", "supercross", "motocross"]);
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Match alias as a roster segment, not a substring inside another word (e.g. surf ≠ kitesurfing). */
+function sportAliasMatches(haystack: string, alias: string): boolean {
+  const a = alias.replace(/\s*\/\s*/g, "/");
+  if (haystack === a) return true;
+
+  const segmentPattern = (value: string) => {
+    const escaped = escapeRegExp(value).replace(/\//g, "[\\s/\\-]+");
+    return new RegExp(`(?:^|[\\s/\\-])${escaped}(?:$|[\\s/\\-])`);
+  };
+
+  if (segmentPattern(a).test(haystack)) return true;
+
+  if (a.length >= 4 && haystack.length >= 4 && !haystack.includes("motorsports")) {
+    return segmentPattern(haystack).test(a);
+  }
+  return false;
+}
 
 function normalizeSportKey(sport: string): string {
   return sport
@@ -107,11 +132,7 @@ export function resolveSportToCanonical(sport: string | null): string | null {
 
   for (const [alias, canonical] of entries) {
     if (PARTIAL_MATCH_EXCLUDED_ALIASES.has(alias)) continue;
-    const a = alias.replace(/\s*\/\s*/g, "/");
-    if (haystack.includes(a)) return canonical;
-    if (a.length >= 4 && a.includes(haystack) && haystack.length >= 4 && !haystack.includes("motorsports")) {
-      return canonical;
-    }
+    if (sportAliasMatches(haystack, alias)) return canonical;
   }
 
   if (haystack.includes("motorsports")) {

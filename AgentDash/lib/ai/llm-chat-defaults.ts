@@ -34,3 +34,12 @@ export function isAnthropicPromptCacheEnabled(): boolean {
   if (!raw) return true;
   return raw !== "false" && raw !== "0" && raw !== "off";
 }
+
+export const ANTHROPIC_CACHE_DIAGNOSIS_BETA = "cache-diagnosis-2026-04-07" as const;
+
+/** Prompt cache miss diagnostics (Anthropic console + response.diagnostics). Default on. */
+export function isAnthropicCacheDiagnosticsEnabled(): boolean {
+  const raw = process.env.ANTHROPIC_CACHE_DIAGNOSTICS_ENABLED?.trim().toLowerCase();
+  if (!raw) return true;
+  return raw !== "false" && raw !== "0" && raw !== "off";
+}

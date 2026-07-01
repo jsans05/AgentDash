@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
 import { fetchAthleteTargetListRows, type TargetListContact, type TargetListRow } from "@/lib/crm/athlete-target-list";
+import { enrichTargetListRowsWithAgencyActivity } from "@/lib/crm/company-cross-agent-activity-server";
 import { removeAthleteFromTargetListCard } from "@/lib/crm/remove-athlete-from-target-list";
 
 export type { TargetListContact, TargetListRow };
@@ -33,7 +34,8 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 
   try {
     const rows = await fetchAthleteTargetListRows(supabase, profile.user_id, athleteId);
-    return NextResponse.json({ rows });
+    const enriched = await enrichTargetListRowsWithAgencyActivity(rows, profile.user_id);
+    return NextResponse.json({ rows: enriched });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? "Failed to load target list" }, { status: 500 });
   }

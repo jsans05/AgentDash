@@ -1,6 +1,6 @@
 {
   "name": "agentdash",
-  "version": "2.2.6",
+  "version": "3.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -10,7 +10,7 @@
     "vercel-build": "next build && rm -rf ../.next && cp -R .next ../.next",
     "start": "next start",
     "lint": "eslint .",
-    "test": "tsx --test lib/ai/*.test.ts lib/crm/*.test.ts lib/taxonomy.test.ts components/chat/*.test.ts",
+    "test": "tsx --test lib/ai/*.test.ts lib/crm/*.test.ts lib/consulting/*.test.ts lib/taxonomy.test.ts components/chat/*.test.ts",
     "ciq:refresh": "tsx scripts/ciq_monthly_refresh.ts"
   },
   "dependencies": {

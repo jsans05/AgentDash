@@ -68,16 +68,19 @@ export function Nav() {
   const navLinks = [
     { href: "/roster", label: "Roster" },
     ...(showInsightsLink ? [{ href: "/insights", label: "Insights" }] : []),
-    { href: "/contracts", label: "Contracts" },
+    ...(showInsightsLink ? [{ href: "/market-intel", label: "Market Intel" }] : []),
+    { href: "/consulting", label: "Consulting" },
+    { href: "/ai", label: "Mystery Machine" },
+    { href: "/master-target-list", label: "Master Target List" },
     { href: "/crm", label: "Pipeline" },
     { href: "/crm/drafts", label: "Drafts" },
+    { href: "/contracts", label: "Contracts" },
     { href: "/email-templates", label: "Email Templates" },
-    { href: "/crm/companies", label: "CRM Pipeline" },
-    { href: "/ai", label: "Mystery Machine" },
   ];
 
   const adminLinks = [
     { href: "/admin/users", label: "Users" },
+    { href: "/admin/consulting", label: "Consulting" },
     { href: "/admin/feedback", label: "Feedback" },
     { href: "/admin/import", label: "Import" },
     { href: "/admin/taxonomy", label: "Taxonomy" },
@@ -86,7 +89,10 @@ export function Nav() {
   const isActive = (href: string) => {
     if (href === "/crm") return pathname === "/crm" || pathname.startsWith("/crm/contacts");
     if (href === "/insights") return pathname === "/insights";
+    if (href === "/market-intel") return pathname === "/market-intel";
+    if (href === "/consulting") return pathname === "/consulting" || pathname.startsWith("/consulting/");
     if (href === "/admin/users") return pathname === "/admin/users";
+    if (href === "/admin/consulting") return pathname === "/admin/consulting";
     if (href === "/admin/feedback") return pathname === "/admin/feedback";
     if (href === "/admin/import") return pathname === "/admin/import";
     if (href === "/admin/taxonomy") return pathname === "/admin/taxonomy";

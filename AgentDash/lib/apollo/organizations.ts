@@ -7,7 +7,9 @@ import type {
 } from "@/lib/apollo/org-search-types";
 import {
   domainFromWebsite,
+  emptyApolloEnrichedOrganization,
   mapEnrichedOrganization,
+  mapHeadcountTrendsFromOrg,
   mapRawOrganization,
   normalizeDomainForCompare,
 } from "@/lib/apollo/org-search-utils";
@@ -102,23 +104,36 @@ export async function enrichOrganizationByDomainFull(domain: string): Promise<Ap
   });
   const org = data.organization;
   if (!org) {
-    return {
-      apollo_organization_id: null,
-      name: null,
-      website: null,
-      industry: null,
-      description: null,
-      primary_domain: clean || null,
-      hq_phone: null,
-      estimated_num_employees: null,
-      annual_revenue: null,
-      city: null,
-      state: null,
-      country: null,
-      keyword_tags: [],
-    };
+    return emptyApolloEnrichedOrganization({ primary_domain: clean || null });
   }
   return mapEnrichedOrganization(org);
+}
+
+type OrgByIdResponse = {
+  organization?: Record<string, unknown>;
+};
+
+export async function getOrganizationById(
+  apolloOrgId: string
+): Promise<Pick<
+  ApolloEnrichedOrganization,
+  | "headcount_six_month_growth"
+  | "headcount_twelve_month_growth"
+  | "headcount_twenty_four_month_growth"
+  | "departmental_head_count"
+  | "estimated_num_employees"
+>> {
+  const id = String(apolloOrgId ?? "").trim();
+  if (!id) {
+    return mapHeadcountTrendsFromOrg({});
+  }
+
+  const data = await fetchApollo<OrgByIdResponse>(`/organizations/${encodeURIComponent(id)}`, {
+    method: "GET",
+  });
+  const org = data.organization;
+  if (!org) return mapHeadcountTrendsFromOrg({});
+  return mapHeadcountTrendsFromOrg(org);
 }
 
 export async function enrichOrganizationByDomain(domain: string): Promise<{

@@ -29,7 +29,15 @@ export async function POST(
   const searchMode: ApolloContactSearchMode =
     body.search_mode === "all_verified" ? "all_verified" : "partnership";
 
+  const consultingProfileId =
+    body.consulting_profile_id != null ? String(body.consulting_profile_id).trim() || null : null;
+
   const supabaseAdmin = await createServiceRoleClient();
+
+  if (consultingProfileId) {
+    const { requireConsultingProfileAccess } = await import("@/lib/consulting/access");
+    await requireConsultingProfileAccess(supabaseAdmin, profile, consultingProfileId);
+  }
 
   try {
     const result = await findContactsForCompany(supabaseAdmin, {
@@ -37,6 +45,7 @@ export async function POST(
       companyId,
       overrides,
       searchMode,
+      consultingProfileId,
     });
     return NextResponse.json(result);
   } catch (e) {

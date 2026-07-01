@@ -46,6 +46,7 @@ type FindContactsResult = {
 type ApolloFindContactsInlineProps = {
   companyId: string;
   companyName?: string;
+  consultingProfileId?: string;
   disabled?: boolean;
   searchOverrides?: ApolloContactSearchOverrides;
   onRefineSearchClick?: () => void;
@@ -56,6 +57,7 @@ type ApolloFindContactsInlineProps = {
 export function ApolloFindContactsInline({
   companyId,
   companyName,
+  consultingProfileId,
   disabled,
   searchOverrides,
   onRefineSearchClick,
@@ -90,6 +92,9 @@ export function ApolloFindContactsInline({
         page: pageNum,
         ...contactSearchOverridesToRequestBody(searchOverrides),
       };
+      if (consultingProfileId) {
+        body.consulting_profile_id = consultingProfileId;
+      }
       const res = await fetch(`/api/apollo/companies/${companyId}/find-contacts`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
