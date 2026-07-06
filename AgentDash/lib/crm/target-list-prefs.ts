@@ -7,6 +7,7 @@ export const TARGET_LIST_REMOVE_COMPANY_DISMISS_KEY = `${PREFIX}removeCompanyCon
 export const TARGET_LIST_REVEAL_CONTACT_DISMISS_KEY = `${PREFIX}revealContactConfirmDismissed`;
 export const TARGET_LIST_DELETE_CONTACT_DISMISS_KEY = `${PREFIX}deleteContactConfirmDismissed`;
 export const TARGET_LIST_DELETE_CONTACTS_BULK_DISMISS_KEY = `${PREFIX}deleteContactsBulkConfirmDismissed`;
+export const TARGET_LIST_REMOVE_UNREVEALED_ALL_DISMISS_KEY = `${PREFIX}removeUnrevealedAllConfirmDismissed`;
 export const MARKET_INTEL_ENRICH_DISMISS_KEY = `${PREFIX}marketIntelEnrichConfirmDismissed`;
 export const TARGET_LIST_INVESTIGATE_FIRMOGRAPHICS_DISMISS_KEY = `${PREFIX}investigateFirmographicsConfirmDismissed`;
 

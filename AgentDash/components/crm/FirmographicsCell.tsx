@@ -6,20 +6,50 @@ import {
   hasCompanyFirmographics,
 } from "@/lib/crm/company-firmographics";
 
-function GrowthLine({ label, value }: { label: string; value: number | null }) {
+const MONEY_CLASS = "text-[#4F9E63]";
+const GROWTH_UP_CLASS = "text-[#4F9E63]";
+const GROWTH_DOWN_CLASS = "text-[#E57373]";
+const LABEL_CLASS = "text-[#8E877A]";
+
+function ensureDollarPrefix(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return trimmed;
+  return trimmed.startsWith("$") ? trimmed : `$${trimmed}`;
+}
+
+function growthColorClass(value: number | null): string {
+  return (value ?? 0) >= 0 ? GROWTH_UP_CLASS : GROWTH_DOWN_CLASS;
+}
+
+function GrowthInline({ label, value }: { label: string; value: number | null }) {
   const text = formatGrowthPercent(value);
   if (!text) return null;
-  const positive = (value ?? 0) >= 0;
   return (
-    <span
-      className={`inline-flex rounded-full border px-1.5 py-0.5 text-[10px] ${
-        positive
-          ? "border-[#2E7040]/50 bg-[#1B2F21] text-[#DBEEE0]"
-          : "border-[#8C3A3A]/50 bg-[#3A1E1E] text-[#F8D0D0]"
-      }`}
-    >
-      {text} {label}
+    <span className={growthColorClass(value)}>
+      <span className={LABEL_CLASS}>{label}</span>
+      {text}
     </span>
+  );
+}
+
+function FirmographicsGrowthRow({ firmographics }: { firmographics: CompanyFirmographics }) {
+  const items = [
+    { label: "6mo", value: firmographics.headcount_six_month_growth },
+    { label: "12", value: firmographics.headcount_twelve_month_growth },
+    { label: "24", value: firmographics.headcount_twenty_four_month_growth },
+  ].filter((item) => formatGrowthPercent(item.value));
+
+  if (items.length === 0) return null;
+
+  return (
+    <p className="whitespace-nowrap text-[10px] leading-none tabular-nums">
+      {items.map((item, index) => (
+        <span key={item.label}>
+          {index > 0 ? <span className="text-[#8E877A]">,</span> : null}
+          <GrowthInline label={item.label} value={item.value} />
+        </span>
+      ))}
+    </p>
   );
 }
 
@@ -32,29 +62,31 @@ export function FirmographicsCell({ firmographics }: { firmographics: CompanyFir
   const funding = formatFundingDisplay(firmographics);
 
   return (
-    <div className="min-w-[10rem] space-y-1 text-xs text-[#ECE7DF]">
+    <div className="min-w-0 space-y-0.5 text-xs text-[#ECE7DF]">
       {revenue && (
-        <p>
-          <span className="text-[#8E877A]">Revenue:</span> {revenue}
+        <p className="leading-snug">
+          <span className={LABEL_CLASS}>Revenue:</span>{" "}
+          <span className={MONEY_CLASS}>{ensureDollarPrefix(revenue)}</span>
         </p>
       )}
       {(funding || firmographics.latest_funding_stage) && (
-        <p>
-          <span className="text-[#8E877A]">Funding:</span>{" "}
-          {[funding, firmographics.latest_funding_stage].filter(Boolean).join(" · ")}
+        <p className="leading-snug">
+          <span className={LABEL_CLASS}>Funding:</span>{" "}
+          {funding ? <span className={MONEY_CLASS}>{ensureDollarPrefix(funding)}</span> : null}
+          {funding && firmographics.latest_funding_stage ? (
+            <span className="text-[#ECE7DF]"> · {firmographics.latest_funding_stage}</span>
+          ) : firmographics.latest_funding_stage ? (
+            <span className={MONEY_CLASS}>{firmographics.latest_funding_stage}</span>
+          ) : null}
         </p>
       )}
       {firmographics.estimated_num_employees != null && (
-        <p>
-          <span className="text-[#8E877A]">Employees:</span>{" "}
+        <p className="leading-snug">
+          <span className={LABEL_CLASS}>Employees:</span>{" "}
           {firmographics.estimated_num_employees.toLocaleString()}
         </p>
       )}
-      <div className="flex flex-wrap gap-1">
-        <GrowthLine label="6mo" value={firmographics.headcount_six_month_growth} />
-        <GrowthLine label="12mo" value={firmographics.headcount_twelve_month_growth} />
-        <GrowthLine label="24mo" value={firmographics.headcount_twenty_four_month_growth} />
-      </div>
+      <FirmographicsGrowthRow firmographics={firmographics} />
     </div>
   );
 }

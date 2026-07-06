@@ -52,6 +52,27 @@ export function ChatFlowModeSelector({
     );
   }
 
+  if (uiContext === "consulting_target_list") {
+    return (
+      <span
+        className={CONTEXT_BADGE_CLASS}
+        title={athleteName ? `${athleteName} consulting target list` : "Consulting target list"}
+      >
+        {athleteName
+          ? `Working on ${athleteName} consulting target list`
+          : "Working on consulting target list"}
+      </span>
+    );
+  }
+
+  if (uiContext === "master_target_list") {
+    return (
+      <span className={CONTEXT_BADGE_CLASS} title="Master target list">
+        Working on master target list
+      </span>
+    );
+  }
+
   if (readOnlyEmail) {
     return (
       <span className={cn(EMAIL_CHIP_CLASS)} title="Draft outreach emails">

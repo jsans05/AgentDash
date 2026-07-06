@@ -9,9 +9,11 @@ export default async function ConsultingTargetListPage({ params, searchParams }:
   const { profileId } = await params;
   const { name } = await searchParams;
   return (
-    <ConsultingTargetList
-      profileId={profileId}
-      profileName={name?.trim() || "Consulting profile"}
-    />
+    <div className="flex min-h-[calc(100vh-5rem)] flex-col">
+      <ConsultingTargetList
+        profileId={profileId}
+        profileName={name?.trim() || "Consulting profile"}
+      />
+    </div>
   );
 }

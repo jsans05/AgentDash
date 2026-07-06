@@ -2,7 +2,12 @@ import type { FlowMode } from "@/lib/ai/flow-mode";
 
 export type ChatFlowMode = FlowMode;
 
-export type ChatUiContext = "target_list" | "consulting_target_list" | "crm_pipeline" | "global";
+export type ChatUiContext =
+  | "target_list"
+  | "consulting_target_list"
+  | "master_target_list"
+  | "crm_pipeline"
+  | "global";
 
 /** Server flow_mode from embedded context or explicit URL param only — not user-toggled chips. */
 export function deriveRoutingFlowMode(
@@ -10,7 +15,13 @@ export function deriveRoutingFlowMode(
   flowModeFromUrl?: ChatFlowMode
 ): ChatFlowMode | undefined {
   if (uiContext === "crm_pipeline") return "email";
-  if (uiContext === "target_list" || uiContext === "consulting_target_list") return undefined;
+  if (
+    uiContext === "target_list" ||
+    uiContext === "consulting_target_list" ||
+    uiContext === "master_target_list"
+  ) {
+    return undefined;
+  }
   if (flowModeFromUrl && flowModeFromUrl !== "auto") return flowModeFromUrl;
   return undefined;
 }

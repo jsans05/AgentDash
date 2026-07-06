@@ -10,6 +10,7 @@ import { isApolloEnabled } from "@/lib/apollo/config";
 import { persistApolloMetadataForCompany } from "@/lib/apollo/persist-company";
 import { resolveCompanyWebsiteForTargetList } from "@/lib/crm/resolve-company-website-for-target-list";
 import { apolloLastNameForStorage } from "@/lib/crm/contact-display-name";
+import { contactsLikelySamePerson } from "@/lib/crm/target-list-duplicate-contacts";
 
 export type ConsultingTargetListImportRow = {
   company_name: string;
@@ -23,6 +24,7 @@ export type ConsultingTargetListImportRow = {
   last_name?: string | null;
   role?: string | null;
   email?: string | null;
+  phone?: string | null;
   linkedin_url?: string | null;
   annual_revenue?: number | null;
   annual_revenue_printed?: string | null;
@@ -48,6 +50,8 @@ export type ConsultingTargetListColumnMap = {
   contactCol: string | null;
   titleCol: string | null;
   emailCol: string | null;
+  phoneCol: string | null;
+  linkedinCol: string | null;
 };
 
 export type ConsultingTargetListParseResult = {
@@ -84,7 +88,7 @@ export function parseEmailAndLinkedin(value: unknown): {
   email: string | null;
   linkedin_url: string | null;
 } {
-  const s = value == null ? "" : String(value).trim();
+  const s = coerceSpreadsheetCell(value);
   if (!s) return { email: null, linkedin_url: null };
 
   const emailRegex = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
@@ -105,8 +109,39 @@ export function parseEmailAndLinkedin(value: unknown): {
 }
 
 function cellString(value: unknown): string {
+  return coerceSpreadsheetCell(value);
+}
+
+/** Normalize Excel cell values (numbers, dates, hyperlink objects) to strings. */
+export function coerceSpreadsheetCell(value: unknown): string {
   if (value == null) return "";
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Number.isInteger(value) ? String(value) : String(value);
+  }
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (typeof record.text === "string" && record.text.trim()) {
+      return record.text.trim();
+    }
+    if (typeof record.hyperlink === "string" && record.hyperlink.trim()) {
+      return record.hyperlink.trim();
+    }
+    if (typeof record.result === "string" && record.result.trim()) {
+      return record.result.trim();
+    }
+  }
   return String(value).trim();
+}
+
+/** Excel often prefixes phone cells with a single quote (e.g. '+1 555-0100). */
+export function normalizeImportPhone(value: unknown): string | null {
+  const raw = coerceSpreadsheetCell(value);
+  if (!raw) return null;
+  const trimmed = raw.replace(/^'+/, "").trim();
+  return trimmed || null;
 }
 
 function parseOptionalMatchScore(value: unknown): number | null {
@@ -139,17 +174,19 @@ export function buildConsultingTargetListColumnMap(
 
   return {
     companyCol,
-    industryCategoryCol: getCol("Industry Category", "Category"),
-    websiteCol: getCol("Website", "Company Website"),
+    industryCategoryCol: getCol("Category", "Industry Category"),
+    websiteCol: getCol("Company Website", "Website"),
     matchScoreCol: getCol("Match Score"),
     companyDescriptionCol: getCol("Company Description", "Description"),
     personalNotesCol: getCol("Personal Notes", "Notes"),
-    hqPhoneCol: getCol("HQ Phone", "HQ Number", "Company Phone", "Number"),
+    hqPhoneCol: getCol("HQ Number", "Company Phone", "HQ Phone", "HQ"),
     firstCol: getCol("First"),
     lastCol: getCol("Last"),
-    contactCol: getCol("Contact", "Contact Name"),
-    titleCol: getCol("Title", "Role"),
-    emailCol: getCol("Email", "Email/ Linkedin", "Email/Linkedin", "email/linkedin"),
+    contactCol: getCol("Contact Name", "Contact"),
+    titleCol: getCol("Role", "Title"),
+    emailCol: getCol("Email", "E-mail", "Email Address", "Email/ Linkedin", "Email/Linkedin", "email/linkedin"),
+    phoneCol: getCol("Number", "Phone", "Contact Phone", "Contact Number"),
+    linkedinCol: getCol("LinkedIn", "Linkedin", "LinkedIn URL"),
   };
 }
 
@@ -205,7 +242,16 @@ export function mapSpreadsheetObjectToImportRow(
 
   const { first_name, last_name, hasContactIntent } = resolveContactNamesForImport(row, cols);
   const emailRaw = cols.emailCol ? row[cols.emailCol] : null;
-  const { email, linkedin_url } = parseEmailAndLinkedin(emailRaw);
+  const { email: parsedEmail, linkedin_url: parsedLinkedin } = parseEmailAndLinkedin(emailRaw);
+  const linkedinRaw = cols.linkedinCol ? coerceSpreadsheetCell(row[cols.linkedinCol]) : "";
+  const linkedin_url =
+    linkedinRaw && /linkedin\.com/i.test(linkedinRaw)
+      ? linkedinRaw.startsWith("http")
+        ? linkedinRaw
+        : `https://${linkedinRaw}`
+      : parsedLinkedin;
+  const email = parsedEmail ?? (emailRaw != null ? coerceSpreadsheetCell(emailRaw) || null : null);
+  const phone = cols.phoneCol ? normalizeImportPhone(row[cols.phoneCol]) : null;
 
   let resolvedFirst = first_name;
   let resolvedLast = last_name;
@@ -228,11 +274,12 @@ export function mapSpreadsheetObjectToImportRow(
       personal_notes: cols.personalNotesCol
         ? cellString(row[cols.personalNotesCol]) || null
         : null,
-      hq_phone: cols.hqPhoneCol ? cellString(row[cols.hqPhoneCol]) || null : null,
+      hq_phone: cols.hqPhoneCol ? normalizeImportPhone(row[cols.hqPhoneCol]) : null,
       first_name: resolvedFirst,
       last_name: resolvedLast,
       role: cols.titleCol ? cellString(row[cols.titleCol]) || null : null,
-      email,
+      email: email && email.includes("@") ? email.toLowerCase() : email,
+      phone,
       linkedin_url,
     },
   };
@@ -286,17 +333,28 @@ async function upsertConsultingContact(
     row: ConsultingTargetListImportRow;
   }
 ): Promise<"inserted" | "updated" | "skipped"> {
-  const first_name = String(params.row.first_name ?? "").trim();
-  if (!first_name) return "skipped";
-
-  const last_name = apolloLastNameForStorage(String(params.row.last_name ?? ""));
   const email = params.row.email?.trim().toLowerCase() || null;
   const role = params.row.role ?? null;
+  const phone = params.row.phone?.trim() || null;
   const linkedin_url = params.row.linkedin_url ?? null;
+
+  let first_name = String(params.row.first_name ?? "").trim();
+  let last_name = apolloLastNameForStorage(String(params.row.last_name ?? ""));
+
+  if (!first_name && !email) return "skipped";
+
+  if (!first_name && email) {
+    const local = email.split("@")[0] ?? "";
+    const split = splitName(local.replace(/[._+-]/g, " "));
+    first_name = split.first_name !== "Unknown" ? split.first_name : "Contact";
+    last_name = apolloLastNameForStorage(split.last_name || last_name || ".");
+  }
 
   let existingQuery = supabaseAdmin
     .from("crm_contacts")
-    .select("contact_id, email, linkedin_url, role, first_name, last_name")
+    .select(
+      "contact_id, email, phone, linkedin_url, role, first_name, last_name, apollo_person_id, apollo_reveal_status"
+    )
     .eq("company_id", params.companyId)
     .eq("consulting_profile_id", params.consultingProfileId)
     .eq("archived", false);
@@ -310,10 +368,18 @@ async function upsertConsultingContact(
       (c) => c.email && String(c.email).trim().toLowerCase() === email
     );
   }
-  if (!existing) {
+  if (!existing && first_name) {
     const key = normalizeContactKey(first_name, last_name);
     existing = (existingRows ?? []).find(
       (c) => normalizeContactKey(String(c.first_name ?? ""), String(c.last_name ?? "")) === key
+    );
+  }
+  if (!existing && first_name) {
+    existing = (existingRows ?? []).find((c) =>
+      contactsLikelySamePerson(
+        { first_name, last_name },
+        { first_name: String(c.first_name ?? ""), last_name: String(c.last_name ?? "") }
+      )
     );
   }
 
@@ -325,26 +391,38 @@ async function upsertConsultingContact(
     last_name,
     role,
     email,
+    phone,
     linkedin_url: linkedin_url ?? existing?.linkedin_url ?? null,
     archived: false,
   };
 
   if (existing?.contact_id) {
+    const updatePatch: Record<string, unknown> = {
+      first_name: payload.first_name,
+      last_name: payload.last_name,
+      role: payload.role ?? existing.role,
+      email: payload.email ?? existing.email,
+      phone: payload.phone ?? existing.phone,
+      linkedin_url: payload.linkedin_url,
+    };
+    if (payload.email) {
+      updatePatch.apollo_reveal_status = "revealed";
+    }
+
     const { error } = await supabaseAdmin
       .from("crm_contacts")
-      .update({
-        first_name: payload.first_name,
-        last_name: payload.last_name,
-        role: payload.role ?? existing.role,
-        email: payload.email ?? existing.email,
-        linkedin_url: payload.linkedin_url,
-      })
+      .update(updatePatch)
       .eq("contact_id", existing.contact_id);
     if (error) throw new Error(error.message);
     return "updated";
   }
 
-  const { error: insertErr } = await supabaseAdmin.from("crm_contacts").insert(payload);
+  const insertPatch: Record<string, unknown> = { ...payload };
+  if (payload.email) {
+    insertPatch.apollo_reveal_status = null;
+  }
+
+  const { error: insertErr } = await supabaseAdmin.from("crm_contacts").insert(insertPatch);
   if (insertErr) throw new Error(insertErr.message);
   return "inserted";
 }
@@ -432,7 +510,7 @@ export async function upsertConsultingTargetListRows(
       if (listErr) throw new Error(listErr.message);
       summary.companies_upserted++;
 
-      if (row.first_name?.trim()) {
+      if (row.first_name?.trim() || row.email?.trim()) {
         const contactResult = await upsertConsultingContact(supabaseAdmin, {
           consultingProfileId: params.consultingProfileId,
           userId: params.userId,
@@ -475,7 +553,13 @@ export function normalizeJsonImportRow(raw: Record<string, unknown>): Consulting
   }
 
   const emailField = raw.email ?? raw.email_linkedin;
-  const { email, linkedin_url } = parseEmailAndLinkedin(emailField);
+  const { email, linkedin_url: parsedLinkedin } = parseEmailAndLinkedin(emailField);
+  const linkedinRaw =
+    raw.linkedin_url != null
+      ? String(raw.linkedin_url).trim()
+      : raw.linkedin != null
+        ? String(raw.linkedin).trim()
+        : "";
 
   return {
     company_name,
@@ -490,7 +574,14 @@ export function normalizeJsonImportRow(raw: Record<string, unknown>): Consulting
     company_description:
       raw.company_description != null ? String(raw.company_description) : null,
     personal_notes: raw.personal_notes != null ? String(raw.personal_notes) : null,
-    hq_phone: raw.hq_phone != null ? String(raw.hq_phone).trim() || null : null,
+    hq_phone:
+      raw.hq_phone != null
+        ? String(raw.hq_phone).trim() || null
+        : raw.company_phone != null
+          ? String(raw.company_phone).trim() || null
+          : raw.hq_number != null
+            ? String(raw.hq_number).trim() || null
+            : null,
     first_name,
     last_name,
     role:
@@ -499,10 +590,17 @@ export function normalizeJsonImportRow(raw: Record<string, unknown>): Consulting
         : raw.title != null
           ? String(raw.title).trim() || null
           : null,
-    email: email ?? (raw.email != null ? String(raw.email).trim() || null : null),
+    email: email ?? (raw.email != null ? String(raw.email).trim().toLowerCase() || null : null),
+    phone:
+      raw.phone != null
+        ? String(raw.phone).trim() || null
+        : raw.number != null
+          ? String(raw.number).trim() || null
+          : null,
     linkedin_url:
-      linkedin_url ??
-      (raw.linkedin_url != null ? String(raw.linkedin_url).trim() || null : null),
+      linkedinRaw ||
+      parsedLinkedin ||
+      null,
     ...mapCompanyFirmographics(raw),
   };
 }

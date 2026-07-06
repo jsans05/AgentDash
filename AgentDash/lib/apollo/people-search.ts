@@ -3,8 +3,7 @@ import { apolloMaxPeoplePerRequest } from "@/lib/apollo/config";
 import {
   APOLLO_DEFAULT_CONTACT_EMAIL_STATUS,
   APOLLO_DEFAULT_INCLUDE_SIMILAR_TITLES,
-  APOLLO_DEFAULT_PERSON_SENIORITIES,
-  APOLLO_DEFAULT_PERSON_TITLES,
+  APOLLO_DEFAULT_PERSON_DEPARTMENTS,
   type ApolloContactSearchMode,
   type ApolloPeopleSearchOverrides,
 } from "@/lib/apollo/search-defaults";
@@ -84,9 +83,17 @@ export async function searchPeopleAtOrganization(
   };
 
   if (titleScopeFromSearchMode(searchMode) === "partnership") {
-    query.person_titles = [...APOLLO_DEFAULT_PERSON_TITLES];
-    query.include_similar_titles = APOLLO_DEFAULT_INCLUDE_SIMILAR_TITLES;
-    query.person_seniorities = [...APOLLO_DEFAULT_PERSON_SENIORITIES];
+    const hasTitleOverride = Boolean(overrides?.person_titles?.length);
+    const hasDeptOverride = Boolean(overrides?.person_departments?.length);
+    if (hasDeptOverride) {
+      query.person_department_or_subdepartments = overrides!.person_departments;
+    } else if (!hasTitleOverride) {
+      query.person_department_or_subdepartments = [...APOLLO_DEFAULT_PERSON_DEPARTMENTS];
+    }
+    if (hasTitleOverride) {
+      query.person_titles = overrides!.person_titles;
+      query.include_similar_titles = APOLLO_DEFAULT_INCLUDE_SIMILAR_TITLES;
+    }
   }
 
   if (org.domain) {
@@ -135,7 +142,7 @@ export async function searchPeopleAtOrganization(
   return out;
 }
 
-/** Partnership / marketing titles with verified email (default Find contacts). */
+/** Target departments with verified email (default Find contacts). */
 export async function searchPartnershipContacts(
   org: ResolvedOrganization,
   overrides?: ApolloPeopleSearchOverrides

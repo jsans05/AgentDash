@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { CompanyRecentNewsButton } from "@/components/crm/CompanyRecentNewsPanel";
 import { FirmographicsCell } from "@/components/crm/FirmographicsCell";
 import { TargetListActionDialog } from "@/components/crm/TargetListActionDialog";
 import {
@@ -102,13 +103,19 @@ export function FirmographicsInvestigateCell({
 
       <button
         type="button"
-        className="rounded border border-[#2E7040]/50 bg-[#1B2F21] px-1.5 py-0.5 text-[10px] font-medium text-[#DBEEE0] hover:bg-[#23452E] disabled:cursor-not-allowed disabled:opacity-50"
+        className="block w-full rounded border border-[#2E7040]/50 bg-[#1B2F21] px-1.5 py-0.5 text-[10px] font-medium text-[#DBEEE0] hover:bg-[#23452E] disabled:cursor-not-allowed disabled:opacity-50"
         disabled={disabled || busy}
         title="Fetch firmographics from Apollo"
         onClick={request}
       >
         {busy ? "Investigating…" : "Investigate"}
       </button>
+
+      <CompanyRecentNewsButton
+        companyId={companyId}
+        companyName={companyName}
+        disabled={disabled}
+      />
 
       {note ? (
         <span className="block text-[10px] leading-snug text-[#F1A2A2]">{note}</span>

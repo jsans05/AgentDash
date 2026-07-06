@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
-import { requireAdminOrSales } from "@/lib/auth";
+import { requireMarketIntelAccess } from "@/lib/auth";
 import { enrichBrand } from "@/lib/market-intel/enrich-brand";
 import { aggregateBrands, getMarketIntelData } from "@/lib/market-intel/queries";
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 
 export async function POST(req: Request) {
-  const profile = await requireAdminOrSales();
+  const profile = await requireMarketIntelAccess();
   const body = await req.json().catch(() => ({}));
   const brandKeys = Array.isArray(body.brand_keys)
     ? body.brand_keys.map((k: unknown) => String(k).trim()).filter(Boolean)

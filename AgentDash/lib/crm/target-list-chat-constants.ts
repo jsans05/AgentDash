@@ -25,6 +25,11 @@ export const CONSULTING_TARGET_LIST_MUTATING_TOOLS = new Set([
   "apolloExpandSimilarForConsulting",
 ]);
 
+/** Tools that mutate master target-list data — refresh spreadsheet when these run. */
+export const MASTER_TARGET_LIST_MUTATING_TOOLS = new Set([
+  ...TARGET_LIST_MUTATING_TOOLS,
+]);
+
 export function clampTargetListPanelWidth(px: number): number {
   if (typeof window === "undefined") return px;
   const maxFromViewport = Math.floor(window.innerWidth * 0.95);

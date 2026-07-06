@@ -24,6 +24,20 @@ export async function isConsultingProfileMember(
   return Boolean(data);
 }
 
+export async function isAnyConsultingProfileMember(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from("consulting_profile_members")
+    .select("user_id")
+    .eq("user_id", userId)
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return Boolean(data);
+}
+
 export async function requireConsultingProfileAccess(
   supabase: SupabaseClient,
   profile: Profile,

@@ -1,10 +1,10 @@
 import { createServerClient } from "@/lib/supabase/server";
-import { requireAdminOrSales } from "@/lib/auth";
+import { requireMarketIntelAccess } from "@/lib/auth";
 import { getMarketIntelData, brandEnrichmentsByKey } from "@/lib/market-intel/queries";
 import { MarketIntelClient } from "@/components/market-intel/MarketIntelClient";
 
 export default async function MarketIntelPage() {
-  await requireAdminOrSales();
+  await requireMarketIntelAccess();
   const supabase = await createServerClient();
   const data = await getMarketIntelData(supabase);
   const enrichmentByKey = brandEnrichmentsByKey(data.brand_enrichments);

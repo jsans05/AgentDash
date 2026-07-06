@@ -1073,7 +1073,6 @@ function CompanySlideOver({
         onStreamEvent?: (event: ChatSseEvent) => void;
         interactionResponse?: InteractionResponsePayload;
         flowMode?: "outbound" | "inbound" | "email" | "auto";
-        chatModel?: "sonnet" | "opus";
       }
     ): Promise<PostAiChatResult> => {
       const contacts: string[] = [];
@@ -1230,7 +1229,6 @@ function CompanySlideOver({
           mode: options?.mode ?? "default",
           flow_mode: options?.flowMode ?? "email",
           ui_context: "crm_pipeline",
-          ...(options?.chatModel ? { chat_model: options.chatModel } : {}),
         },
         {
           signal: options?.signal,

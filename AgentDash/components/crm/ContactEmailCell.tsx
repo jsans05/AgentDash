@@ -23,6 +23,28 @@ export function ContactEmailCell({
 }: Props) {
   const isApollo = apolloRevealStatus === "pending" || apolloRevealStatus === "revealed";
 
+  if (apolloRevealStatus === "pending" && email) {
+    return (
+      <div className={compact ? "flex flex-col gap-1" : "flex flex-wrap items-center gap-1.5"}>
+        <a
+          href={`mailto:${email}`}
+          className="text-[#CEE4D4] hover:underline break-all"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {email}
+        </a>
+        <ApolloContactActions
+          contactId={contactId}
+          apolloRevealStatus={apolloRevealStatus}
+          onRevealed={onRevealed}
+          onDeleted={onDeleted}
+          hideDelete={hideDelete}
+          compact
+        />
+      </div>
+    );
+  }
+
   if (apolloRevealStatus === "pending") {
     return (
       <ApolloContactActions

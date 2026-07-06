@@ -20,16 +20,39 @@ export async function findContactsForCompany(
     throw new Error("Apollo API is not configured");
   }
 
-  const searchMode: ApolloContactSearchMode = params.searchMode ?? "partnership";
+  const requestedSearchMode: ApolloContactSearchMode = params.searchMode ?? "partnership";
   const org = await resolveOrganizationForCompany(supabaseAdmin, params.companyId);
-  const rawPeople = await searchPeopleAtOrganization(org, { searchMode, overrides: params.overrides });
-  const people = filterPeopleForResolvedOrg(rawPeople, org);
+
+  let searchMode = requestedSearchMode;
+  let partnershipFallbackUsed = false;
+  let rawPeople = await searchPeopleAtOrganization(org, {
+    searchMode: requestedSearchMode,
+    overrides: params.overrides,
+  });
+  let people = filterPeopleForResolvedOrg(rawPeople, org);
 
   await logApolloUsage(supabaseAdmin, {
     user_id: params.userId,
     endpoint: "api_search",
     company_id: params.companyId,
   });
+
+  if (people.length === 0 && requestedSearchMode === "partnership") {
+    const fallbackRaw = await searchPeopleAtOrganization(org, {
+      searchMode: "all_verified",
+      overrides: params.overrides,
+    });
+    const fallbackPeople = filterPeopleForResolvedOrg(fallbackRaw, org);
+    await logApolloUsage(supabaseAdmin, {
+      user_id: params.userId,
+      endpoint: "api_search",
+      company_id: params.companyId,
+    });
+    partnershipFallbackUsed = true;
+    searchMode = "all_verified";
+    rawPeople = fallbackRaw;
+    people = fallbackPeople;
+  }
 
   const sync = await upsertApolloPendingContacts(supabaseAdmin, {
     userId: params.userId,
@@ -68,6 +91,8 @@ export async function findContactsForCompany(
   return {
     organization: org,
     search_mode: searchMode,
+    requested_search_mode: requestedSearchMode,
+    partnership_fallback_used: partnershipFallbackUsed,
     found: people.length,
     filtered_out: rawPeople.length - people.length,
     no_matches: people.length === 0,

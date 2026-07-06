@@ -211,6 +211,22 @@ If SESSION CONTEXT lists selected entry_id values or a focused row, prefer those
 `.trim();
 }
 
+export function getMasterTargetListSessionAddon(): string {
+  return `
+
+━━━ MASTER TARGET LIST SESSION ━━━
+The user opened Mystery Machine from the agency **Master Target List** page — an aggregated view of companies across all roster athletes' target lists.
+
+You MUST:
+1) Use **getAthleteTargetList** with the correct \`athlete_id\` when you need live rows or pipeline_id for a specific athlete. Rows may list multiple assigned athletes — ask which athlete if ambiguous.
+2) Save outreach with **updateTargetListOutreach** using the resolved \`athlete_id\` and \`pipeline_id\` from SESSION CONTEXT or **getAthleteTargetList**.
+3) Fix categories with **updateTargetListCompanyCategories**; remove athletes from cards with **removeAthleteFromTargetListCards**.
+
+Do **not** use consulting target list tools (getConsultingTargetList, bulkImportCompaniesToConsultingTargetList, etc.) from this view.
+If SESSION CONTEXT lists selected \`pipeline_id\` values, assigned athletes, or a focused row, prefer those when the user says "this company" or "selected companies".
+`.trim();
+}
+
 export function getTargetListOutreachPushAddon(): string {
   return `
 

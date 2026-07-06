@@ -36,7 +36,7 @@ function normalizeAppRole(
 }
 
 export function Nav() {
-  const { profile, user, loading } = useAuth();
+  const { profile, user, isConsultingUser, loading } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
 
@@ -61,6 +61,7 @@ export function Nav() {
   const displayEmail = profile?.email?.trim() || user.email || "—";
   const showAdminLinks = role === "admin";
   const showInsightsLink = role === "admin" || role === "sales";
+  const showMarketIntelLink = showInsightsLink || isConsultingUser;
   const roleBadgeClass = role
     ? roleColors[role] ?? "border border-white/20 bg-white/10 text-[#E6E0D5]"
     : "border border-white/20 bg-white/10 text-[#B9B2A6]";
@@ -68,7 +69,7 @@ export function Nav() {
   const navLinks = [
     { href: "/roster", label: "Roster" },
     ...(showInsightsLink ? [{ href: "/insights", label: "Insights" }] : []),
-    ...(showInsightsLink ? [{ href: "/market-intel", label: "Market Intel" }] : []),
+    ...(showMarketIntelLink ? [{ href: "/market-intel", label: "Market Intel" }] : []),
     { href: "/consulting", label: "Consulting" },
     { href: "/ai", label: "Mystery Machine" },
     { href: "/master-target-list", label: "Master Target List" },

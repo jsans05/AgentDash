@@ -5,33 +5,45 @@ import type { User } from "@supabase/supabase-js";
 import type { Profile } from "@/lib/supabase/types";
 import { supabase } from "@/lib/supabase/client";
 
-async function fetchProfileFromServer(): Promise<Profile | null> {
+async function fetchProfileFromServer(): Promise<{
+  profile: Profile | null;
+  isConsultingUser: boolean;
+}> {
   try {
     const res = await fetch("/api/auth/me", { credentials: "include" });
-    if (res.status === 401) return null;
-    if (!res.ok) return null;
-    const data: { profile?: Profile | null } = await res.json();
-    return data.profile ?? null;
+    if (res.status === 401) return { profile: null, isConsultingUser: false };
+    if (!res.ok) return { profile: null, isConsultingUser: false };
+    const data: {
+      profile?: Profile | null;
+      is_consulting_user?: boolean;
+    } = await res.json();
+    return {
+      profile: data.profile ?? null,
+      isConsultingUser: Boolean(data.is_consulting_user),
+    };
   } catch {
-    return null;
+    return { profile: null, isConsultingUser: false };
   }
 }
 
 type AuthContextType = {
   user: User | null;
   profile: Profile | null;
+  isConsultingUser: boolean;
   loading: boolean;
 };
 
 const AuthContext = createContext<AuthContextType>({
   user: null,
   profile: null,
+  isConsultingUser: false,
   loading: true,
 });
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [isConsultingUser, setIsConsultingUser] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -40,10 +52,12 @@ export function Providers({ children }: { children: React.ReactNode }) {
     } = supabase.auth.onAuthStateChange(async (event, session) => {
       setUser(session?.user ?? null);
       if (session?.user) {
-        const profile = await fetchProfileFromServer();
+        const { profile, isConsultingUser } = await fetchProfileFromServer();
         setProfile((prev) => profile ?? (prev?.user_id === session.user.id ? prev : null));
+        setIsConsultingUser(isConsultingUser);
       } else {
         setProfile(null);
+        setIsConsultingUser(false);
       }
       setLoading(false);
     });
@@ -51,8 +65,9 @@ export function Providers({ children }: { children: React.ReactNode }) {
     supabase.auth.getSession().then(async ({ data: { session } }) => {
       setUser(session?.user ?? null);
       if (session?.user) {
-        const profile = await fetchProfileFromServer();
+        const { profile, isConsultingUser } = await fetchProfileFromServer();
         setProfile((prev) => profile ?? (prev?.user_id === session.user.id ? prev : null));
+        setIsConsultingUser(isConsultingUser);
       }
       setLoading(false);
     });
@@ -61,7 +76,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, profile, loading }}>
+    <AuthContext.Provider value={{ user, profile, isConsultingUser, loading }}>
       {children}
     </AuthContext.Provider>
   );

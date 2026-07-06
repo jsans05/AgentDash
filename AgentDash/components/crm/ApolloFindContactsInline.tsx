@@ -32,6 +32,8 @@ type FindContactsResult = {
   found?: number;
   filtered_out?: number;
   search_mode?: ApolloContactSearchMode;
+  requested_search_mode?: ApolloContactSearchMode;
+  partnership_fallback_used?: boolean;
   no_matches?: boolean;
   hq_phone?: string | null;
   error?: string;
@@ -67,6 +69,8 @@ export function ApolloFindContactsInline({
   const [finding, setFinding] = useState(false);
   const [partnershipNoMatch, setPartnershipNoMatch] = useState(false);
   const [allVerifiedNoMatch, setAllVerifiedNoMatch] = useState(false);
+  const [partnershipFallbackUsed, setPartnershipFallbackUsed] = useState(false);
+  const [activeSearchMode, setActiveSearchMode] = useState<ApolloContactSearchMode>("partnership");
   const [confirmMode, setConfirmMode] = useState<ApolloContactSearchMode | null>(null);
   const [page, setPage] = useState(1);
   const [lastFound, setLastFound] = useState(0);
@@ -83,8 +87,10 @@ export function ApolloFindContactsInline({
     if (searchMode === "partnership") {
       setPartnershipNoMatch(false);
       setAllVerifiedNoMatch(false);
+      setPartnershipFallbackUsed(false);
     } else {
       setAllVerifiedNoMatch(false);
+      setPartnershipFallbackUsed(false);
     }
     try {
       const body: Record<string, unknown> = {
@@ -107,8 +113,11 @@ export function ApolloFindContactsInline({
       }
       onContacts(data.contacts ?? [], { hq_phone: data.hq_phone ?? null });
       const found = data.found ?? 0;
+      const resolvedMode = data.search_mode ?? searchMode;
       setPage(pageNum);
       setLastFound(found);
+      setActiveSearchMode(resolvedMode);
+      setPartnershipFallbackUsed(Boolean(data.partnership_fallback_used));
       const org = data.organization;
       setMatchConfidence(org?.match_confidence ?? null);
       if (org?.match_notes) {
@@ -118,11 +127,14 @@ export function ApolloFindContactsInline({
       } else {
         setMatchNote(null);
       }
-      if (searchMode === "partnership" && found === 0) {
-        setPartnershipNoMatch(true);
-      } else if (searchMode === "all_verified" && found === 0) {
-        setAllVerifiedNoMatch(true);
-      } else if (found > 0) {
+      if (found === 0) {
+        if (data.partnership_fallback_used || searchMode === "all_verified") {
+          setAllVerifiedNoMatch(true);
+          setPartnershipNoMatch(false);
+        } else {
+          setPartnershipNoMatch(true);
+        }
+      } else {
         setPartnershipNoMatch(false);
         setAllVerifiedNoMatch(false);
       }
@@ -202,7 +214,7 @@ export function ApolloFindContactsInline({
             Refine search
           </button>
         ) : null}
-        {partnershipNoMatch && !finding ? (
+        {partnershipNoMatch && !partnershipFallbackUsed && !finding ? (
           <button
             type="button"
             className="rounded border border-[#6B5A2E]/60 bg-[#2A2618] px-1.5 py-0.5 text-[10px] font-medium text-[#E8D9A8] hover:bg-[#35301F] disabled:opacity-50"
@@ -219,7 +231,7 @@ export function ApolloFindContactsInline({
             className="rounded border border-[#2E7040]/40 bg-[#173522] px-1.5 py-0.5 text-[10px] font-medium text-[#DBEEE0] hover:bg-[#1F4730] disabled:opacity-50"
             disabled={disabled || finding}
             title="Fetch next page of Apollo contacts"
-            onClick={() => void runSearch("partnership", page + 1)}
+            onClick={() => void runSearch(activeSearchMode, page + 1)}
           >
             Load more
           </button>
@@ -236,9 +248,15 @@ export function ApolloFindContactsInline({
           Searching Apollo for {label}…
         </p>
       ) : null}
+      {partnershipFallbackUsed && lastFound > 0 && !finding ? (
+        <p className="text-[10px] text-[#D4C48A]">
+          No department matches for {label}; expanded to any verified email.
+        </p>
+      ) : null}
       {partnershipNoMatch && !allVerifiedNoMatch ? (
         <p className="text-[10px] text-[#D4C48A]">
-          No partnership/marketing contacts with verified email for {label}. Try{" "}
+          No brand design / business development / partnerships contacts with verified email for{" "}
+          {label}. Try{" "}
           <span className="text-[#E8D9A8]">Any verified email</span> to search all titles, or{" "}
           {onRefineSearchClick ? (
             <button
@@ -317,7 +335,9 @@ export function ApolloFindContactsInline({
           onContacts([]);
           setPartnershipNoMatch(false);
           setAllVerifiedNoMatch(false);
+          setPartnershipFallbackUsed(false);
           setLastFound(0);
+          setActiveSearchMode("partnership");
         }}
       />
     </div>

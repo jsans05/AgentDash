@@ -1,7 +1,11 @@
 "use client";
 
 import {
-  isDeletableTargetListContact,
+  findStaleDuplicateContactIds,
+} from "@/lib/crm/target-list-duplicate-contacts";
+import {
+  isBulkRemovableTargetListContact,
+  isUnrevealedDeletableTargetListContact,
   type TargetListContactShape,
 } from "@/lib/crm/target-list-contacts";
 
@@ -9,17 +13,22 @@ type Props = {
   contacts: TargetListContactShape[];
   selectedContactIds: Set<string>;
   onSelectedContactIdsChange: (next: Set<string>) => void;
-  onRequestBulkDelete: (contactIds: string[], mode: "unrevealed" | "selected") => void;
+  onRequestBulkDelete: (contactIds: string[], mode: "unrevealed" | "selected" | "duplicates") => void;
   deleting: boolean;
   disabled?: boolean;
 };
 
 function deletableContactsForCompany(contacts: TargetListContactShape[]): TargetListContactShape[] {
-  return contacts.filter(isDeletableTargetListContact);
+  return contacts.filter((c) => isBulkRemovableTargetListContact(c, contacts));
 }
 
 function unrevealedDeletableContacts(contacts: TargetListContactShape[]): TargetListContactShape[] {
-  return deletableContactsForCompany(contacts).filter((c) => c.apollo_reveal_status === "pending");
+  return contacts.filter(isUnrevealedDeletableTargetListContact);
+}
+
+function staleDuplicateContacts(contacts: TargetListContactShape[]): TargetListContactShape[] {
+  const staleIds = new Set(findStaleDuplicateContactIds(contacts));
+  return contacts.filter((c) => staleIds.has(c.contact_id));
 }
 
 function selectedForCompany(
@@ -40,9 +49,12 @@ export function TargetListCompanyContactActions({
 }: Props) {
   const deletable = deletableContactsForCompany(contacts);
   const unrevealed = unrevealedDeletableContacts(contacts);
+  const duplicates = staleDuplicateContacts(contacts);
   const selected = selectedForCompany(contacts, selectedContactIds);
 
-  if (deletable.length === 0) return null;
+  if (duplicates.length === 0 && unrevealed.length === 0 && selected.length === 0 && deletable.length === 0) {
+    return null;
+  }
 
   const btn =
     "block w-full rounded border px-1.5 py-0.5 text-[10px] font-medium disabled:cursor-not-allowed disabled:opacity-50";
@@ -62,6 +74,22 @@ export function TargetListCompanyContactActions({
   return (
     <div className="space-y-1 border-t border-white/10 pt-1">
       <span className="text-[10px] font-medium uppercase tracking-wide text-[#AEA79A]">Contacts</span>
+      {duplicates.length > 0 ? (
+        <button
+          type="button"
+          className={`${btn} border-[#8C3A3A]/50 bg-[#2A1818] text-[#F1A2A2] hover:bg-[#3A1E1E]`}
+          disabled={disabled || deleting}
+          onClick={(e) => {
+            e.stopPropagation();
+            onRequestBulkDelete(
+              duplicates.map((c) => c.contact_id),
+              "duplicates"
+            );
+          }}
+        >
+          {deleting ? "Removing…" : `Remove duplicates (${duplicates.length})`}
+        </button>
+      ) : null}
       {unrevealed.length > 0 ? (
         <button
           type="button"

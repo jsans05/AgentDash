@@ -220,7 +220,6 @@ export function ConsultingTargetListAiPanel({
           consulting_profile_id: consultingProfileId,
           ui_context: options?.uiContext ?? "consulting_target_list",
           flow_mode: options?.flowMode,
-          chat_model: options?.chatModel,
           ...(extraContext.trim() ? { extra_system_context: extraContext } : {}),
         },
         {
@@ -271,7 +270,7 @@ export function ConsultingTargetListAiPanel({
     : "Mystery Machine (Consulting)";
 
   const panelBody = (
-    <>
+    <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center justify-between gap-2 border-b border-white/10 px-3 py-2.5">
         <div className="flex min-w-0 items-center gap-2">
           <Sparkles className="h-4 w-4 shrink-0 text-[#4F9E63]" aria-hidden />
@@ -325,7 +324,7 @@ export function ConsultingTargetListAiPanel({
           onAssistantReply={handleAssistantReply}
         />
       </div>
-    </>
+    </div>
   );
 
   if (isMobile) {

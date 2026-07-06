@@ -22,7 +22,7 @@ export type FlowModeResolutionInput = {
   /** Persisted on ai_conversations when request omits flow_mode. */
   conversationFlowMode?: FlowMode | null;
   pipelineDrafting?: boolean;
-  uiContext?: "target_list" | "consulting_target_list" | "crm_pipeline" | "global" | null;
+  uiContext?: "target_list" | "consulting_target_list" | "master_target_list" | "crm_pipeline" | "global" | null;
   athleteId?: string | null;
   messages?: any[];
 };

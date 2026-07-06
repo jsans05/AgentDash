@@ -1,4 +1,8 @@
 import type { ApolloRevealStatus } from "@/components/crm/ApolloContactActions";
+import {
+  findStaleDuplicateContactIds,
+  isStaleDuplicateContact,
+} from "@/lib/crm/target-list-duplicate-contacts";
 
 export type TargetListContactShape = {
   contact_id: string;
@@ -54,6 +58,43 @@ export function isDeletableTargetListContact(c: TargetListContactShape): boolean
   const isApollo =
     c.apollo_reveal_status === "pending" || c.apollo_reveal_status === "revealed";
   return isApollo && !String(c.outreach_email ?? "").trim();
+}
+
+export function isBulkRemovableTargetListContact(
+  c: TargetListContactShape,
+  companyContacts: TargetListContactShape[]
+): boolean {
+  return isDeletableTargetListContact(c) || isStaleDuplicateContact(c, companyContacts);
+}
+
+export function isUnrevealedDeletableTargetListContact(c: TargetListContactShape): boolean {
+  return c.apollo_reveal_status === "pending" && isDeletableTargetListContact(c);
+}
+
+export function collectUnrevealedDeletableContactIds(
+  rows: Array<{ contacts: TargetListContactShape[] }>
+): string[] {
+  const ids = new Set<string>();
+  for (const row of rows) {
+    for (const contact of row.contacts) {
+      if (isUnrevealedDeletableTargetListContact(contact)) {
+        ids.add(contact.contact_id);
+      }
+    }
+  }
+  return [...ids];
+}
+
+export function collectStaleDuplicateContactIds(
+  rows: Array<{ contacts: TargetListContactShape[] }>
+): string[] {
+  const ids = new Set<string>();
+  for (const row of rows) {
+    for (const contactId of findStaleDuplicateContactIds(row.contacts)) {
+      ids.add(contactId);
+    }
+  }
+  return [...ids];
 }
 
 export function removeContactFromRows<T extends { contacts: TargetListContactShape[] }>(

@@ -25,6 +25,10 @@ import {
   type PitchAngle,
 } from "@/lib/ai/pitch-composer";
 import { searchWebCompanies as searchWebCompaniesImpl } from "@/lib/ai/tools/search-web-companies";
+import { researchCompanyPartnerships as researchCompanyPartnershipsImpl } from "@/lib/ai/tools/research-company-partnerships";
+import { generateCompanyDescription as generateCompanyDescriptionImpl } from "@/lib/ai/tools/generate-company-description";
+import { expandSimilarCompaniesForChat } from "@/lib/ai/tools/expand-similar-companies";
+import { writeUserMemory as writeUserMemoryImpl } from "@/lib/ai/tools/write-user-memory";
 import { fetchPitchToneSamples } from "@/lib/ai/pitch-tone-samples";
 import { stripSponsorGapCopy } from "@/lib/ai/email-copy-guard";
 import type { PitchType } from "@/lib/ai/pitch-spec";
@@ -1854,6 +1858,73 @@ export async function createAITools(profile: Profile) {
       return searchWebCompaniesImpl(query);
     },
 
+    researchCompanyPartnerships: async (params: {
+      company_name: string;
+      website?: string | null;
+      pipeline_id?: string | null;
+      save_to_pipeline?: boolean;
+    }) => {
+      const company_name = String(params.company_name ?? "").trim();
+      if (!company_name) return { error: "company_name is required" };
+      try {
+        return await researchCompanyPartnershipsImpl(supabase, profile, {
+          company_name,
+          website: params.website,
+          pipeline_id: params.pipeline_id,
+          save_to_pipeline: params.save_to_pipeline,
+        });
+      } catch (e: unknown) {
+        return { error: e instanceof Error ? e.message : "Partnership research failed" };
+      }
+    },
+
+    generateCompanyDescription: async (params: {
+      company_name: string;
+      pipeline_id?: string | null;
+      save_to_pipeline?: boolean;
+    }) => {
+      const company_name = String(params.company_name ?? "").trim();
+      if (!company_name) return { error: "company_name is required" };
+      try {
+        return await generateCompanyDescriptionImpl(supabase, profile, {
+          company_name,
+          pipeline_id: params.pipeline_id,
+          save_to_pipeline: params.save_to_pipeline,
+        });
+      } catch (e: unknown) {
+        return { error: e instanceof Error ? e.message : "Failed to generate description" };
+      }
+    },
+
+    expandSimilarCompanies: async (params: {
+      seed_company_ids?: string[];
+      seed_company_names?: string[];
+      category?: string | null;
+      athlete_id?: string | null;
+      limit_per_seed?: number;
+      organization_locations?: string[];
+      revenue_range_min?: number;
+      revenue_range_max?: number;
+    }) => {
+      try {
+        return await expandSimilarCompaniesForChat(supabase, supabaseCompanies, profile, params);
+      } catch (e: unknown) {
+        return { error: e instanceof Error ? e.message : "Expand similar failed" };
+      }
+    },
+
+    writeUserMemory: async (params: {
+      memory_notes: string[];
+      scope?: "global" | "project";
+      project_id?: string | null;
+    }) => {
+      try {
+        return await writeUserMemoryImpl(supabase, profile, params);
+      } catch (e: unknown) {
+        return { error: e instanceof Error ? e.message : "Failed to write user memory" };
+      }
+    },
+
     getAthleteCoveredCategories: async (params: { athlete_id: string }) => {
       const athlete_id = params.athlete_id;
       if (!(await agentCanAccessAthlete(supabase, profile, athlete_id))) return { category_names: [] };
@@ -3056,7 +3127,7 @@ export async function createAITools(profile: Profile) {
             role: c.role,
             apollo_reveal_status: c.apollo_reveal_status,
           })),
-          note: "Contacts are pending until the user clicks Reveal in the Target List or pipeline (uses Apollo credits). Do not auto-reveal.",
+          note: "Contacts are pending until the user clicks Reveal in the Target List or pipeline (uses Apollo credits). Default search uses Brand Design + Business Development + Partnerships with verified email, then any verified contact if no matches. Do not auto-reveal.",
         };
       } catch (e: any) {
         return { ok: false as const, error: e?.message ?? "Apollo find contacts failed" };

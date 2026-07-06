@@ -1,3 +1,4 @@
+/** Refine-search placeholders only; default Find contacts uses departments below. */
 export const APOLLO_DEFAULT_PERSON_TITLES = [
   "marketing",
   "partnership",
@@ -17,17 +18,29 @@ export const APOLLO_DEFAULT_PERSON_SENIORITIES = [
   "manager",
 ] as const;
 
+/**
+ * Apollo person_department_or_subdepartments values for default Find contacts:
+ * Marketing & Design → Brand Design; Sales → Business Development + Partnerships.
+ */
+export const APOLLO_DEFAULT_PERSON_DEPARTMENTS = [
+  "brand_design",
+  "business_development",
+  "partnerships",
+] as const;
+
 export const APOLLO_DEFAULT_CONTACT_EMAIL_STATUS = ["verified"] as const;
 
 export const APOLLO_DEFAULT_INCLUDE_SIMILAR_TITLES = true;
 
-/** Default Find contacts: partnership/marketing titles + seniorities, verified email only. */
+/** Default Find contacts: target departments + verified email; fallback to any verified title. */
 export type ApolloContactSearchMode = "partnership" | "all_verified";
 
 export function formatApolloPartnershipSearchSummary(): string {
-  const titles = APOLLO_DEFAULT_PERSON_TITLES.join(", ");
-  const seniorities = APOLLO_DEFAULT_PERSON_SENIORITIES.map((s) => s.replace(/_/g, " ")).join(", ");
-  return `Job titles containing: ${titles} (similar titles included). Seniority: ${seniorities}. Verified email only.`;
+  return (
+    "Departments & job function: Marketing & Design (Brand Design only) and " +
+    "Sales (Business Development, Partnerships). Verified email only. " +
+    "If no matches, automatically searches any verified contact at the company."
+  );
 }
 
 export function formatApolloAllVerifiedSearchSummary(): string {

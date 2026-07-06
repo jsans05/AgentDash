@@ -8,6 +8,7 @@ import {
   extractToolNames,
   getAthleteTargetListSessionAddon,
   getConsultingTargetListSessionAddon,
+  getMasterTargetListSessionAddon,
   getBulkImportFromChatAddon,
   getCrmPipelineDraftingSystemAddon,
   getMissingRequiredTools,
@@ -28,7 +29,7 @@ import {
   type ChatSseEvent,
   type ChatSseWebSource,
 } from "@/lib/ai/chat-sse";
-import { parseChatModelTier, resolveChatModelId } from "@/lib/ai/chat-model";
+import { resolveChatModelId } from "@/lib/ai/chat-model";
 import {
   createChatCompletionStreamWithReasoningCompat,
   createChatCompletionWithReasoningCompat,
@@ -98,8 +99,13 @@ type UploadedImage = {
 };
 
 const chatModeSchema = z.enum(["default", "deep_research", "web_search"]);
-const chatModelTierSchema = z.enum(["sonnet", "opus"]);
-const chatUiContextSchema = z.enum(["target_list", "consulting_target_list", "crm_pipeline", "global"]);
+const chatUiContextSchema = z.enum([
+  "target_list",
+  "consulting_target_list",
+  "master_target_list",
+  "crm_pipeline",
+  "global",
+]);
 const flowModeSchema = z.enum(["outbound", "inbound", "email", "auto"]);
 const chatMessageSchema = z
   .object({
@@ -127,7 +133,6 @@ const chatPayloadSchema = z
     consulting_profile_id: z.string().trim().max(120).optional(),
     ui_context: chatUiContextSchema.optional(),
     flow_mode: flowModeSchema.optional(),
-    chat_model: chatModelTierSchema.optional(),
     mode: chatModeSchema.optional(),
     stream: z.boolean().optional(),
     interaction_response: interactionResponseSchema.optional(),
@@ -771,7 +776,7 @@ const TOOLS = [
     function: {
       name: "apolloFindContactsForCompany",
       description:
-        "Find partnership/marketing contacts at a company via Apollo (titles: marketing, partnerships, influencer, brand; verified email filter). Creates pending CRM contacts only — the user must manually click Reveal in the Target List or pipeline UI to see emails (each reveal consumes Apollo credits). Never auto-reveal or assume emails are visible after this call.",
+        "Find brand/partnership contacts at a company via Apollo (departments: Brand Design, Business Development, Partnerships; verified email only; auto-fallback to any verified contact). Creates pending CRM contacts only — the user must manually click Reveal in the Target List or pipeline UI to see emails (each reveal consumes Apollo credits). Never auto-reveal or assume emails are visible after this call.",
       parameters: {
         type: "object",
         properties: {
@@ -1310,6 +1315,113 @@ const TOOLS = [
   {
     type: "function" as const,
     function: {
+      name: "researchCompanyPartnerships",
+      description:
+        "Research a company's past sports/brand partnerships via web search and synthesis. Returns markdown notes and source URLs. Pass pipeline_id to save results on the CRM pipeline card past_partnerships field (default when pipeline_id is provided).",
+      parameters: {
+        type: "object",
+        properties: {
+          company_name: { type: "string", description: "Company to research." },
+          website: { type: "string", description: "Optional website hint for better search results." },
+          pipeline_id: {
+            type: "string",
+            description: "Optional CRM pipeline card id — saves merged research to past_partnerships when provided.",
+          },
+          save_to_pipeline: {
+            type: "boolean",
+            description: "When pipeline_id is set, save to CRM (default true). Set false for preview-only.",
+          },
+        },
+        required: ["company_name"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "generateCompanyDescription",
+      description:
+        "Generate a concise 2-3 sentence company description using web search + LLM. Pass pipeline_id to save on the CRM pipeline card company_description field (default when pipeline_id is provided).",
+      parameters: {
+        type: "object",
+        properties: {
+          company_name: { type: "string", description: "Company to describe." },
+          pipeline_id: {
+            type: "string",
+            description: "Optional CRM pipeline card id — saves description on the card when provided.",
+          },
+          save_to_pipeline: {
+            type: "boolean",
+            description: "When pipeline_id is set, save to CRM (default true). Set false for preview-only.",
+          },
+        },
+        required: ["company_name"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "expandSimilarCompanies",
+      description:
+        "Find Apollo lookalike companies from seed brands (by company_id or name). Consumes Apollo credits. Does not add to CRM — confirm with user before pushCompanyToCrmPipeline or bulkImportCompaniesToCrmForAthlete. Pass athlete_id to exclude companies already on that athlete's target list.",
+      parameters: {
+        type: "object",
+        properties: {
+          seed_company_ids: {
+            type: "array",
+            items: { type: "string" },
+            description: "CRM company UUIDs to use as seeds.",
+          },
+          seed_company_names: {
+            type: "array",
+            items: { type: "string" },
+            description: "Company names to resolve as seeds when IDs are unknown.",
+          },
+          category: { type: "string", description: "Optional product/sponsorship category filter." },
+          athlete_id: {
+            type: "string",
+            description: "Optional athlete UUID — excludes target-list domains from results.",
+          },
+          limit_per_seed: { type: "number", description: "Max similar companies per seed (default 5)." },
+          organization_locations: { type: "array", items: { type: "string" } },
+          revenue_range_min: { type: "number" },
+          revenue_range_max: { type: "number" },
+        },
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "writeUserMemory",
+      description:
+        "Persist durable user preferences, constraints, or facts to memory for future chats. Use when the user asks you to remember something. Appends notes without duplicating existing entries.",
+      parameters: {
+        type: "object",
+        properties: {
+          memory_notes: {
+            type: "array",
+            items: { type: "string" },
+            description: "One or more memory notes to save (max 1000 chars each).",
+          },
+          scope: {
+            type: "string",
+            enum: ["global", "project"],
+            description: "global (default) applies across all projects; project is scoped to project_id.",
+          },
+          project_id: {
+            type: "string",
+            description: "Required when scope is project — the active chat project id.",
+          },
+        },
+        required: ["memory_notes"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
       name: ASK_USER_QUESTION_TOOL,
       description:
         "Show an interactive multi-select (or single-select) UI so the user can pick options. Use instead of long numbered markdown lists when offering 3+ choices (categories, sports, shortlists). Provide stable option ids and labels. After the user submits, you receive their selections in the tool result.",
@@ -1403,6 +1515,7 @@ const TOOLS_WITH_ATHLETE_ID_RESOLUTION = new Set([
   "updateTargetListMatchScores",
   "updateTargetListOutreach",
   "removeAthleteFromTargetListCards",
+  "expandSimilarCompanies",
 ]);
 
 const looksLikeNameOrSlug = (value: string): boolean => /[\s_]/.test(value);
@@ -1460,7 +1573,6 @@ export async function POST(req: Request) {
     let consulting_profile_id: string | undefined;
     let ui_context: z.infer<typeof chatUiContextSchema> | undefined;
     let flow_mode: FlowMode | undefined;
-    let chat_model: z.infer<typeof chatModelTierSchema> | undefined;
     let mode: any;
     let streamRequested = false;
     let interaction_response: z.infer<typeof interactionResponseSchema> | undefined;
@@ -1478,7 +1590,6 @@ export async function POST(req: Request) {
       consulting_profile_id = payload.consulting_profile_id;
       ui_context = payload.ui_context;
       flow_mode = parseFlowMode(payload.flow_mode);
-      chat_model = payload.chat_model;
       mode = payload.mode;
       interaction_response = payload.interaction_response;
       if (payload.stream === true) streamRequested = true;
@@ -1796,6 +1907,7 @@ export async function POST(req: Request) {
     const requestConsultingProfileId = String(consulting_profile_id ?? "").trim();
     const targetListUiContext = ui_context === "target_list";
     const consultingTargetListUiContext = ui_context === "consulting_target_list";
+    const masterTargetListUiContext = ui_context === "master_target_list";
     const explicitProspectIntent = detectExplicitProspectIntent(trimmedMessages);
     const resolvedFlowMode = resolveFlowMode({
       flowMode: flow_mode,
@@ -1805,7 +1917,7 @@ export async function POST(req: Request) {
       athleteId: requestAthleteId || undefined,
       messages: trimmedMessages,
     });
-    const resolvedChatModel = resolveChatModelId(parseChatModelTier(chat_model));
+    const resolvedChatModel = resolveChatModelId();
 
     const {
       flowIntent,
@@ -1863,6 +1975,10 @@ REQUIRED behavior — do not deviate:
     const consultingTargetListSessionAddon = injectConsultingTargetListSession
       ? `\n\n${getConsultingTargetListSessionAddon(requestConsultingProfileId)}`
       : "";
+    const injectMasterTargetListSession = masterTargetListUiContext;
+    const masterTargetListSessionAddon = injectMasterTargetListSession
+      ? `\n\n${getMasterTargetListSessionAddon()}`
+      : "";
     const injectTargetListPushGuard =
       (targetListUiContext || resolvedFlowMode === "email") && activeTargetListSaveIntent;
     const targetListOutreachAddon = injectTargetListPushGuard
@@ -1881,7 +1997,7 @@ REQUIRED behavior — do not deviate:
       includeBulkImport,
     });
     const targetListBlocked =
-      targetListUiContext && !explicitProspectIntent
+      (targetListUiContext || masterTargetListUiContext) && !explicitProspectIntent
         ? new Set(["generateAthleteProspectList"])
         : undefined;
     const consultingTargetListBlocked = consultingTargetListUiContext
@@ -1896,14 +2012,15 @@ REQUIRED behavior — do not deviate:
           "pushCompanyToCrmPipeline",
         ])
       : undefined;
-    const athleteTargetListBlocked = targetListUiContext
-      ? new Set([
-          "getConsultingTargetList",
-          "bulkImportCompaniesToConsultingTargetList",
-          "updateConsultingTargetListCategories",
-          "apolloExpandSimilarForConsulting",
-        ])
-      : undefined;
+    const athleteTargetListBlocked =
+      targetListUiContext || masterTargetListUiContext
+        ? new Set([
+            "getConsultingTargetList",
+            "bulkImportCompaniesToConsultingTargetList",
+            "updateConsultingTargetListCategories",
+            "apolloExpandSimilarForConsulting",
+          ])
+        : undefined;
     const mergedBlocked = new Set<string>([
       ...(targetListBlocked ?? []),
       ...(consultingTargetListBlocked ?? []),
@@ -1914,7 +2031,7 @@ REQUIRED behavior — do not deviate:
       resolvedFlowMode,
       mergedBlocked.size > 0 ? mergedBlocked : undefined
     );
-    const dynamicSystemContext = `${userMemoryPrompt}${toneSamplePrompt}${projectPrompt}${extraPrompt}${crmPipelineAddon}${targetListSessionAddon}${consultingTargetListSessionAddon}${modePromptAddon}${attachmentAddon}${chatBulkImportAddon}${targetListOutreachAddon}${
+    const dynamicSystemContext = `${userMemoryPrompt}${toneSamplePrompt}${projectPrompt}${extraPrompt}${crmPipelineAddon}${targetListSessionAddon}${consultingTargetListSessionAddon}${masterTargetListSessionAddon}${modePromptAddon}${attachmentAddon}${chatBulkImportAddon}${targetListOutreachAddon}${
       flowPromptAddon ? `\n\n${flowPromptAddon}` : ""
     }${interestGateAddons ? `\n\n${interestGateAddons}` : ""}${emailInterestAddon ? `\n\n${emailInterestAddon}` : ""}`;
     const initialSystemMessages: ChatMessage[] = [

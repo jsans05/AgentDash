@@ -28,6 +28,12 @@ function mysteryMachineEmptyStateLines(uiContext?: ChatUiContext): string[] {
         "Bulk-import from a spreadsheet or pasted list",
         "Categorize uncategorized companies",
       ];
+    case "master_target_list":
+      return [
+        "Categorize companies across roster athletes",
+        "Draft or improve outreach for listed companies",
+        "Use quick actions above for bulk edits",
+      ];
     case "crm_pipeline":
       return [
         "Draft outreach for this pipeline company",
@@ -48,8 +54,7 @@ import {
   COMPOSER_ICON_BUTTON_CLASS,
   COMPOSER_ICON_CLASS,
 } from "./ChatFlowModeSelector";
-import { ChatModelSelector } from "./ChatModelSelector";
-import { readStoredChatModelTier, type ChatModelTier } from "@/lib/ai/chat-model";
+import { ChatSendModeSelector, type ChatSendMode } from "./ChatSendModeSelector";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { ChatEmailDraftCard } from "./ChatEmailDraftCard";
 import {
@@ -221,9 +226,8 @@ export type { ChatUiContext } from "./chat-routing";
 
 export type ChatPanelSendOptions = {
   signal?: AbortSignal;
-  mode?: "default" | "deep_research" | "web_search";
+  mode?: ChatSendMode;
   flowMode?: ChatFlowMode;
-  chatModel?: ChatModelTier;
   attachments?: File[];
   onStreamToken?: (text: string) => void;
   onStreamEvent?: (event: ChatSseEvent) => void;
@@ -357,16 +361,11 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   const [streamingSources, setStreamingSources] = useState<string[]>([]);
   const [streamingWebSources, setStreamingWebSources] = useState<ChatSseWebSource[]>([]);
   const [streamingToolStatus, setStreamingToolStatus] = useState<string | null>(null);
-  const [sendMode] = useState<"default" | "deep_research" | "web_search">("default");
-  const [chatModel, setChatModel] = useState<ChatModelTier>("sonnet");
+  const [sendMode, setSendMode] = useState<ChatSendMode>("default");
   const routingFlowMode = React.useMemo(
     () => deriveRoutingFlowMode(uiContext, flowModeFromUrl),
     [uiContext, flowModeFromUrl]
   );
-
-  useEffect(() => {
-    setChatModel(readStoredChatModelTier());
-  }, []);
   const [attachments, setAttachments] = useState<File[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -677,7 +676,6 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
             {
           signal: ac.signal,
           mode: sendMode,
-          chatModel,
           interactionResponse: response,
           onStreamToken: streamHandler.onStreamToken,
           onStreamEvent: (event) => {
@@ -756,7 +754,6 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
       projectLoading,
       onSend,
       sendMode,
-      chatModel,
       applyAssistantResult,
       athleteId,
       uiContext,
@@ -830,7 +827,6 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
           {
           signal: ac.signal,
           mode: sendMode,
-          chatModel,
           attachments: attachmentsToSend,
           onStreamToken: streamHandler.onStreamToken,
           onStreamEvent: (event) => {
@@ -908,7 +904,6 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
       onSend,
       attachments,
       sendMode,
-      chatModel,
       applyAssistantResult,
       submitInteractionResponse,
       conversationReady,
@@ -1023,7 +1018,6 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
         withChatRoutingOptions(
           {
         mode: sendMode,
-        chatModel,
         onStreamToken: streamHandler.onStreamToken,
         onStreamEvent: (event) => {
           if (event.type === "meta" && event.phase === "tools") {
@@ -1696,9 +1690,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
                     <Paperclip className={COMPOSER_ICON_CLASS} />
                   </Button>
                 </Tooltip>
-                <ChatModelSelector
-                  value={chatModel}
-                  onChange={setChatModel}
+                <ChatSendModeSelector
+                  value={sendMode}
+                  onChange={setSendMode}
                   disabled={loading || projectLoading || bootLoading}
                 />
                 <ChatFlowModeSelector
@@ -1706,7 +1700,13 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
                   contextCompanyName={contextCompanyName}
                   contextAthleteName={contextAthleteName}
                   athleteId={athleteId}
-                  readOnlyEmail={layout === "embedded" && uiContext !== "crm_pipeline"}
+                  readOnlyEmail={
+                    layout === "embedded" &&
+                    uiContext !== "crm_pipeline" &&
+                    uiContext !== "target_list" &&
+                    uiContext !== "consulting_target_list" &&
+                    uiContext !== "master_target_list"
+                  }
                 />
               </div>
               <Button

@@ -11,6 +11,7 @@ import { ApolloFindContactsInline } from "@/components/crm/ApolloFindContactsInl
 import { ApolloRefineSearchDialog } from "@/components/crm/ApolloRefineSearchDialog";
 import { ConsultingTargetListAiPanel } from "@/components/crm/ConsultingTargetListAiDock";
 import { TargetListActionDialog } from "@/components/crm/TargetListActionDialog";
+import { TargetListCompanyContactActions } from "@/components/crm/TargetListCompanyContactActions";
 import { EditableCell } from "@/components/crm/target-list/EditableCell";
 import {
   buildFlatRows,
@@ -33,6 +34,7 @@ import { buildConsultingTargetListSessionContext } from "@/lib/crm/consulting-ta
 import { CONSULTING_TARGET_LIST_COLUMNS } from "@/lib/crm/target-list-column-config";
 import { exportTargetListToExcel } from "@/lib/crm/target-list-export";
 import { FirmographicsInvestigateCell } from "@/components/crm/FirmographicsInvestigateCell";
+import { CompanyRecentNewsProvider } from "@/components/crm/CompanyRecentNewsPanel";
 import { AgencyActivityCell } from "@/components/crm/AgencyActivityCell";
 import {
   readStoredTargetListPanelCollapsed,
@@ -44,15 +46,22 @@ import {
 import type { TargetListFocusedRow } from "@/lib/crm/target-list-session-context";
 import {
   isTargetListDialogDismissed,
+  TARGET_LIST_DELETE_CONTACTS_BULK_DISMISS_KEY,
   TARGET_LIST_FIND_CONTACTS_DISMISS_KEY,
   TARGET_LIST_REMOVE_COMPANY_DISMISS_KEY,
+  TARGET_LIST_REMOVE_UNREVEALED_ALL_DISMISS_KEY,
 } from "@/lib/crm/target-list-prefs";
+import { batchDeleteCrmContacts } from "@/lib/crm/batch-delete-contacts";
 import { formatContactDisplayName } from "@/lib/crm/contact-display-name";
 import {
+  collectUnrevealedDeletableContactIds,
+  isBulkRemovableTargetListContact,
+  isDeletableTargetListContact,
   mapApiContactToTargetList,
   mergeCompanyContactsIntoRows,
   patchContactInRows,
   removeContactFromRows,
+  removeContactsFromRows,
 } from "@/lib/crm/target-list-contacts";
 import type { TargetListContact, TargetListRow } from "@/lib/crm/athlete-target-list";
 import { safeHttpUrl } from "@/lib/security/url";
@@ -71,6 +80,8 @@ export function ConsultingTargetList({ profileId, profileName }: Props) {
   const [exporting, setExporting] = useState(false);
   const [bulkFindContacts, setBulkFindContacts] = useState(false);
   const [bulkFindConfirmOpen, setBulkFindConfirmOpen] = useState(false);
+  const [bulkRemoveUnrevealed, setBulkRemoveUnrevealed] = useState(false);
+  const [bulkRemoveUnrevealedConfirmOpen, setBulkRemoveUnrevealedConfirmOpen] = useState(false);
   const [removingEntryId, setRemovingEntryId] = useState<string | null>(null);
   const [removeConfirm, setRemoveConfirm] = useState<{ entryId: string; companyName: string } | null>(
     null
@@ -90,6 +101,13 @@ export function ConsultingTargetList({ profileId, profileName }: Props) {
   const [refineSearchOpen, setRefineSearchOpen] = useState(false);
   const [activeCategoryFilter, setActiveCategoryFilter] = useState(TARGET_LIST_CATEGORY_FILTER_ALL);
   const [selectedCompanyIds, setSelectedCompanyIds] = useState<Set<string>>(new Set());
+  const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set());
+  const [deletingContactsCompanyId, setDeletingContactsCompanyId] = useState<string | null>(null);
+  const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState<{
+    companyId: string;
+    contactIds: string[];
+    mode: "unrevealed" | "selected" | "duplicates";
+  } | null>(null);
   const [focusedRow, setFocusedRow] = useState<TargetListFocusedRow | null>(null);
   const [aiDockCollapsed, setAiDockCollapsed] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
@@ -101,7 +119,12 @@ export function ConsultingTargetList({ profileId, profileName }: Props) {
   const bulkActionBtnClass =
     "inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50";
 
-  const bulkActionsDisabled = bulkFindContacts || loading || rows.length === 0;
+  const bulkActionsDisabled = bulkFindContacts || bulkRemoveUnrevealed || loading || rows.length === 0;
+
+  const unrevealedContactIds = useMemo(
+    () => collectUnrevealedDeletableContactIds(rows),
+    [rows]
+  );
 
   const setFocusModePersisted = useCallback((next: boolean) => {
     setFocusMode(next);
@@ -327,6 +350,68 @@ export function ConsultingTargetList({ profileId, profileName }: Props) {
     });
   }
 
+  function removeContactsLocal(contactIds: string[]) {
+    const idSet = new Set(contactIds);
+    setRows((prev) => removeContactsFromRows(prev, idSet));
+    setSelectedContactIds((prev) => {
+      const next = new Set(prev);
+      for (const id of contactIds) next.delete(id);
+      return next;
+    });
+  }
+
+  function requestBulkDeleteContacts(
+    companyId: string,
+    contactIds: string[],
+    mode: "unrevealed" | "selected" | "duplicates"
+  ) {
+    if (contactIds.length === 0) return;
+    if (isTargetListDialogDismissed(TARGET_LIST_DELETE_CONTACTS_BULK_DISMISS_KEY)) {
+      void bulkDeleteContacts(companyId, contactIds);
+      return;
+    }
+    setBulkDeleteConfirm({ companyId, contactIds, mode });
+  }
+
+  async function bulkDeleteContacts(companyId: string, contactIds: string[]) {
+    if (contactIds.length === 0) return;
+    setDeletingContactsCompanyId(companyId);
+    setGlobalError(null);
+    try {
+      const deleted = await batchDeleteCrmContacts(contactIds);
+      if (deleted.length === 0) throw new Error("No contacts were deleted");
+      removeContactsLocal(deleted);
+    } catch (e) {
+      setGlobalError(e instanceof Error ? e.message : "Delete failed");
+    } finally {
+      setDeletingContactsCompanyId(null);
+    }
+  }
+
+  function requestBulkRemoveUnrevealedAll() {
+    if (unrevealedContactIds.length === 0) return;
+    if (isTargetListDialogDismissed(TARGET_LIST_REMOVE_UNREVEALED_ALL_DISMISS_KEY)) {
+      void bulkRemoveUnrevealedAll();
+      return;
+    }
+    setBulkRemoveUnrevealedConfirmOpen(true);
+  }
+
+  async function bulkRemoveUnrevealedAll() {
+    if (unrevealedContactIds.length === 0) return;
+    setBulkRemoveUnrevealed(true);
+    setGlobalError(null);
+    try {
+      const deleted = await batchDeleteCrmContacts(unrevealedContactIds);
+      if (deleted.length === 0) throw new Error("No contacts were deleted");
+      removeContactsLocal(deleted);
+    } catch (e) {
+      setGlobalError(e instanceof Error ? e.message : "Remove unrevealed failed");
+    } finally {
+      setBulkRemoveUnrevealed(false);
+    }
+  }
+
   async function removeEntry(entryId: string) {
     setRemovingEntryId(entryId);
     try {
@@ -507,16 +592,24 @@ export function ConsultingTargetList({ profileId, profileName }: Props) {
       const ExcelJS = (await import("exceljs")).default;
       const wb = new ExcelJS.Workbook();
       const ws = wb.addWorksheet("Consulting Target List");
-      ws.columns = [
-        { header: "Industry Category", width: 22 },
-        { header: "Brand", width: 24 },
-        { header: "Website", width: 28 },
-        { header: "HQ Phone", width: 16 },
-        { header: "Contact", width: 22 },
-        { header: "Title", width: 22 },
-        { header: "Email", width: 28 },
-      ];
-      ws.addRow(["Apparel – Moto", "Example Brand", "example.com", "555-0100", "Jane Smith", "Head of Partnerships", "jane@example.com"]);
+      ws.columns = CONSULTING_TARGET_LIST_COLUMNS.map((header) => ({
+        header,
+        width: header === "Company Description" ? 48 : header === "Company Website" ? 32 : 22,
+      }));
+      ws.addRow([
+        "Coolers / Outdoor",
+        "Example Brand",
+        "https://example.com",
+        "Jane Smith",
+        "Head of Partnerships",
+        "jane@example.com",
+        "",
+        "",
+        "555-0100",
+        "",
+        "",
+        "",
+      ]);
       const buffer = await wb.xlsx.writeBuffer();
       const blob = new Blob([buffer], {
         type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -659,6 +752,17 @@ export function ConsultingTargetList({ profileId, profileName }: Props) {
               </button>
               <button
                 type="button"
+                onClick={requestBulkRemoveUnrevealedAll}
+                disabled={bulkActionsDisabled || unrevealedContactIds.length === 0}
+                className={cn(bulkActionBtnClass, "border-[#8C3A3A]/50 bg-[#2A1818] text-[#F1A2A2]")}
+                title="Remove all Apollo contact candidates that have not been revealed yet"
+              >
+                {bulkRemoveUnrevealed
+                  ? "Removing unrevealed…"
+                  : `Remove unrevealed (all)${unrevealedContactIds.length > 0 ? ` (${unrevealedContactIds.length})` : ""}`}
+              </button>
+              <button
+                type="button"
                 onClick={() => void handleExport()}
                 disabled={bulkActionsDisabled || exporting}
                 className={cn(bulkActionBtnClass, "border-[#2E7040]/60 bg-[#1B2F21] text-[#DBEEE0]")}
@@ -707,6 +811,105 @@ export function ConsultingTargetList({ profileId, profileName }: Props) {
           const target = removeConfirm;
           setRemoveConfirm(null);
           if (target) void removeEntry(target.entryId);
+        }}
+      />
+
+      <TargetListActionDialog
+        open={bulkRemoveUnrevealedConfirmOpen}
+        title="Remove unrevealed contacts (all companies)?"
+        variant="danger"
+        description={
+          <>
+            <p>
+              Remove {unrevealedContactIds.length} Apollo contact{" "}
+              {unrevealedContactIds.length === 1 ? "candidate" : "candidates"} across the target list
+              that haven&apos;t been revealed. No credits were used for these contacts.
+            </p>
+            <p className="text-[#AEA79A]">You can find contacts again later with Find contacts.</p>
+          </>
+        }
+        confirmLabel="Remove unrevealed (all)"
+        dismissStorageKey={TARGET_LIST_REMOVE_UNREVEALED_ALL_DISMISS_KEY}
+        onCancel={() => setBulkRemoveUnrevealedConfirmOpen(false)}
+        onConfirm={() => {
+          setBulkRemoveUnrevealedConfirmOpen(false);
+          void bulkRemoveUnrevealedAll();
+        }}
+      />
+
+      <TargetListActionDialog
+        open={bulkDeleteConfirm != null}
+        title={
+          bulkDeleteConfirm?.mode === "duplicates"
+            ? "Remove duplicate contacts?"
+            : bulkDeleteConfirm?.mode === "unrevealed"
+              ? "Remove unrevealed contacts?"
+              : bulkDeleteConfirm &&
+                  rows
+                    .find((r) => r.company_id === bulkDeleteConfirm.companyId)
+                    ?.contacts.some(
+                      (c) =>
+                        bulkDeleteConfirm.contactIds.includes(c.contact_id) &&
+                        c.apollo_reveal_status === "revealed"
+                    )
+                ? "Delete contacts from CRM?"
+                : "Remove Apollo contacts?"
+        }
+        variant="danger"
+        description={
+          bulkDeleteConfirm ? (
+            bulkDeleteConfirm.mode === "duplicates" ? (
+              <>
+                <p>
+                  Remove {bulkDeleteConfirm.contactIds.length} older duplicate{" "}
+                  {bulkDeleteConfirm.contactIds.length === 1 ? "entry" : "entries"} for the same
+                  person. The Apollo-linked contact with email will be kept.
+                </p>
+                <p className="text-[#AEA79A]">This cannot be undone.</p>
+              </>
+            ) : bulkDeleteConfirm.mode === "unrevealed" ? (
+              <>
+                <p>
+                  Remove {bulkDeleteConfirm.contactIds.length} Apollo contact{" "}
+                  {bulkDeleteConfirm.contactIds.length === 1 ? "candidate" : "candidates"} that
+                  haven&apos;t been revealed. No credits were used.
+                </p>
+                <p className="text-[#AEA79A]">You can find contacts again later with Find contacts.</p>
+              </>
+            ) : rows
+                .find((r) => r.company_id === bulkDeleteConfirm.companyId)
+                ?.contacts.some(
+                  (c) =>
+                    bulkDeleteConfirm.contactIds.includes(c.contact_id) &&
+                    c.apollo_reveal_status === "revealed"
+                ) ? (
+              <>
+                <p>
+                  {bulkDeleteConfirm.contactIds.length}{" "}
+                  {bulkDeleteConfirm.contactIds.length === 1 ? "contact" : "contacts"} will be removed
+                  from your CRM, including any saved email and LinkedIn data.
+                </p>
+                <p className="text-[#AEA79A]">This cannot be undone.</p>
+              </>
+            ) : (
+              <>
+                <p>
+                  Remove {bulkDeleteConfirm.contactIds.length} Apollo contact{" "}
+                  {bulkDeleteConfirm.contactIds.length === 1 ? "candidate" : "candidates"} from the
+                  target list. No credits were used for these contacts.
+                </p>
+                <p className="text-[#AEA79A]">You can find contacts again later with Find contacts.</p>
+              </>
+            )
+          ) : null
+        }
+        confirmLabel="Delete"
+        dismissStorageKey={TARGET_LIST_DELETE_CONTACTS_BULK_DISMISS_KEY}
+        onCancel={() => setBulkDeleteConfirm(null)}
+        onConfirm={() => {
+          const target = bulkDeleteConfirm;
+          setBulkDeleteConfirm(null);
+          if (target) void bulkDeleteContacts(target.companyId, target.contactIds);
         }}
       />
 
@@ -927,7 +1130,11 @@ export function ConsultingTargetList({ profileId, profileName }: Props) {
                                 consultingProfileId={profileId}
                                 searchOverrides={apolloSearchOverrides}
                                 onRefineSearchClick={() => setRefineSearchOpen(true)}
-                                disabled={bulkFindContacts || removingEntryId === row.pipeline_id}
+                                disabled={
+                                  bulkFindContacts ||
+                                  bulkRemoveUnrevealed ||
+                                  removingEntryId === row.pipeline_id
+                                }
                                 onContacts={(contacts, meta) =>
                                   applyCompanyContactsToRows(row.company_id, contacts, meta)
                                 }
@@ -939,6 +1146,7 @@ export function ConsultingTargetList({ profileId, profileName }: Props) {
                                 disabled={
                                   expandingCompanyId === row.company_id ||
                                   bulkFindContacts ||
+                                  bulkRemoveUnrevealed ||
                                   removingEntryId === row.pipeline_id
                                 }
                                 onClick={(e) => {
@@ -953,7 +1161,11 @@ export function ConsultingTargetList({ profileId, profileName }: Props) {
                               <button
                                 type="button"
                                 className="block w-full rounded border border-[#8C3A3A]/50 bg-[#2A1818] px-1.5 py-0.5 text-[10px] font-medium text-[#F1A2A2] hover:bg-[#3A1E1E] disabled:opacity-50"
-                                disabled={removingEntryId === row.pipeline_id || bulkFindContacts}
+                                disabled={
+                                  removingEntryId === row.pipeline_id ||
+                                  bulkFindContacts ||
+                                  bulkRemoveUnrevealed
+                                }
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   requestRemove(row.pipeline_id, row.company_name);
@@ -961,6 +1173,20 @@ export function ConsultingTargetList({ profileId, profileName }: Props) {
                               >
                                 {removingEntryId === row.pipeline_id ? "Removing…" : "Remove"}
                               </button>
+                              <TargetListCompanyContactActions
+                                contacts={row.contacts}
+                                selectedContactIds={selectedContactIds}
+                                onSelectedContactIdsChange={setSelectedContactIds}
+                                onRequestBulkDelete={(contactIds, mode) =>
+                                  requestBulkDeleteContacts(row.company_id, contactIds, mode)
+                                }
+                                deleting={deletingContactsCompanyId === row.company_id}
+                                disabled={
+                                  bulkFindContacts ||
+                                  bulkRemoveUnrevealed ||
+                                  removingEntryId === row.pipeline_id
+                                }
+                              />
                             </div>
                           ) : null}
                         </Td>
@@ -993,38 +1219,60 @@ export function ConsultingTargetList({ profileId, profileName }: Props) {
                           ) : null}
                         </Td>
                         <Td className={yellowCell}>
-                          <EditableCell
-                            value={fullName}
-                            placeholder="First Last"
-                            onSave={async (next) => {
-                              const { first, last } = splitName(next);
-                              if (!first || !last) throw new Error("Enter first and last name");
-                              if (contact) {
-                                await saveContactPatch(fr.rowIndex, fr.contactIndex!, {
-                                  first_name: first,
-                                  last_name: last,
-                                });
-                                patchContactLocal(fr.rowIndex, fr.contactIndex!, {
-                                  first_name: first,
-                                  last_name: last,
-                                });
-                              } else {
-                                await createContactForRow(fr.rowIndex, {
-                                  first_name: first,
-                                  last_name: last,
-                                });
-                              }
-                            }}
-                            display={(v) =>
-                              contact ? (
-                                <span className="text-[#CEE4D4]">{v || "—"}</span>
-                              ) : (
-                                <span className="italic text-[#AEA79A]">
-                                  {v || "No contact — click to add"}
-                                </span>
-                              )
-                            }
-                          />
+                          <div className="flex items-start gap-1.5">
+                            {contact && isBulkRemovableTargetListContact(contact, row.contacts) ? (
+                              <input
+                                type="checkbox"
+                                className="mt-1 rounded border-white/20"
+                                checked={selectedContactIds.has(contact.contact_id)}
+                                disabled={deletingContactsCompanyId === row.company_id}
+                                onChange={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedContactIds((prev) => {
+                                    const next = new Set(prev);
+                                    if (e.target.checked) next.add(contact.contact_id);
+                                    else next.delete(contact.contact_id);
+                                    return next;
+                                  });
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                              />
+                            ) : null}
+                            <div className="min-w-0 flex-1">
+                              <EditableCell
+                                value={fullName}
+                                placeholder="First Last"
+                                onSave={async (next) => {
+                                  const { first, last } = splitName(next);
+                                  if (!first || !last) throw new Error("Enter first and last name");
+                                  if (contact) {
+                                    await saveContactPatch(fr.rowIndex, fr.contactIndex!, {
+                                      first_name: first,
+                                      last_name: last,
+                                    });
+                                    patchContactLocal(fr.rowIndex, fr.contactIndex!, {
+                                      first_name: first,
+                                      last_name: last,
+                                    });
+                                  } else {
+                                    await createContactForRow(fr.rowIndex, {
+                                      first_name: first,
+                                      last_name: last,
+                                    });
+                                  }
+                                }}
+                                display={(v) =>
+                                  contact ? (
+                                    <span className="text-[#CEE4D4]">{v || "—"}</span>
+                                  ) : (
+                                    <span className="italic text-[#AEA79A]">
+                                      {v || "No contact — click to add"}
+                                    </span>
+                                  )
+                                }
+                              />
+                            </div>
+                          </div>
                         </Td>
                         <Td className={yellowCell}>
                           {contact ? (
@@ -1043,19 +1291,23 @@ export function ConsultingTargetList({ profileId, profileName }: Props) {
                           ) : null}
                         </Td>
                         <Td className={yellowCell}>
-                          {contact?.contact_id ? (
+                          {contact &&
+                          (contact.apollo_reveal_status === "pending" ||
+                            contact.apollo_reveal_status === "revealed") ? (
                             <ContactEmailCell
                               contactId={contact.contact_id}
                               email={contact.email}
-                              apolloRevealStatus={contact.apollo_reveal_status}
+                              apolloRevealStatus={contact.apollo_reveal_status ?? null}
+                              hideDelete={!isDeletableTargetListContact(contact)}
                               onRevealed={(updated) => {
                                 setRows((prev) =>
                                   patchContactInRows(prev, contact.contact_id, {
-                                    email: String(updated.email ?? contact.email ?? ""),
-                                    apollo_reveal_status:
-                                      updated.apollo_reveal_status === "revealed"
-                                        ? "revealed"
-                                        : contact.apollo_reveal_status,
+                                    email: (updated.email as string) ?? contact.email,
+                                    linkedin_url: (updated.linkedin_url as string) ?? contact.linkedin_url,
+                                    apollo_reveal_status: "revealed",
+                                    first_name: (updated.first_name as string) ?? contact.first_name,
+                                    last_name: (updated.last_name as string) ?? contact.last_name,
+                                    role: (updated.role as string) ?? contact.role,
                                   })
                                 );
                               }}
@@ -1063,31 +1315,91 @@ export function ConsultingTargetList({ profileId, profileName }: Props) {
                                 setRows((prev) => removeContactFromRows(prev, contact.contact_id));
                               }}
                             />
-                          ) : null}
+                          ) : (
+                            <EditableCell
+                              value={contact?.email ?? ""}
+                              placeholder="name@company.com"
+                              disabled={!contact}
+                              onSave={async (next) => {
+                                if (!contact) return;
+                                await saveContactPatch(fr.rowIndex, fr.contactIndex!, {
+                                  email: next || null,
+                                });
+                                patchContactLocal(fr.rowIndex, fr.contactIndex!, {
+                                  email: next || null,
+                                });
+                              }}
+                              display={(v) =>
+                                v ? (
+                                  <a
+                                    href={`mailto:${v}`}
+                                    className="text-[#CEE4D4] hover:underline"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    {v}
+                                  </a>
+                                ) : (
+                                  <span className="text-[#8E877A]">—</span>
+                                )
+                              }
+                            />
+                          )}
                         </Td>
                         <Td className={yellowCell}>
                           <ContactLinkedinCell linkedinUrl={contact?.linkedin_url} />
                         </Td>
                         <Td className={yellowCell}>
-                          {contact?.contact_id ? (
+                          {contact?.apollo_person_id &&
+                          !contact.phone &&
+                          contact.apollo_phone_reveal_status !== "revealed" ? (
                             <ContactPhoneCell
                               contactId={contact.contact_id}
                               phone={contact.phone}
                               apolloPersonId={contact.apollo_person_id}
-                              apolloPhoneRevealStatus={contact.apollo_phone_reveal_status}
+                              apolloPhoneRevealStatus={contact.apollo_phone_reveal_status ?? null}
+                              compact
                               onRevealed={(updated) => {
                                 setRows((prev) =>
                                   patchContactInRows(prev, contact.contact_id, {
-                                    phone: String(updated.phone ?? contact.phone ?? ""),
+                                    phone: (updated.phone as string) ?? contact.phone,
                                     apollo_phone_reveal_status:
+                                      updated.apollo_phone_reveal_status === "pending" ||
                                       updated.apollo_phone_reveal_status === "revealed"
-                                        ? "revealed"
-                                        : contact.apollo_phone_reveal_status,
+                                        ? (updated.apollo_phone_reveal_status as "pending" | "revealed")
+                                        : "pending",
                                   })
                                 );
                               }}
                             />
-                          ) : null}
+                          ) : (
+                            <EditableCell
+                              value={contact?.phone ?? ""}
+                              placeholder="+1 (555) 555-5555"
+                              disabled={!contact}
+                              onSave={async (next) => {
+                                if (!contact) return;
+                                await saveContactPatch(fr.rowIndex, fr.contactIndex!, {
+                                  phone: next || null,
+                                });
+                                patchContactLocal(fr.rowIndex, fr.contactIndex!, {
+                                  phone: next || null,
+                                });
+                              }}
+                              display={(v) =>
+                                v ? (
+                                  <a
+                                    href={`tel:${v.replace(/\s/g, "")}`}
+                                    className="text-[#CEE4D4] hover:underline"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    {v}
+                                  </a>
+                                ) : (
+                                  <span className="text-[#8E877A]">—</span>
+                                )
+                              }
+                            />
+                          )}
                         </Td>
                         <Td className={yellowCell}>
                           {fr.showCompany ? (
@@ -1173,10 +1485,12 @@ export function ConsultingTargetList({ profileId, profileName }: Props) {
   );
 
   return (
-    <div className="flex flex-col">
+    <CompanyRecentNewsProvider>
+    <div className="flex min-h-0 flex-1 flex-col">
       {focusMode && typeof document !== "undefined"
         ? createPortal(listShell, document.body)
         : listShell}
     </div>
+    </CompanyRecentNewsProvider>
   );
 }

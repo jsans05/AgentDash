@@ -1,15 +1,16 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, Sparkles, X } from "lucide-react";
+import { ChevronRight, Sparkles, X } from "lucide-react";
 import { useAuth } from "@/app/providers";
 import { ChatPanel, type ChatPanelHandle, type ChatProject, type Message, type ChatPanelSendOptions } from "@/components/chat/ChatPanel";
 import { postAiChat, type PostAiChatResult } from "@/lib/ai/chat-fetch";
 import type { ChatSseEvent } from "@/lib/ai/chat-sse";
-import type { InteractionResponsePayload } from "@/lib/ai/user-question";
 import { isEffectivelyUncategorizedCompanyCategory } from "@/lib/crm/company-category";
+import type { MasterTargetListAthlete } from "@/lib/crm/master-target-list";
 import {
   clampTargetListPanelWidth,
+  MASTER_TARGET_LIST_MUTATING_TOOLS,
   readStoredTargetListPanelCollapsed,
   readStoredTargetListPanelWidth,
   TARGET_LIST_AI_PANEL_COLLAPSED_KEY,
@@ -18,23 +19,22 @@ import {
   TARGET_LIST_AI_PANEL_WIDTH_KEY,
   TARGET_LIST_CATEGORY_FILTER_ALL,
   TARGET_LIST_CATEGORY_FILTER_UNCATEGORIZED,
-  TARGET_LIST_MUTATING_TOOLS,
 } from "@/lib/crm/target-list-chat-constants";
 import type { TargetListFocusedRow } from "@/lib/crm/target-list-session-context";
 import { cn } from "@/lib/utils";
 
-export type TargetListAiDockRow = {
+export type MasterTargetListAiDockRow = {
   pipeline_id: string;
   company_id: string;
   company_name: string;
   category: string | null;
+  assigned_athletes: MasterTargetListAthlete[];
 };
 
-export type TargetListAiPanelProps = {
-  athleteId: string;
-  athleteName?: string;
-  rows: TargetListAiDockRow[];
+export type MasterTargetListAiPanelProps = {
+  rows: MasterTargetListAiDockRow[];
   activeCategoryFilter: string;
+  activeAthleteFilter: string;
   selectedCompanyIds: Set<string>;
   focusedRow: TargetListFocusedRow | null;
   getSessionContext: () => string;
@@ -43,8 +43,6 @@ export type TargetListAiPanelProps = {
   collapsed?: boolean;
   onCollapsedChange?: (collapsed: boolean) => void;
 };
-
-export type TargetListAiDockProps = TargetListAiPanelProps;
 
 type QuickChip = { id: string; label: string; prompt: string };
 
@@ -62,9 +60,9 @@ function useIsMobilePanel(): boolean {
   return isMobile;
 }
 
-function buildQuickChips(props: TargetListAiPanelProps): QuickChip[] {
+function buildQuickChips(props: MasterTargetListAiPanelProps): QuickChip[] {
   const chips: QuickChip[] = [];
-  const { rows, activeCategoryFilter, selectedCompanyIds, focusedRow, athleteName } = props;
+  const { rows, activeCategoryFilter, selectedCompanyIds, focusedRow } = props;
 
   const uncategorizedCount = rows.filter((r) =>
     isEffectivelyUncategorizedCompanyCategory(r.category)
@@ -72,6 +70,40 @@ function buildQuickChips(props: TargetListAiPanelProps): QuickChip[] {
 
   const selectedRows = rows.filter((r) => selectedCompanyIds.has(r.company_id));
   const selectedNames = selectedRows.map((r) => r.company_name).filter(Boolean);
+
+  if (uncategorizedCount > 0) {
+    chips.push({
+      id: "categorize",
+      label: `Categorize (${uncategorizedCount})`,
+      prompt:
+        "On the master target list, find uncategorized companies and suggest categories. For each company, use getAthleteTargetList for an assigned athlete to get pipeline_id, then apply categories with updateTargetListCompanyCategories after I confirm.",
+    });
+  }
+
+  if (focusedRow) {
+    const row = rows.find((r) => r.pipeline_id === focusedRow.pipelineId);
+    const athletes = row?.assigned_athletes ?? [];
+    const athleteHint =
+      athletes.length === 1
+        ? ` for ${athletes[0]!.name} (athlete_id=${athletes[0]!.athlete_id})`
+        : athletes.length > 1
+          ? ` — assigned athletes: ${athletes.map((a) => `${a.name} (${a.athlete_id})`).join(", ")}`
+          : "";
+    const contactPart = focusedRow.contactName ? ` (${focusedRow.contactName})` : "";
+    chips.push({
+      id: "improve-email",
+      label: `Improve — ${focusedRow.companyName}`,
+      prompt: `Improve the outreach email for ${focusedRow.companyName}${contactPart} on the master target list (pipeline_id=${focusedRow.pipelineId}${focusedRow.contactId ? `, contact_id=${focusedRow.contactId}` : ""})${athleteHint}. Show me a revision, then save when I approve using updateTargetListOutreach with the correct athlete_id.`,
+    });
+  }
+
+  if (selectedNames.length > 0) {
+    chips.push({
+      id: "remove-selected",
+      label: `Remove selected (${selectedNames.length})`,
+      prompt: `Remove these companies from their athletes' target lists on the master view: ${selectedNames.join(", ")}. Use removeAthleteFromTargetListCards with the correct athlete_id per company.`,
+    });
+  }
 
   let categoryLabel: string | null = null;
   let categoryCount = 0;
@@ -83,61 +115,23 @@ function buildQuickChips(props: TargetListAiPanelProps): QuickChip[] {
     categoryCount = rows.filter(
       (r) => String(r.category ?? "").trim().toLowerCase() === activeCategoryFilter.toLowerCase()
     ).length;
-  } else if (selectedRows.length > 0) {
-    const cats = new Set(
-      selectedRows.map((r) =>
-        isEffectivelyUncategorizedCompanyCategory(r.category)
-          ? "Uncategorized"
-          : String(r.category ?? "").trim()
-      )
-    );
-    if (cats.size === 1) {
-      categoryLabel = [...cats][0] ?? null;
-      categoryCount = selectedRows.length;
-    }
   }
 
   if (categoryLabel && categoryCount > 0) {
     chips.push({
       id: "draft-category",
       label: `Draft emails — ${categoryLabel}`,
-      prompt: `Draft outreach emails for all ${categoryCount} companies in ${categoryLabel} on ${athleteName ? `${athleteName}'s` : "this athlete's"} target list. Show each draft for approval, then save each to the target list with updateTargetListOutreach when I approve.`,
-    });
-  }
-
-  if (focusedRow) {
-    const contactPart = focusedRow.contactName ? ` (${focusedRow.contactName})` : "";
-    chips.push({
-      id: "improve-email",
-      label: `Improve — ${focusedRow.companyName}`,
-      prompt: `Improve the outreach email for ${focusedRow.companyName}${contactPart} on this target list (pipeline_id=${focusedRow.pipelineId}${focusedRow.contactId ? `, contact_id=${focusedRow.contactId}` : ""}). Show me a revision, then save when I approve using updateTargetListOutreach.`,
-    });
-  }
-
-  if (uncategorizedCount > 0) {
-    chips.push({
-      id: "categorize",
-      label: `Categorize (${uncategorizedCount})`,
-      prompt: `Load uncategorized companies on this athlete's target list (getAthleteTargetList with uncategorized_only: true) and suggest categories. Apply with updateTargetListCompanyCategories after I confirm.`,
-    });
-  }
-
-  if (selectedNames.length > 0) {
-    chips.push({
-      id: "remove-selected",
-      label: `Remove selected (${selectedNames.length})`,
-      prompt: `Remove these companies from ${athleteName ? `${athleteName}'s` : "this athlete's"} target list: ${selectedNames.join(", ")}. Use removeAthleteFromTargetListCards.`,
+      prompt: `Draft outreach emails for companies in ${categoryLabel} on the master target list (${categoryCount} companies). For each, resolve the assigned athlete_id, show each draft for approval, then save with updateTargetListOutreach when I approve.`,
     });
   }
 
   return chips;
 }
 
-function TargetListAiPanelInner({
-  athleteId,
-  athleteName,
+export function MasterTargetListAiPanel({
   rows,
   activeCategoryFilter,
+  activeAthleteFilter,
   selectedCompanyIds,
   focusedRow,
   getSessionContext,
@@ -145,7 +139,7 @@ function TargetListAiPanelInner({
   onChatComplete,
   collapsed: collapsedProp,
   onCollapsedChange,
-}: TargetListAiPanelProps) {
+}: MasterTargetListAiPanelProps) {
   const { profile } = useAuth();
   const role = (profile?.role ?? "agent") as "admin" | "sales" | "agent";
   const chatRef = useRef<ChatPanelHandle>(null);
@@ -238,8 +232,7 @@ function TargetListAiPanelInner({
             memory_notes: project.memoryNotes,
           },
           mode: options?.mode ?? "default",
-          athlete_id: options?.athleteId ?? athleteId,
-          ui_context: options?.uiContext ?? "target_list",
+          ui_context: options?.uiContext ?? "master_target_list",
           flow_mode: options?.flowMode,
           ...(extraContext.trim() ? { extra_system_context: extraContext } : {}),
         },
@@ -252,12 +245,12 @@ function TargetListAiPanelInner({
         }
       );
     },
-    [athleteId, getSessionContext]
+    [getSessionContext]
   );
 
   const handleAssistantReply = useCallback(() => {
     const used = toolsUsedRef.current;
-    const mutating = [...used].some((t) => TARGET_LIST_MUTATING_TOOLS.has(t));
+    const mutating = [...used].some((t) => MASTER_TARGET_LIST_MUTATING_TOOLS.has(t));
     if (mutating) onMutatingToolsUsed?.();
     onChatComplete?.();
   }, [onMutatingToolsUsed, onChatComplete]);
@@ -265,22 +258,19 @@ function TargetListAiPanelInner({
   const quickChips = useMemo(
     () =>
       buildQuickChips({
-        athleteId,
-        athleteName,
         rows,
         activeCategoryFilter,
+        activeAthleteFilter,
         selectedCompanyIds,
         focusedRow,
         getSessionContext,
       }),
-    [athleteId, athleteName, rows, activeCategoryFilter, selectedCompanyIds, focusedRow, getSessionContext]
+    [rows, activeCategoryFilter, activeAthleteFilter, selectedCompanyIds, focusedRow, getSessionContext]
   );
 
   if (collapsed) return null;
 
-  const panelTitle = athleteName
-    ? `Mystery Machine — ${athleteName} (TL)`
-    : "Mystery Machine (TL)";
+  const panelTitle = "Mystery Machine — Master Target List";
 
   const panelBody = (
     <div className="flex h-full min-h-0 flex-col">
@@ -330,11 +320,9 @@ function TargetListAiPanelInner({
           onSend={onSend}
           layout="embedded"
           hideHeader
-          athleteId={athleteId}
-          uiContext="target_list"
-          contextAthleteName={athleteName}
-          embeddedDedicatedProjectName={`Target list ${athleteId}`}
-          placeholder="Add companies, change categories, draft emails…"
+          uiContext="master_target_list"
+          embeddedDedicatedProjectName="Master target list"
+          placeholder="Categorize, draft emails, manage roster target lists…"
           onAssistantReply={handleAssistantReply}
         />
       </div>
@@ -409,14 +397,3 @@ function TargetListAiPanelInner({
     </div>
   );
 }
-
-export function TargetListAiPanel(props: TargetListAiPanelProps) {
-  return <TargetListAiPanelInner {...props} />;
-}
-
-/** @deprecated Use TargetListAiPanel — kept for existing imports */
-export function TargetListAiDock(props: TargetListAiDockProps) {
-  return <TargetListAiPanelInner {...props} />;
-}
-
-export { TARGET_LIST_MUTATING_TOOLS };

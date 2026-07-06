@@ -9,7 +9,15 @@ import { ChatPanel, type ChatFlowMode, type ChatProject, type ChatUiContext, typ
 import { parseFlowMode } from "@/lib/ai/flow-mode";
 
 function parseUiContext(raw: string | null): ChatUiContext | undefined {
-  if (raw === "target_list" || raw === "consulting_target_list" || raw === "crm_pipeline" || raw === "global") return raw;
+  if (
+    raw === "target_list" ||
+    raw === "consulting_target_list" ||
+    raw === "master_target_list" ||
+    raw === "crm_pipeline" ||
+    raw === "global"
+  ) {
+    return raw;
+  }
   return undefined;
 }
 
@@ -40,7 +48,6 @@ function AIChatClientInner({ role }: { role: string }) {
         athleteId?: string;
         uiContext?: ChatUiContext;
         flowMode?: ChatFlowMode;
-        chatModel?: "sonnet" | "opus";
       }
     ): Promise<PostAiChatResult> => {
       const payload = messages.map((m) => ({ role: m.role, content: m.content }));
@@ -62,7 +69,6 @@ function AIChatClientInner({ role }: { role: string }) {
           ...(resolvedAthleteId ? { athlete_id: resolvedAthleteId } : {}),
           ...(resolvedUiContext ? { ui_context: resolvedUiContext } : {}),
           flow_mode: resolvedFlowMode ?? "auto",
-          ...(options?.chatModel ? { chat_model: options.chatModel } : {}),
         },
         {
           signal: options?.signal,

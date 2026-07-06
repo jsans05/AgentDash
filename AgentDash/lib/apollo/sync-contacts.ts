@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { apolloLastNameForStorage, isPlaceholderLastName } from "@/lib/crm/contact-display-name";
+import { contactsLikelySamePerson } from "@/lib/crm/target-list-duplicate-contacts";
 import type { ApolloSearchPerson } from "@/lib/apollo/types";
 
 export type SyncedApolloContact = {
@@ -64,9 +65,20 @@ export async function upsertApolloPendingContacts(
   for (const person of people) {
     const last_name = apolloLastNameForStorage(person.last_name);
     const nameKey = `${person.first_name.toLowerCase()}||${last_name.toLowerCase()}`;
-    const existing =
+    let existing =
       byApolloId.get(person.apollo_person_id) ??
       (!isPlaceholderLastName(last_name) ? byName.get(nameKey) : undefined);
+
+    if (!existing) {
+      existing = (existingRows ?? []).find(
+        (row) =>
+          !row.apollo_person_id &&
+          contactsLikelySamePerson(
+            { first_name: person.first_name, last_name },
+            { first_name: row.first_name, last_name: row.last_name }
+          )
+      );
+    }
 
     const payload = {
       company_id: companyId,

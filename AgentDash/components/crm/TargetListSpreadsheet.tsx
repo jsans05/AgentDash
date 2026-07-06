@@ -25,8 +25,10 @@ import {
 } from "@/lib/crm/target-list-column-config";
 import { exportTargetListToExcel } from "@/lib/crm/target-list-export";
 import { FirmographicsInvestigateCell } from "@/components/crm/FirmographicsInvestigateCell";
+import { CompanyRecentNewsProvider } from "@/components/crm/CompanyRecentNewsPanel";
 import { TargetListActionDialog } from "@/components/crm/TargetListActionDialog";
 import { TargetListAiPanel } from "@/components/crm/TargetListAiDock";
+import { MasterTargetListAiPanel } from "@/components/crm/MasterTargetListAiDock";
 import { TargetListCompanyContactActions } from "@/components/crm/TargetListCompanyContactActions";
 import { isEffectivelyUncategorizedCompanyCategory } from "@/lib/crm/company-category";
 import {
@@ -40,6 +42,7 @@ import {
   buildTargetListSessionContext,
   type TargetListFocusedRow,
 } from "@/lib/crm/target-list-session-context";
+import { buildMasterTargetListSessionContext } from "@/lib/crm/master-target-list-session-context";
 import { cn } from "@/lib/utils";
 import { formatApolloPartnershipSearchSummary } from "@/lib/apollo/search-defaults";
 import { formatContactDisplayName } from "@/lib/crm/contact-display-name";
@@ -48,8 +51,12 @@ import {
   TARGET_LIST_DELETE_CONTACTS_BULK_DISMISS_KEY,
   TARGET_LIST_FIND_CONTACTS_DISMISS_KEY,
   TARGET_LIST_REMOVE_COMPANY_DISMISS_KEY,
+  TARGET_LIST_REMOVE_UNREVEALED_ALL_DISMISS_KEY,
 } from "@/lib/crm/target-list-prefs";
+import { batchDeleteCrmContacts } from "@/lib/crm/batch-delete-contacts";
 import {
+  collectUnrevealedDeletableContactIds,
+  isBulkRemovableTargetListContact,
   isDeletableTargetListContact,
   mapApiContactToTargetList,
   mergeCompanyContactsIntoRows,
@@ -329,8 +336,10 @@ export function TargetListSpreadsheet({
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState<{
     companyId: string;
     contactIds: string[];
-    mode: "unrevealed" | "selected";
+    mode: "unrevealed" | "selected" | "duplicates";
   } | null>(null);
+  const [bulkRemoveUnrevealed, setBulkRemoveUnrevealed] = useState(false);
+  const [bulkRemoveUnrevealedConfirmOpen, setBulkRemoveUnrevealedConfirmOpen] = useState(false);
   const [apolloProspectingPrefs, setApolloProspectingPrefs] = useState<ApolloRevenueFilterPrefs>({});
   const [apolloSearchOverrides, setApolloSearchOverrides] = useState<ApolloContactSearchOverrides>({});
   const [refineSearchOpen, setRefineSearchOpen] = useState(false);
@@ -349,10 +358,16 @@ export function TargetListSpreadsheet({
   const bulkActionsDisabled =
     bulkFindContacts ||
     bulkPartnershipResearch ||
+    bulkRemoveUnrevealed ||
     researchingPipelineId != null ||
     loading ||
     !rows ||
     rows.length === 0;
+
+  const unrevealedContactIds = useMemo(
+    () => (rows ? collectUnrevealedDeletableContactIds(rows) : []),
+    [rows]
+  );
 
   const setFocusModePersisted = useCallback((next: boolean) => {
     setFocusMode(next);
@@ -547,16 +562,52 @@ export function TargetListSpreadsheet({
   }, [rows, visibleRowIndexes]);
 
   const getSessionContext = useCallback(() => {
-    if (!rows || !isAthlete || !athleteId) return "";
-    return buildTargetListSessionContext({
-      athleteId,
-      athleteName,
-      activeCategoryFilter,
-      rows,
-      selectedCompanyIds,
-      focusedRow,
-    });
-  }, [athleteId, athleteName, activeCategoryFilter, rows, selectedCompanyIds, focusedRow, isAthlete]);
+    if (!rows) return "";
+    if (isAthlete && athleteId) {
+      return buildTargetListSessionContext({
+        athleteId,
+        athleteName,
+        activeCategoryFilter,
+        rows,
+        selectedCompanyIds,
+        focusedRow,
+      });
+    }
+    if (isMaster) {
+      return buildMasterTargetListSessionContext({
+        activeCategoryFilter,
+        activeAthleteFilter,
+        rosterAthletes: masterRosterAthletes,
+        rows: rows.map((r) => ({
+          pipeline_id: r.pipeline_id,
+          company_id: r.company_id,
+          company_name: r.company_name,
+          category: r.category,
+          match_score: r.match_score,
+          assigned_athletes: r.assigned_athletes ?? [],
+          contacts: r.contacts.map((c) => ({
+            contact_id: c.contact_id,
+            first_name: c.first_name,
+            last_name: c.last_name,
+          })),
+        })),
+        selectedCompanyIds,
+        focusedRow,
+      });
+    }
+    return "";
+  }, [
+    athleteId,
+    athleteName,
+    activeCategoryFilter,
+    activeAthleteFilter,
+    masterRosterAthletes,
+    rows,
+    selectedCompanyIds,
+    focusedRow,
+    isAthlete,
+    isMaster,
+  ]);
 
   const refreshAfterAiMutation = useCallback(async () => {
     const toFlash = new Set<string>();
@@ -593,14 +644,14 @@ export function TargetListSpreadsheet({
         setFocusModePersisted(false);
         return;
       }
-      if (isAthlete && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "j") {
+      if ((isAthlete || isMaster) && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "j") {
         e.preventDefault();
         setAiDockCollapsed((c) => !c);
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [focusMode, setFocusModePersisted, isAthlete]);
+  }, [focusMode, setFocusModePersisted, isAthlete, isMaster]);
 
   function toggleCompanySelected(companyId: string, checked: boolean) {
     setSelectedCompanyIds((prev) => {
@@ -696,7 +747,7 @@ export function TargetListSpreadsheet({
   function requestBulkDeleteContacts(
     companyId: string,
     contactIds: string[],
-    mode: "unrevealed" | "selected"
+    mode: "unrevealed" | "selected" | "duplicates"
   ) {
     if (contactIds.length === 0) return;
     if (isTargetListDialogDismissed(TARGET_LIST_DELETE_CONTACTS_BULK_DISMISS_KEY)) {
@@ -706,26 +757,42 @@ export function TargetListSpreadsheet({
     setBulkDeleteConfirm({ companyId, contactIds, mode });
   }
 
-  async function bulkDeleteContacts(companyId: string, contactIds: string[]) {
+  async function bulkDeleteContacts(_companyId: string, contactIds: string[]) {
     if (contactIds.length === 0) return;
-    setDeletingContactsCompanyId(companyId);
+    setDeletingContactsCompanyId(_companyId);
     setGlobalError(null);
     try {
-      const res = await fetch("/api/crm/contacts/batch", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ contact_ids: contactIds }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Delete failed");
-      const deleted: string[] = Array.isArray(data.deleted) ? data.deleted.map(String) : [];
+      const deleted = await batchDeleteCrmContacts(contactIds);
       if (deleted.length === 0) throw new Error("No contacts were deleted");
       removeContactsLocal(deleted);
     } catch (e) {
       setGlobalError(e instanceof Error ? e.message : "Delete failed");
     } finally {
       setDeletingContactsCompanyId(null);
+    }
+  }
+
+  function requestBulkRemoveUnrevealedAll() {
+    if (unrevealedContactIds.length === 0) return;
+    if (isTargetListDialogDismissed(TARGET_LIST_REMOVE_UNREVEALED_ALL_DISMISS_KEY)) {
+      void bulkRemoveUnrevealedAll();
+      return;
+    }
+    setBulkRemoveUnrevealedConfirmOpen(true);
+  }
+
+  async function bulkRemoveUnrevealedAll() {
+    if (unrevealedContactIds.length === 0) return;
+    setBulkRemoveUnrevealed(true);
+    setGlobalError(null);
+    try {
+      const deleted = await batchDeleteCrmContacts(unrevealedContactIds);
+      if (deleted.length === 0) throw new Error("No contacts were deleted");
+      removeContactsLocal(deleted);
+    } catch (e) {
+      setGlobalError(e instanceof Error ? e.message : "Remove unrevealed failed");
+    } finally {
+      setBulkRemoveUnrevealed(false);
     }
   }
 
@@ -1170,6 +1237,19 @@ export function TargetListSpreadsheet({
                       type="button"
                       onClick={() => {
                         setBulkActionsOpen(false);
+                        requestBulkRemoveUnrevealedAll();
+                      }}
+                      disabled={bulkActionsDisabled || unrevealedContactIds.length === 0}
+                      className="block w-full px-3 py-2 text-left text-xs text-[#D7D0C4] hover:bg-white/5 disabled:opacity-50"
+                    >
+                      {bulkRemoveUnrevealed
+                        ? "Removing unrevealed…"
+                        : `Remove unrevealed (all)${unrevealedContactIds.length > 0 ? ` (${unrevealedContactIds.length})` : ""}`}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBulkActionsOpen(false);
                         void researchPartnershipsForAllCompanies();
                       }}
                       disabled={bulkActionsDisabled}
@@ -1210,7 +1290,7 @@ export function TargetListSpreadsheet({
                   </div>
                 ) : null}
               </div>
-              {isAthlete ? (
+              {isAthlete || isMaster ? (
                 <button
                   type="button"
                   onClick={() => setAiDockCollapsed((c) => !c)}
@@ -1282,7 +1362,7 @@ export function TargetListSpreadsheet({
                   {rows.length} {rows.length === 1 ? "company" : "companies"}
                 </span>
               ) : null}
-              {isAthlete ? (
+              {isAthlete || isMaster ? (
                 <button
                   type="button"
                   onClick={() => setAiDockCollapsed((c) => !c)}
@@ -1322,6 +1402,20 @@ export function TargetListSpreadsheet({
                 ) : (
                   "Find contacts (all)"
                 )}
+              </button>
+              <button
+                type="button"
+                onClick={() => requestBulkRemoveUnrevealedAll()}
+                disabled={bulkActionsDisabled || unrevealedContactIds.length === 0}
+                className={cn(
+                  bulkActionBtnClass,
+                  "border-[#8C3A3A]/50 bg-[#2A1818] text-[#F1A2A2] hover:bg-[#3A1E1E]"
+                )}
+                title="Remove all Apollo contact candidates that have not been revealed yet"
+              >
+                {bulkRemoveUnrevealed
+                  ? "Removing unrevealed…"
+                  : `Remove unrevealed (all)${unrevealedContactIds.length > 0 ? ` (${unrevealedContactIds.length})` : ""}`}
               </button>
               <button
                 type="button"
@@ -1443,9 +1537,34 @@ export function TargetListSpreadsheet({
       />
 
       <TargetListActionDialog
+        open={bulkRemoveUnrevealedConfirmOpen}
+        title="Remove unrevealed contacts (all companies)?"
+        variant="danger"
+        description={
+          <>
+            <p>
+              Remove {unrevealedContactIds.length} Apollo contact{" "}
+              {unrevealedContactIds.length === 1 ? "candidate" : "candidates"} across the target list
+              that haven&apos;t been revealed. No credits were used for these contacts.
+            </p>
+            <p className="text-[#AEA79A]">You can find contacts again later with Find contacts.</p>
+          </>
+        }
+        confirmLabel="Remove unrevealed (all)"
+        dismissStorageKey={TARGET_LIST_REMOVE_UNREVEALED_ALL_DISMISS_KEY}
+        onCancel={() => setBulkRemoveUnrevealedConfirmOpen(false)}
+        onConfirm={() => {
+          setBulkRemoveUnrevealedConfirmOpen(false);
+          void bulkRemoveUnrevealedAll();
+        }}
+      />
+
+      <TargetListActionDialog
         open={bulkDeleteConfirm != null}
         title={
-          bulkDeleteConfirm?.mode === "unrevealed"
+          bulkDeleteConfirm?.mode === "duplicates"
+            ? "Remove duplicate contacts?"
+            : bulkDeleteConfirm?.mode === "unrevealed"
             ? "Remove unrevealed contacts?"
             : bulkDeleteConfirm &&
                 rows
@@ -1461,7 +1580,16 @@ export function TargetListSpreadsheet({
         variant="danger"
         description={
           bulkDeleteConfirm ? (
-            bulkDeleteConfirm.mode === "unrevealed" ? (
+            bulkDeleteConfirm.mode === "duplicates" ? (
+              <>
+                <p>
+                  Remove {bulkDeleteConfirm.contactIds.length} older duplicate{" "}
+                  {bulkDeleteConfirm.contactIds.length === 1 ? "entry" : "entries"} for the same
+                  person. The Apollo-linked contact with email will be kept.
+                </p>
+                <p className="text-[#AEA79A]">This cannot be undone.</p>
+              </>
+            ) : bulkDeleteConfirm.mode === "unrevealed" ? (
               <>
                 <p>
                   Remove {bulkDeleteConfirm.contactIds.length} Apollo contact{" "}
@@ -1888,7 +2016,7 @@ export function TargetListSpreadsheet({
                     {/* Contact Name */}
                     <Td className={yellowCell}>
                       <div className="flex items-start gap-1.5">
-                        {contact && isDeletableTargetListContact(contact) ? (
+                        {contact && isBulkRemovableTargetListContact(contact, row.contacts) ? (
                           <input
                             type="checkbox"
                             className="mt-1 rounded border-white/20"
@@ -2289,12 +2417,31 @@ export function TargetListSpreadsheet({
           collapsed={aiDockCollapsed}
           onCollapsedChange={setAiDockCollapsed}
         />
+      ) : isMaster ? (
+        <MasterTargetListAiPanel
+          rows={(rows ?? []).map((r) => ({
+            pipeline_id: r.pipeline_id,
+            company_id: r.company_id,
+            company_name: r.company_name,
+            category: r.category,
+            assigned_athletes: r.assigned_athletes ?? [],
+          }))}
+          activeCategoryFilter={activeCategoryFilter}
+          activeAthleteFilter={activeAthleteFilter}
+          selectedCompanyIds={selectedCompanyIds}
+          focusedRow={focusedRow}
+          getSessionContext={getSessionContext}
+          onMutatingToolsUsed={() => void refreshAfterAiMutation()}
+          collapsed={aiDockCollapsed}
+          onCollapsedChange={setAiDockCollapsed}
+        />
       ) : null}
       </div>
     </div>
   );
 
   return (
+    <CompanyRecentNewsProvider>
     <>
       {matchScoreAthletePick != null && rows?.[matchScoreAthletePick.rowIndex] ? (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
@@ -2346,6 +2493,7 @@ export function TargetListSpreadsheet({
         ? createPortal(listShell, document.body)
         : listShell}
     </>
+    </CompanyRecentNewsProvider>
   );
 }
 

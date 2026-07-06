@@ -2,6 +2,7 @@ import { createServiceRoleClient } from "./supabase/server";
 import { redirect } from "next/navigation";
 import type { Profile } from "./supabase/types";
 import { validateServerSession } from "./auth-session";
+import { isAnyConsultingProfileMember } from "./consulting/access";
 
 export async function getCurrentUser() {
   const validation = await validateServerSession();
@@ -51,6 +52,19 @@ export async function requireRole(role: "admin" | "sales" | "agent") {
 export async function requireAdminOrSales() {
   const profile = await requireProfile();
   if (profile.role !== "admin" && profile.role !== "sales") {
+    redirect("/unauthorized");
+  }
+  return profile;
+}
+
+export async function requireMarketIntelAccess() {
+  const profile = await requireProfile();
+  if (profile.role === "admin" || profile.role === "sales") {
+    return profile;
+  }
+  const supabase = await createServiceRoleClient();
+  const isConsultingUser = await isAnyConsultingProfileMember(supabase, profile.user_id);
+  if (!isConsultingUser) {
     redirect("/unauthorized");
   }
   return profile;

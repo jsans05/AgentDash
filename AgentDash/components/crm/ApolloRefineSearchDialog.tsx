@@ -57,8 +57,8 @@ export function ApolloRefineSearchDialog({
           Refine Apollo search
         </h2>
         <p className="mt-1 text-xs text-[#AEA79A]">
-          Narrow contact search for Find contacts. Leave job titles empty to use default partnership
-          filters ({defaultTitles}).
+          Narrow contact search for Find contacts. Leave job titles empty to use default department
+          filters (Brand Design; Business Development & Partnerships).
         </p>
 
         <div className="mt-3 space-y-3">
