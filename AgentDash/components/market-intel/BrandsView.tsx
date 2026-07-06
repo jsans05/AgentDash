@@ -813,17 +813,7 @@ export function BrandsView({
                       </td>
                       <td className="px-4 py-3 tabular-nums text-[#B9B2A6]">{count}</td>
                       <td className="px-4 py-3">
-                        <div className="space-y-1.5" onClick={(e) => e.stopPropagation()}>
-                          <FirmographicsSummary enrichment={enrichment} />
-                          <button
-                            type="button"
-                            className={actionBtn}
-                            disabled={isEnriching || enrichBusy}
-                            onClick={() => requestEnrich([brand.key])}
-                          >
-                            {isEnriching ? "Investigating…" : "Investigate"}
-                          </button>
-                        </div>
+                        <FirmographicsSummary enrichment={enrichment} />
                       </td>
                       <td className="px-4 py-3">
                         <ChipList
@@ -840,7 +830,7 @@ export function BrandsView({
                             disabled={isEnriching || enrichBusy}
                             onClick={() => requestEnrich([brand.key])}
                           >
-                            {isEnriching ? "Enriching…" : "Enrich"}
+                            {isEnriching ? "Investigating…" : "Investigate"}
                           </button>
                           {hasConsultingProfiles && (
                             <button
