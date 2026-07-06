@@ -25,7 +25,7 @@ export function ContactEmailCell({
 
   if (apolloRevealStatus === "pending" && email) {
     return (
-      <div className={compact ? "flex flex-col gap-1" : "flex flex-wrap items-center gap-1.5"}>
+      <div className="flex flex-col gap-1">
         <a
           href={`mailto:${email}`}
           className="text-[#CEE4D4] hover:underline break-all"
