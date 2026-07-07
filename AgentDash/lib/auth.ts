@@ -1,6 +1,6 @@
 import { createServiceRoleClient } from "./supabase/server";
 import { redirect } from "next/navigation";
-import type { Profile } from "./supabase/types";
+import type { Profile, AppRole } from "./supabase/types";
 import { validateServerSession } from "./auth-session";
 import { isAnyConsultingProfileMember } from "./consulting/access";
 
@@ -41,10 +41,18 @@ export async function requireProfile(): Promise<Profile> {
   return profile;
 }
 
-export async function requireRole(role: "admin" | "sales" | "agent") {
+export async function requireRole(role: AppRole) {
   const profile = await requireProfile();
   if (profile.role !== role && profile.role !== "admin") {
     redirect("/unauthorized");
+  }
+  return profile;
+}
+
+export async function requireNonAccounting(): Promise<Profile> {
+  const profile = await requireProfile();
+  if (profile.role === "accounting") {
+    redirect("/roster");
   }
   return profile;
 }

@@ -1,5 +1,5 @@
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { internalServerError } from "@/lib/api/http-errors";
 import {
   normalizePipelineStage,
@@ -53,7 +53,7 @@ export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const supabaseAdmin = await createServiceRoleClient();
   const body = await req.json().catch(() => ({}));
@@ -186,7 +186,7 @@ export async function DELETE(
   _req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  await requireProfile();
+  await requireNonAccounting();
   const supabase = await createServerClient();
   const { id } = await params;
 

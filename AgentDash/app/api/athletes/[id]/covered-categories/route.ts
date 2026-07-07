@@ -1,5 +1,5 @@
 import { createServerClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { NextResponse } from "next/server";
 
 export async function GET(
@@ -7,7 +7,7 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: athleteId } = await params;
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
 
   if (profile.role === "agent") {
@@ -40,7 +40,7 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: athleteId } = await params;
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
 
   if (profile.role === "agent") {

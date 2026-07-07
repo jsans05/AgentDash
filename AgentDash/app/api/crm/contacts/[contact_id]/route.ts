@@ -1,5 +1,5 @@
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { NextResponse } from "next/server";
 
 function normalizeEmail(v: unknown): string | null {
@@ -90,7 +90,7 @@ export async function GET(
   _req: Request,
   { params }: { params: Promise<{ contact_id: string }> }
 ) {
-  await requireProfile();
+  await requireNonAccounting();
   const supabase = await createServerClient();
   const { contact_id } = await params;
 
@@ -117,7 +117,7 @@ export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ contact_id: string }> }
 ) {
-  await requireProfile();
+  await requireNonAccounting();
   const supabase = await createServerClient();
   const supabaseAdmin = await createServiceRoleClient();
 
@@ -304,7 +304,7 @@ export async function DELETE(
   _req: Request,
   { params }: { params: Promise<{ contact_id: string }> }
 ) {
-  await requireProfile();
+  await requireNonAccounting();
   const supabase = await createServerClient();
   const { contact_id } = await params;
 

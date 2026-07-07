@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { requireConsultingProfileAdmin, ConsultingAccessError } from "@/lib/consulting/access";
 
 export async function GET() {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
 
   if (profile.role === "admin") {
@@ -35,7 +35,7 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   try {
     await requireConsultingProfileAdmin(profile);
   } catch (e) {

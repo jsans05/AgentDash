@@ -1,4 +1,4 @@
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { internalServerError } from "@/lib/api/http-errors";
 import { enforceContentLengthLimit } from "@/lib/api/request-limits";
 import { createServerClient } from "@/lib/supabase/server";
@@ -35,7 +35,7 @@ function normalizeMemoryList(values: string[]): string[] {
 }
 
 export async function GET(req: Request) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const url = new URL(req.url);
   const projectId = url.searchParams.get("project_id")?.trim() || null;
@@ -66,7 +66,7 @@ export async function PATCH(req: Request) {
   const contentLengthError = enforceContentLengthLimit(req);
   if (contentLengthError) return contentLengthError;
 
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const parsed = updateUserMemorySchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { requireConsultingProfileAccess, ConsultingAccessError } from "@/lib/consulting/access";
 import {
@@ -13,7 +13,7 @@ import { enrichTargetListRowsWithAgencyActivity } from "@/lib/crm/company-cross-
 type RouteParams = { params: Promise<{ id: string }> };
 
 export async function GET(_req: Request, { params }: RouteParams) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const { id } = await params;
   const supabase = await createServerClient();
 
@@ -37,7 +37,7 @@ export async function GET(_req: Request, { params }: RouteParams) {
 }
 
 export async function POST(req: Request, { params }: RouteParams) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const { id: consultingProfileId } = await params;
   const supabase = await createServerClient();
 
@@ -120,7 +120,7 @@ export async function POST(req: Request, { params }: RouteParams) {
 }
 
 export async function DELETE(req: Request, { params }: RouteParams) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const { id: consultingProfileId } = await params;
   const supabase = await createServerClient();
 

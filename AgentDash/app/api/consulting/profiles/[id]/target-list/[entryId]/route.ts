@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { requireConsultingProfileAccess, ConsultingAccessError } from "@/lib/consulting/access";
 
 type RouteParams = { params: Promise<{ id: string; entryId: string }> };
 
 export async function PATCH(req: Request, { params }: RouteParams) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const { id: consultingProfileId, entryId } = await params;
   const supabase = await createServerClient();
 

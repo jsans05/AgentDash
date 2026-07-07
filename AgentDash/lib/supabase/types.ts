@@ -1,6 +1,8 @@
+export type AppRole = "admin" | "sales" | "agent" | "accounting";
+
 export type Profile = {
   user_id: string;
-  role: "admin" | "sales" | "agent";
+  role: AppRole;
   first_name: string | null;
   last_name: string | null;
   email: string | null;

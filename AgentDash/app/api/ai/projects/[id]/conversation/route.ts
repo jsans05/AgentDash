@@ -1,6 +1,6 @@
 import { isPendingTurnState, parseMessageMetadata } from "@/lib/ai/user-question";
 import { internalServerError, unauthorizedResponse } from "@/lib/api/http-errors";
-import { getCurrentProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { createServerClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
 
@@ -24,8 +24,7 @@ async function getLatestConversation(
 }
 
 export async function GET(req: Request, ctx: Ctx) {
-  const profile = await getCurrentProfile();
-  if (!profile) return unauthorizedResponse();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const { id } = await ctx.params;
   const requestedConversationId = new URL(req.url).searchParams.get("conversation_id")?.trim() ?? "";
@@ -125,8 +124,7 @@ export async function GET(req: Request, ctx: Ctx) {
 }
 
 export async function POST(req: Request, ctx: Ctx) {
-  const profile = await getCurrentProfile();
-  if (!profile) return unauthorizedResponse();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const { id } = await ctx.params;
   const body = await req.json().catch(() => ({}));

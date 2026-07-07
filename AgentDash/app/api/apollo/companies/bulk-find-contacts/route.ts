@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { createServiceRoleClient } from "@/lib/supabase/server";
 import { isApolloEnabled } from "@/lib/apollo/config";
 import { findContactsForCompany } from "@/lib/apollo/find-company-contacts";
@@ -8,7 +8,7 @@ import { parseContactSearchOverridesFromBody } from "@/lib/apollo/contact-search
 import { apolloContactOverridesToPeopleSearch } from "@/lib/apollo/search-defaults";
 
 export async function POST(req: Request) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   if (!isApolloEnabled()) {
     return NextResponse.json({ error: "Apollo API is not configured" }, { status: 503 });
   }

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import {
   companyWebsiteHintFromParts,
   isAcceptablePartnershipMarkdown,
@@ -18,7 +18,7 @@ function mergeResearchBlock(existing: string | null, block: string): string {
 }
 
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const { id } = await params;
 

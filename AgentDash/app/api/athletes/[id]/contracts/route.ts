@@ -1,5 +1,5 @@
 import { createServerClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import {
   ensureAthleteAccess,
   getContractCategoryDisplay,
@@ -21,7 +21,7 @@ export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
 
   const { id: athleteId } = await params;

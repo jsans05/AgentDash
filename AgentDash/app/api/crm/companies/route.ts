@@ -1,5 +1,5 @@
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { isApolloEnabled } from "@/lib/apollo/config";
 import { persistApolloMetadataForCompany } from "@/lib/apollo/persist-company";
 import { resolveCompanyWebsiteForTargetList } from "@/lib/crm/resolve-company-website-for-target-list";
@@ -56,7 +56,7 @@ async function getOrCreateCompanyByName(
 }
 
 export async function GET() {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
 
   let query = supabase
@@ -74,7 +74,7 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const supabaseAdmin = await createServiceRoleClient();
   const body = await req.json().catch(() => ({}));

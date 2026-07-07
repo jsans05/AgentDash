@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { requireConsultingProfileAdmin, ConsultingAccessError } from "@/lib/consulting/access";
 import { getOrCreateCompanyByName } from "@/lib/consulting/companies";
@@ -10,7 +10,7 @@ import { resolveCompanyWebsiteForTargetList } from "@/lib/crm/resolve-company-we
 type RouteParams = { params: Promise<{ id: string }> };
 
 export async function POST(req: Request, { params }: RouteParams) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const { id: profileId } = await params;
 
   try {
@@ -67,7 +67,7 @@ export async function POST(req: Request, { params }: RouteParams) {
 }
 
 export async function DELETE(req: Request, { params }: RouteParams) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const { id: profileId } = await params;
 
   try {

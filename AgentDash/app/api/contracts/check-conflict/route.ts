@@ -1,5 +1,5 @@
 import { createServerClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { ensureAthleteAccess } from "@/lib/features/contracts/service";
 import { NextResponse } from "next/server";
 
@@ -8,7 +8,7 @@ import { NextResponse } from "next/server";
  * Query params: athlete_id, category (text category from taxonomy)
  */
 export async function GET(req: Request) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const { searchParams } = new URL(req.url);
   const athleteId = searchParams.get("athlete_id");
   const category = searchParams.get("category")?.trim();

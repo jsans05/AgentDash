@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { generateSingleAthleteOutreachEmail } from "@/lib/ai/generate-single-athlete-outreach";
 import { upsertContactOutreachDraft } from "@/lib/crm/target-list-outreach";
 import { formatContactDisplayName } from "@/lib/crm/contact-display-name";
@@ -65,7 +65,7 @@ function recipientFirstName(contact: ContactRow | null, fallback: string): strin
 }
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const { id: athleteId } = await params;
   const body = await req.json().catch(() => ({}));

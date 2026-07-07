@@ -1,4 +1,4 @@
-import { getCurrentProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { internalServerError, unauthorizedResponse } from "@/lib/api/http-errors";
 import { enforceContentLengthLimit } from "@/lib/api/request-limits";
 import { createServerClient } from "@/lib/supabase/server";
@@ -14,8 +14,7 @@ const createProjectSchema = z
   .strict();
 
 export async function GET() {
-  const profile = await getCurrentProfile();
-  if (!profile) return unauthorizedResponse();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
 
   const { data: projects, error } = await supabase
@@ -35,8 +34,7 @@ export async function POST(req: Request) {
   const contentLengthError = enforceContentLengthLimit(req);
   if (contentLengthError) return contentLengthError;
 
-  const profile = await getCurrentProfile();
-  if (!profile) return unauthorizedResponse();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const parsedBody = createProjectSchema.safeParse(await req.json().catch(() => null));
   if (!parsedBody.success) {

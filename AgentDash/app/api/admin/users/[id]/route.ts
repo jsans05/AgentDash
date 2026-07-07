@@ -30,7 +30,7 @@ export async function PATCH(
   if (first_name !== undefined) profileUpdates.first_name = (first_name ?? "").trim() || null;
   if (last_name !== undefined) profileUpdates.last_name = (last_name ?? "").trim() || null;
   if (email !== undefined) profileUpdates.email = email.trim().toLowerCase() || null;
-  if (role !== undefined && ["admin", "sales", "agent"].includes(role)) profileUpdates.role = role;
+  if (role !== undefined && ["admin", "sales", "agent", "accounting"].includes(role)) profileUpdates.role = role;
 
   if (Object.keys(profileUpdates).length > 0) {
     const { error: profileError } = await supabase

@@ -1,5 +1,5 @@
 import { createServerClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { internalServerError } from "@/lib/api/http-errors";
 import { NextResponse } from "next/server";
 
@@ -15,7 +15,7 @@ function parseContactIds(body: unknown): string[] | null {
 }
 
 export async function DELETE(req: Request) {
-  await requireProfile();
+  await requireNonAccounting();
   const supabase = await createServerClient();
 
   let body: unknown;

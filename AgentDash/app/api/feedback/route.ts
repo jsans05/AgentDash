@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { createServerClient } from "@/lib/supabase/server";
 
 export async function POST(req: Request) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const body = await req.json().catch(() => ({}));
   const feedback = String(body.feedback ?? "").trim();
 

@@ -1,12 +1,12 @@
 import { createServerClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { NextResponse } from "next/server";
 
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ contact_id: string }> }
 ) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
 
   const { contact_id } = await params;

@@ -1,5 +1,5 @@
 import { createServerClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { fetchPipelineCardsForUser } from "@/lib/features/crm-pipeline/service";
 import { chunkArray } from "@/lib/import/chunk";
 import { NextResponse } from "next/server";
@@ -24,7 +24,7 @@ export type ContactDraftListItem = {
 };
 
 export async function GET() {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
 
   let cards: any[] = [];

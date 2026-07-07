@@ -124,6 +124,8 @@ export function UsersClient() {
                         ? "border border-[#6A4FA1]/50 bg-[#3A2E50] text-[#E6D8FF]"
                         : user.role === "sales"
                         ? "border border-[#4378A5]/50 bg-[#21384A] text-[#D7ECFF]"
+                        : user.role === "accounting"
+                        ? "border border-[#8A7348]/50 bg-[#3A3020] text-[#F3E4C8]"
                         : "border border-[#2E7040]/60 bg-[#1B2F21] text-[#DBEEE0]"
                     }`}
                   >
@@ -322,6 +324,7 @@ function UserModal({
             >
               <option value="agent">Agent</option>
               <option value="sales">Sales</option>
+              <option value="accounting">Accounting</option>
               <option value="admin">Admin</option>
             </select>
           </div>

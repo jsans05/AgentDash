@@ -1,5 +1,5 @@
 import { createServerClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { fetchTaxonomyNodesForSport } from "@/lib/taxonomy";
 import { NextResponse } from "next/server";
 
@@ -11,7 +11,7 @@ import { NextResponse } from "next/server";
  * If `sport` is omitted, returns all active nodes (every sport ENDEM + one global NON_ENDEMIC set).
  */
 export async function GET(req: Request) {
-  await requireProfile();
+  await requireNonAccounting();
   const { searchParams } = new URL(req.url);
   const sportParam = searchParams.get("sport")?.trim() || null;
 

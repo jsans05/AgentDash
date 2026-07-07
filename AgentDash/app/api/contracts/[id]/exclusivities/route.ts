@@ -1,5 +1,5 @@
 import { createServerClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { NextResponse } from "next/server";
 
 /**
@@ -10,7 +10,7 @@ export async function GET(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const { id: contractId } = await params;
   const supabase = await createServerClient();
 
@@ -82,7 +82,7 @@ export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const { id: contractId } = await params;
   const supabase = await createServerClient();
   const body = await req.json().catch(() => ({}));
@@ -174,7 +174,7 @@ export async function DELETE(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const { id: contractId } = await params;
   const supabase = await createServerClient();
   const url = new URL(req.url);

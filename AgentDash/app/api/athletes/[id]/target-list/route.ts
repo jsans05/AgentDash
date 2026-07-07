@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { fetchAthleteTargetListRows, type TargetListContact, type TargetListRow } from "@/lib/crm/athlete-target-list";
 import { enrichTargetListRowsWithAgencyActivity } from "@/lib/crm/company-cross-agent-activity-server";
 import { removeAthleteFromTargetListCard } from "@/lib/crm/remove-athlete-from-target-list";
@@ -16,7 +16,7 @@ export type { TargetListContact, TargetListRow };
  * scopes agents to their own contacts).
  */
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const { id: athleteId } = await params;
 
@@ -47,7 +47,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
  * Removes this athlete from a pipeline card's potential_athletes (company stays in CRM).
  */
 export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const { id: athleteId } = await params;
 

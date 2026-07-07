@@ -1,5 +1,5 @@
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import {
   fetchPipelineCardById,
   fetchPipelineCardsForUser,
@@ -35,7 +35,7 @@ async function getOrCreateCompanyByNameCaseInsensitive(
 }
 
 export async function GET() {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
 
   try {
@@ -48,7 +48,7 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const supabaseAdmin = await createServiceRoleClient();
   const body = await req.json().catch(() => ({}));

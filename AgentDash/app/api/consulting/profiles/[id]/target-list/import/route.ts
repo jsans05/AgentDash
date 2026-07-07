@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { requireConsultingProfileAccess, ConsultingAccessError } from "@/lib/consulting/access";
 import {
@@ -18,7 +18,7 @@ export async function POST(req: Request, { params }: RouteParams) {
   const contentLengthError = enforceContentLengthLimit(req);
   if (contentLengthError) return contentLengthError;
 
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const { id: consultingProfileId } = await params;
   const supabase = await createServerClient();
 

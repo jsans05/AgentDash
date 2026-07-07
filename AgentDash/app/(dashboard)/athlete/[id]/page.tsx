@@ -114,6 +114,11 @@ export default async function AthleteProfilePage({
   const audienceProfile = await getAthleteAudienceProfile(supabase, id);
 
   const canEdit = profile.role === "admin" || (profile.role === "agent" && agentIds.includes(profile.user_id));
+  const showOutreachTab = profile.role !== "accounting";
+
+  if (!showOutreachTab && activeTab === "outreach") {
+    redirect(`/athlete/${id}?tab=profile`);
+  }
 
   return (
     <div className="px-4 sm:px-6 lg:px-8">
@@ -146,16 +151,18 @@ export default async function AthleteProfilePage({
             >
               Profile
             </Link>
-            <Link
-              href={`/athlete/${id}?tab=outreach`}
-              className={`${
-                activeTab === "outreach"
-                  ? "border-[#2E7040]/70 bg-[#2E7040] text-[#F2FFF5]"
-                  : "border-transparent text-[#B9B2A6] hover:bg-white/5 hover:text-[#F4F1EB]"
-              } whitespace-nowrap rounded-md border px-3 py-1.5 text-sm font-medium transition-colors`}
-            >
-              Outreach
-            </Link>
+            {showOutreachTab && (
+              <Link
+                href={`/athlete/${id}?tab=outreach`}
+                className={`${
+                  activeTab === "outreach"
+                    ? "border-[#2E7040]/70 bg-[#2E7040] text-[#F2FFF5]"
+                    : "border-transparent text-[#B9B2A6] hover:bg-white/5 hover:text-[#F4F1EB]"
+                } whitespace-nowrap rounded-md border px-3 py-1.5 text-sm font-medium transition-colors`}
+              >
+                Outreach
+              </Link>
+            )}
           </nav>
         </div>
 

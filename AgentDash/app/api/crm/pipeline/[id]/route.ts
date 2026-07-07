@@ -1,5 +1,5 @@
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { normalizePipelineContacts } from "@/lib/crm/pipeline-contacts";
 import { setMatchScoreForAthlete } from "@/lib/crm/potential-athletes";
 import { resolveCompanyWebsiteForTargetList } from "@/lib/crm/resolve-company-website-for-target-list";
@@ -54,7 +54,7 @@ const PATCH_KEYS = new Set([
 ]);
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const supabaseAdmin = await createServiceRoleClient();
   const { id } = await params;
@@ -244,7 +244,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
 }
 
 export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const { id } = await params;
 

@@ -1,5 +1,5 @@
 import { createServerClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { internalErrorResponse, logServerError } from "@/lib/api-errors";
 import { ensureAthleteAccess } from "@/lib/features/contracts/service";
 import { NextResponse } from "next/server";
@@ -21,7 +21,7 @@ export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const parsedBody = createAccoladeSchema.safeParse(await req.json().catch(() => null));
   if (!parsedBody.success) {
@@ -59,7 +59,7 @@ export async function DELETE(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const parsedBody = deleteAccoladeSchema.safeParse(await req.json().catch(() => null));
   if (!parsedBody.success) {

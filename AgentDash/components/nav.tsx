@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase/client";
 import { useAuth } from "@/app/providers";
 import { cn } from "@/lib/utils";
+import type { AppRole } from "@/lib/supabase/types";
 
 function NavSkeleton() {
   return (
@@ -28,10 +29,10 @@ function NavSkeleton() {
 
 function normalizeAppRole(
   raw: string | null | undefined
-): "admin" | "sales" | "agent" | undefined {
+): AppRole | undefined {
   if (raw == null || typeof raw !== "string") return undefined;
   const r = raw.trim().toLowerCase();
-  if (r === "admin" || r === "sales" || r === "agent") return r;
+  if (r === "admin" || r === "sales" || r === "agent" || r === "accounting") return r;
   return undefined;
 }
 
@@ -55,10 +56,12 @@ export function Nav() {
     admin: "bg-[#3A2E50] text-[#E6D8FF] border border-[#6A4FA1]/50",
     sales: "bg-[#21384A] text-[#D7ECFF] border border-[#4378A5]/50",
     agent: "bg-[#1B2F21] text-[#DBEEE0] border border-[#2E7040]/60",
+    accounting: "bg-[#3A3020] text-[#F3E4C8] border border-[#8A7348]/50",
   };
 
   const role = normalizeAppRole(profile?.role);
   const displayEmail = profile?.email?.trim() || user.email || "—";
+  const isAccounting = role === "accounting";
   const showAdminLinks = role === "admin";
   const showInsightsLink = role === "admin" || role === "sales";
   const showMarketIntelLink = showInsightsLink || isConsultingUser;
@@ -66,18 +69,23 @@ export function Nav() {
     ? roleColors[role] ?? "border border-white/20 bg-white/10 text-[#E6E0D5]"
     : "border border-white/20 bg-white/10 text-[#B9B2A6]";
 
-  const navLinks = [
-    { href: "/roster", label: "Roster" },
-    ...(showInsightsLink ? [{ href: "/insights", label: "Insights" }] : []),
-    ...(showMarketIntelLink ? [{ href: "/market-intel", label: "Market Intel" }] : []),
-    { href: "/consulting", label: "Consulting" },
-    { href: "/ai", label: "Mystery Machine" },
-    { href: "/master-target-list", label: "Master Target List" },
-    { href: "/crm", label: "Pipeline" },
-    { href: "/crm/drafts", label: "Drafts" },
-    { href: "/contracts", label: "Contracts" },
-    { href: "/email-templates", label: "Email Templates" },
-  ];
+  const navLinks = isAccounting
+    ? [
+        { href: "/roster", label: "Roster" },
+        { href: "/contracts", label: "Contracts" },
+      ]
+    : [
+        { href: "/roster", label: "Roster" },
+        ...(showInsightsLink ? [{ href: "/insights", label: "Insights" }] : []),
+        ...(showMarketIntelLink ? [{ href: "/market-intel", label: "Market Intel" }] : []),
+        { href: "/consulting", label: "Consulting" },
+        { href: "/ai", label: "Mystery Machine" },
+        { href: "/master-target-list", label: "Master Target List" },
+        { href: "/crm", label: "Pipeline" },
+        { href: "/crm/drafts", label: "Drafts" },
+        { href: "/contracts", label: "Contracts" },
+        { href: "/email-templates", label: "Email Templates" },
+      ];
 
   const adminLinks = [
     { href: "/admin/users", label: "Users" },

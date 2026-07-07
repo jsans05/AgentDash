@@ -1,5 +1,5 @@
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { internalServerError } from "@/lib/api/http-errors";
 import { enforceContentLengthLimit } from "@/lib/api/request-limits";
 import { NextResponse } from "next/server";
@@ -42,7 +42,7 @@ async function getOrCreateCompanyByName(
 }
 
 export async function GET(req: Request) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const excludedCompanyIds = new Set<string>();
 
@@ -134,7 +134,7 @@ export async function POST(req: Request) {
   const contentLengthError = enforceContentLengthLimit(req);
   if (contentLengthError) return contentLengthError;
 
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const supabaseAdmin = await createServiceRoleClient();
 

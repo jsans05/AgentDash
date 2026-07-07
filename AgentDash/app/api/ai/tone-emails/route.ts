@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { createServerClient } from "@/lib/supabase/server";
 
 const toneRowSchema = z.object({
@@ -14,7 +14,7 @@ const putSchema = z.object({
 });
 
 export async function GET() {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const { data, error } = await supabase
     .from("ai_email_tone_samples")
@@ -26,7 +26,7 @@ export async function GET() {
 }
 
 export async function PUT(req: Request) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const raw = await req.json().catch(() => null);
   const parsed = putSchema.safeParse(raw);

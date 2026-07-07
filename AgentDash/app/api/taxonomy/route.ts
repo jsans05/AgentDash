@@ -1,5 +1,5 @@
 import { createServerClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { NextResponse } from "next/server";
 import { getTaxonomyBySport } from "@/lib/taxonomy";
 
@@ -8,7 +8,7 @@ import { getTaxonomyBySport } from "@/lib/taxonomy";
  * Returns { endemic: string[], nonEndemic: string[], all: string[] } for the given sport.
  */
 export async function GET(req: Request) {
-  await requireProfile();
+  await requireNonAccounting();
   const { searchParams } = new URL(req.url);
   const sport = searchParams.get("sport")?.trim() || null;
   const taxonomy = await getTaxonomyBySport(sport);

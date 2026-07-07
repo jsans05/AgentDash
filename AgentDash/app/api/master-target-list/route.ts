@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { enrichTargetListRowsWithAgencyActivity } from "@/lib/crm/company-cross-agent-activity-server";
 import { fetchMasterTargetListRows } from "@/lib/crm/master-target-list";
 import { getRosterAthleteIdsForProfile } from "@/lib/ai/roster-audience";
 
 export async function GET() {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
 
   try {

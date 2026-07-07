@@ -1,4 +1,4 @@
-import { getCurrentProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import type { Profile } from "@/lib/supabase/types";
 import { createAITools, FIND_ATHLETES_FOR_COMPANY_SPORTS } from "@/lib/ai/tools";
 import {
@@ -1559,10 +1559,7 @@ function stripSponsorGapFromPitchComposeResult(result: unknown): void {
 
 export async function POST(req: Request) {
   try {
-    const profile = await getCurrentProfile();
-    if (!profile) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    const profile = await requireNonAccounting();
     const contentLengthError = enforceContentLengthLimit(req);
     if (contentLengthError) return contentLengthError;
 

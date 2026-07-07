@@ -1,5 +1,5 @@
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
-import { requireProfile } from "@/lib/auth";
+import { requireNonAccounting } from "@/lib/auth";
 import { enforceContentLengthLimit, enforceFileSizeLimit, MAX_API_PAYLOAD_BYTES } from "@/lib/api/request-limits";
 import { NextResponse } from "next/server";
 import readXlsxFile from "read-excel-file/node";
@@ -109,7 +109,7 @@ export async function POST(req: Request) {
   const contentLengthError = enforceContentLengthLimit(req);
   if (contentLengthError) return contentLengthError;
 
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   if (profile.role === "sales") {
     return NextResponse.json({ error: "Not allowed for sales role" }, { status: 403 });
   }
