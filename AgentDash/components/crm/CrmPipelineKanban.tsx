@@ -1189,11 +1189,8 @@ function CompanySlideOver({
           : "";
 
       const extra_system_context = [
-        `CRITICAL — CRM pipeline drafting for brand/company: "${card.company_name}".`,
-        `You are drafting outreach addressed to this company as the partnership recipient.`,
-        `Do NOT ask for the company name unless the user explicitly switches to a different target brand.`,
+        `SESSION CONTEXT — CRM pipeline card for "${card.company_name}" (company_id=${card.company_id}).`,
         `If potential athletes are listed below, use them as the default athlete set for multi-athlete or group outreach unless the user specifies otherwise.`,
-        `Use past partnerships, the company description, and contact points when relevant; do not invent deals or contacts not supported below.`,
         card.product_category?.trim() ? `Product category: ${card.product_category.trim()}` : "",
         card.managed_by_agency && card.agency_name?.trim()
           ? `Brand is managed by agency: ${card.agency_name.trim()}`
@@ -1207,7 +1204,6 @@ function CompanySlideOver({
         contacts.length ? `Contact points (Research): ${contacts.join("; ")}` : "",
         companyChannelsBlock,
         linkedCrmLines,
-        "Use the athlete data tools available to craft targeted messages.",
       ]
         .filter(Boolean)
         .join("\n");

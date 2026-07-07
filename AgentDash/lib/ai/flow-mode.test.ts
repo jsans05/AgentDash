@@ -2,10 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   blockedToolsForFlowMode,
-  classifyFlowModeBucket,
   flowIntentFromMode,
-  interestPickerAllowed,
+  interestPickerAllowedForIntent,
   resolveFlowMode,
+  resolveFlowIntentForMode,
 } from "@/lib/ai/flow-mode";
 import {
   assistantClaimsTargetListSave,
@@ -19,13 +19,20 @@ test.beforeEach(() => {
   delete process.env.FLOW_MODE_ENFORCEMENT;
 });
 
-test("resolveFlowMode prefers explicit outbound over auto classification", () => {
+test("resolveFlowMode always resolves to default", () => {
   assert.equal(
     resolveFlowMode({
       flowMode: "outbound",
       messages: [{ role: "user", content: "find athletes for Nike" }],
     }),
-    "outbound"
+    "default"
+  );
+  assert.equal(
+    resolveFlowMode({
+      pipelineDrafting: true,
+      uiContext: "crm_pipeline",
+    }),
+    "default"
   );
 });
 
@@ -50,37 +57,31 @@ test("resolveFlowMode defaults target_list + athlete to default (intent-based)",
   );
 });
 
-test("classifyFlowModeBucket inbound company requests", () => {
-  assert.equal(
-    classifyFlowModeBucket([{ role: "user", content: "find athletes for Nike" }]),
-    "inbound"
-  );
-});
-
-test("classifyFlowModeBucket outbound athlete requests", () => {
-  assert.equal(
-    classifyFlowModeBucket([{ role: "user", content: "who should we pitch for Jordan?" }], {
-      athleteId: "a",
-    }),
-    "outbound"
-  );
-});
-
 test("flowIntentFromMode maps modes to intents", () => {
   assert.equal(flowIntentFromMode("outbound"), "company_targets");
   assert.equal(flowIntentFromMode("inbound"), "inbound_company_athlete_match");
   assert.equal(flowIntentFromMode("email"), "email_single_athlete");
 });
 
-test("interestPickerAllowed by mode", () => {
-  assert.equal(interestPickerAllowed("default"), false);
-  assert.equal(interestPickerAllowed("outbound"), false);
-  assert.equal(interestPickerAllowed("inbound"), true);
-  assert.equal(interestPickerAllowed("email"), true);
+test("resolveFlowIntentForMode honors explicit outbound mode chip", () => {
+  assert.equal(
+    resolveFlowIntentForMode("default", [{ role: "user", content: "hello" }], {
+      explicitFlowMode: "outbound",
+    }),
+    "company_targets"
+  );
 });
 
-test("default mode has no blocked tools", () => {
+test("interestPickerAllowedForIntent by intent", () => {
+  assert.equal(interestPickerAllowedForIntent("general"), false);
+  assert.equal(interestPickerAllowedForIntent("company_targets"), false);
+  assert.equal(interestPickerAllowedForIntent("inbound_company_athlete_match"), true);
+  assert.equal(interestPickerAllowedForIntent("email_single_athlete"), true);
+});
+
+test("blockedToolsForFlowMode is always empty (ui_context blocks only)", () => {
   assert.equal(blockedToolsForFlowMode("default").size, 0);
+  assert.equal(blockedToolsForFlowMode("email").size, 0);
   const tools = [
     { function: { name: "composePitchEmail" } },
     { function: { name: "generateAthleteProspectList" } },
@@ -117,7 +118,7 @@ test("getMissingRequiredTools default email fan-out requires batched pushEmailTo
   assert.ok(missing.includes("pushEmailToCrm"));
 });
 
-test("buildSystemPrompt default uses minimal guardrails module", () => {
+test("buildSystemPrompt uses default mode header only", () => {
   const prompt = buildSystemPrompt({
     role: "admin",
     senderDisplayName: "Test User",
@@ -126,7 +127,18 @@ test("buildSystemPrompt default uses minimal guardrails module", () => {
   });
   assert.match(prompt, /DEFAULT MODE/);
   assert.doesNotMatch(prompt, /ACTIVE MODE: OUTBOUND/);
-  assert.doesNotMatch(prompt, /ACTIVE MODE: EMAIL/);
+  assert.match(prompt, /CRM PIPELINE DRAFTING/);
+});
+
+test("buildSystemPrompt ignores legacy outbound flowMode param", () => {
+  const prompt = buildSystemPrompt({
+    role: "admin",
+    senderDisplayName: "Test User",
+    sportsListNumbered: "1. Surfing",
+    flowMode: "outbound",
+  });
+  assert.match(prompt, /DEFAULT MODE/);
+  assert.doesNotMatch(prompt, /ACTIVE MODE: OUTBOUND/);
 });
 
 test("getMissingRequiredTools skips prospect tools when targetListSaveIntent is active", () => {
@@ -260,97 +272,4 @@ test("getMissingRequiredTools still requires compose after picks when assistant 
     lastAssistantContent: "I'll draft the email next.",
   });
   assert.deepEqual(missing, ["composePitchEmail"]);
-});
-
-test("buildSystemPrompt outbound excludes email flow instructions", () => {
-  const prompt = buildSystemPrompt({
-    role: "admin",
-    senderDisplayName: "Test User",
-    sportsListNumbered: "1. Surfing",
-    flowMode: "outbound",
-  });
-  assert.match(prompt, /ACTIVE MODE: OUTBOUND/);
-  assert.doesNotMatch(prompt, /FLOW 4: INDIVIDUAL OUTREACH EMAIL/);
-  assert.doesNotMatch(prompt, /searchAthletesByAudienceMatch/);
-});
-
-test("buildSystemPrompt email includes email flows", () => {
-  const prompt = buildSystemPrompt({
-    role: "admin",
-    senderDisplayName: "Test User",
-    sportsListNumbered: "1. Surfing",
-    flowMode: "email",
-  });
-  assert.match(prompt, /ACTIVE MODE: EMAIL/);
-  assert.match(prompt, /FLOW 4: INDIVIDUAL OUTREACH EMAIL/);
-});
-
-test("filterToolDefinitions outbound blocks composePitchEmail", () => {
-  const tools = [
-    { function: { name: "composePitchEmail" } },
-    { function: { name: "generateAthleteProspectList" } },
-  ];
-  const filtered = filterToolDefinitions(tools, "outbound");
-  assert.equal(filtered.length, 1);
-  assert.equal(filtered[0]?.function?.name, "generateAthleteProspectList");
-});
-
-test("blockedToolsForFlowMode email blocks generateAthleteProspectList", () => {
-  assert.ok(blockedToolsForFlowMode("email").has("generateAthleteProspectList"));
-});
-
-test("filterToolDefinitions advisory returns all tools", () => {
-  process.env.FLOW_MODE_ENFORCEMENT = "advisory";
-  const tools = [
-    { function: { name: "composePitchEmail" } },
-    { function: { name: "generateAthleteProspectList" } },
-  ];
-  const filtered = filterToolDefinitions(tools, "outbound");
-  assert.equal(filtered.length, 2);
-});
-
-test("filterToolDefinitions advisory still applies blockedExtra", () => {
-  process.env.FLOW_MODE_ENFORCEMENT = "advisory";
-  const tools = [
-    { function: { name: "composePitchEmail" } },
-    { function: { name: "generateAthleteProspectList" } },
-  ];
-  const filtered = filterToolDefinitions(tools, "outbound", new Set(["composePitchEmail"]));
-  assert.equal(filtered.length, 1);
-  assert.equal(filtered[0]?.function?.name, "generateAthleteProspectList");
-});
-
-test("buildSystemPrompt advisory uses user-stated focus header", () => {
-  process.env.FLOW_MODE_ENFORCEMENT = "advisory";
-  const prompt = buildSystemPrompt({
-    role: "admin",
-    senderDisplayName: "Test User",
-    sportsListNumbered: "1. Surfing",
-    flowMode: "outbound",
-  });
-  assert.match(prompt, /User-stated focus: prospecting/);
-  assert.doesNotMatch(prompt, /ACTIVE MODE: OUTBOUND/);
-});
-
-test("buildSystemPrompt off ignores outbound mode header", () => {
-  process.env.FLOW_MODE_ENFORCEMENT = "off";
-  const prompt = buildSystemPrompt({
-    role: "admin",
-    senderDisplayName: "Test User",
-    sportsListNumbered: "1. Surfing",
-    flowMode: "outbound",
-  });
-  assert.match(prompt, /DEFAULT MODE/);
-  assert.doesNotMatch(prompt, /ACTIVE MODE: OUTBOUND/);
-  assert.doesNotMatch(prompt, /User-stated focus/);
-});
-
-test("getMissingRequiredTools off ignores outbound mode chip for required tools", () => {
-  process.env.FLOW_MODE_ENFORCEMENT = "off";
-  const missing = getMissingRequiredTools("email_single_athlete", new Set(), {
-    flowMode: "outbound",
-    selectedInterestsCount: 0,
-  });
-  assert.ok(missing.includes("curatePitchInterests"));
-  assert.ok(!missing.includes("getSponsorshipTargets"));
 });

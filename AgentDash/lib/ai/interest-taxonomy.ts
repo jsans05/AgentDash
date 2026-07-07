@@ -52,7 +52,3 @@ export function extractApprovedInterestSelections(text: string): ApprovedInteres
   return [...new Set(found)];
 }
 
-export function formatApprovedInterestListMarkdown(): string {
-  return APPROVED_INTEREST_CATEGORIES.map((c) => `- ${c}`).join("\n");
-}
-

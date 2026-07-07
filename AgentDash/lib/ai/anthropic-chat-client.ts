@@ -576,16 +576,3 @@ export async function createChatCompletionStream(
   });
   return anthropicStreamToOpenAIChunks(stream);
 }
-
-/** Drop-in replacements for the former OpenAI reasoning-compat helpers. */
-export async function createChatCompletionWithReasoningCompat(
-  body: ChatCompletionBody
-): Promise<ChatCompletionResult> {
-  return createChatCompletion(body);
-}
-
-export async function createChatCompletionStreamWithReasoningCompat(
-  body: ChatCompletionBody
-): Promise<AsyncIterable<ChatCompletionChunk>> {
-  return createChatCompletionStream(body);
-}

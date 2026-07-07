@@ -332,10 +332,9 @@ export function detectTargetListOutreachPushIntent(messages: any[]): boolean {
     /\b(on|to|into)\s+(the\s+)?target\s+list\b/.test(text);
   if (!mentionsTargetList) return false;
 
-  const mentionsEmail =
-    /\b(this|the|that)\s+email\b/.test(text) ||
-    /\b(email|outreach|subject|body|draft)\b/.test(text) ||
-    /\b(push|save|add|put|copy|update|store)\b/.test(text);
+  // Require an actual email/outreach noun — a bare verb like "push these to his
+  // target list" is a company import, not an outreach save (FLOW 8D).
+  const mentionsEmail = /\b(email|outreach|subject|body|draft)\b/.test(text);
 
   return mentionsEmail;
 }
@@ -348,7 +347,10 @@ export function detectTargetListSaveIntent(messages: any[]): boolean {
   const mentionsTargetList =
     /\b(target list|athlete target list|their target list|his target list|her target list)\b/.test(text) ||
     /\b(on|to|into)\s+(the\s+)?target\s+list\b/.test(text);
-  if (mentionsTargetList) return true;
+  // Target-list mention alone is not a save intent — pushing companies onto a
+  // list must not trigger the outreach-email save guard (FLOW 8D).
+  const mentionsEmailish = /\b(email|outreach|subject|body|draft)\b/.test(text);
+  if (mentionsTargetList && mentionsEmailish) return true;
 
   const outreachColumn =
     /\b(outreach\s+(email|column)|email\s+subject\s+column|spreadsheet\s+column)\b/.test(text) ||

@@ -4,7 +4,7 @@ import { createAITools, FIND_ATHLETES_FOR_COMPANY_SPORTS } from "@/lib/ai/tools"
 import {
   assistantClaimsTargetListSave,
   assistantHasPresentableOutreachDraft,
-  EMAIL_PIPELINE_TOOL_NAMES,
+  shouldSkipPresentableDraftToolCorrection,
   extractToolNames,
   getAthleteTargetListSessionAddon,
   getConsultingTargetListSessionAddon,
@@ -31,16 +31,17 @@ import {
 } from "@/lib/ai/chat-sse";
 import { resolveChatModelId } from "@/lib/ai/chat-model";
 import {
-  createChatCompletionStreamWithReasoningCompat,
-  createChatCompletionWithReasoningCompat,
+  createChatCompletion,
+  createChatCompletionStream,
   logAnthropicCacheDiagnostics,
   type AnthropicCacheDiagnostics,
   type ChatCompletionUsage,
   type ChatMessage,
 } from "@/lib/ai/anthropic-chat-client";
 import { streamChatCompletionToMessage } from "@/lib/ai/openai-chat-stream";
+import { stringifyToolResultForModel } from "@/lib/ai/tool-result-shapers";
 import { stripSponsorGapCopy } from "@/lib/ai/email-copy-guard";
-import { enforcePitchEmailClosing, validateGroupedProspectingOutput } from "@/lib/ai/output-validation";
+import { enforcePitchEmailClosing } from "@/lib/ai/output-validation";
 import { detectEmailEnrichmentIntent } from "@/lib/ai/email-revision-intent";
 import {
   getCurateAutoConfirmComposeHint,
@@ -50,6 +51,8 @@ import {
 import { buildAIChatFlowContext } from "@/lib/features/ai-chat-orchestrator/flow-context";
 import { parseFlowMode, resolveFlowMode, type FlowMode } from "@/lib/ai/flow-mode";
 import { buildSystemPrompt, filterToolDefinitions } from "@/lib/ai/prompts";
+import { proposeAndStoreUserMemory } from "@/lib/ai/memory-learning";
+import { getPlaybookForIntent } from "@/lib/ai/playbooks";
 import { enforceContentLengthLimit, enforceTextSizeLimit } from "@/lib/api/request-limits";
 import { createServerClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
@@ -668,7 +671,7 @@ const TOOLS = [
     function: {
       name: "generateAthleteProspectList",
       description:
-        "Build a grouped athlete prospect list with Company, Match Score (0–100 integer), Website (markdown link), and Partnership Justification columns per category. Call after getSponsorshipTargets. Return markdown verbatim to the user. Use rows for bulkImportCompaniesToCrmForAthlete.",
+        "Build a grouped athlete prospect list with Company, Match Score (0–100 integer), Website (markdown link), and Partnership Justification columns per category. Uses Claude reasoning over athlete audience, taxonomy, and the user's full request — call after getSponsorshipTargets. Always pass liked/disliked brands, style adjectives, and positioning in user_request. Return markdown verbatim to the user. Use rows for bulkImportCompaniesToCrmForAthlete.",
       parameters: {
         type: "object",
         properties: {
@@ -689,7 +692,8 @@ const TOOLS = [
           organization_locations: { type: "array", items: { type: "string" } },
           user_request: {
             type: "string",
-            description: "Optional user priority phrasing from the chat thread.",
+            description:
+              "Required when the user gives nuance: liked/disliked brands, style (e.g. luxury, edgy), positioning, or category-specific direction. Pass the user's wording verbatim from chat.",
           },
         },
         required: [],
@@ -1923,7 +1927,6 @@ export async function POST(req: Request) {
       flowIntent,
       selectedInterests,
       flowPromptAddon,
-      interestGateAddons,
       emailInterestAddon,
       emailRevisionMode,
       skipInterestPicker,
@@ -1933,6 +1936,8 @@ export async function POST(req: Request) {
       pipelineDrafting,
       sessionContextText: extraContext,
       flowMode: resolvedFlowMode,
+      explicitFlowMode: flow_mode,
+      conversationFlowMode,
       athleteId: requestAthleteId || undefined,
       targetListContext: targetListUiContext,
       interactionSelectedInterests,
@@ -1979,8 +1984,13 @@ REQUIRED behavior — do not deviate:
     const masterTargetListSessionAddon = injectMasterTargetListSession
       ? `\n\n${getMasterTargetListSessionAddon()}`
       : "";
+    const isEmailFlowIntent =
+      flowIntent === "email_single_athlete" ||
+      flowIntent === "email_group_outreach" ||
+      flowIntent === "email_roster_outreach" ||
+      flowIntent === "email_general_outreach";
     const injectTargetListPushGuard =
-      (targetListUiContext || resolvedFlowMode === "email") && activeTargetListSaveIntent;
+      (targetListUiContext || isEmailFlowIntent) && activeTargetListSaveIntent;
     const targetListOutreachAddon = injectTargetListPushGuard
       ? `\n\n${getTargetListOutreachPushAddon()}`
       : "";
@@ -1989,12 +1999,16 @@ REQUIRED behavior — do not deviate:
       spreadsheetBlocks.length > 0 ||
       uploadedImages.length > 0 ||
       chatBulkImport.detected;
+    const playbookPrompt = getPlaybookForIntent(flowIntent, {
+      senderDisplayName,
+      sportsListNumbered,
+      includeBulkImport,
+    });
     const baseSystemPrompt = buildSystemPrompt({
       role: profile.role,
       senderDisplayName,
       sportsListNumbered,
       flowMode: resolvedFlowMode,
-      includeBulkImport,
     });
     const targetListBlocked =
       (targetListUiContext || masterTargetListUiContext) && !explicitProspectIntent
@@ -2030,10 +2044,12 @@ REQUIRED behavior — do not deviate:
       TOOLS,
       resolvedFlowMode,
       mergedBlocked.size > 0 ? mergedBlocked : undefined
+    ).sort((a, b) =>
+      String(a?.function?.name ?? "").localeCompare(String(b?.function?.name ?? ""))
     );
     const dynamicSystemContext = `${userMemoryPrompt}${toneSamplePrompt}${projectPrompt}${extraPrompt}${crmPipelineAddon}${targetListSessionAddon}${consultingTargetListSessionAddon}${masterTargetListSessionAddon}${modePromptAddon}${attachmentAddon}${chatBulkImportAddon}${targetListOutreachAddon}${
-      flowPromptAddon ? `\n\n${flowPromptAddon}` : ""
-    }${interestGateAddons ? `\n\n${interestGateAddons}` : ""}${emailInterestAddon ? `\n\n${emailInterestAddon}` : ""}`;
+      playbookPrompt ? `\n\n━━━ TASK PLAYBOOK ━━━\n${playbookPrompt}` : ""
+    }${flowPromptAddon ? `\n\n${flowPromptAddon}` : ""}${emailInterestAddon ? `\n\n${emailInterestAddon}` : ""}`;
     const initialSystemMessages: ChatMessage[] = [
       {
         role: "system",
@@ -2056,20 +2072,12 @@ REQUIRED behavior — do not deviate:
       !emailRevisionMode &&
       !skipInterestPicker &&
       selectedInterests.length === 0 &&
-      resolvedFlowMode === "email" &&
-      (flowIntent === "email_single_athlete" ||
-        flowIntent === "email_group_outreach" ||
-        flowIntent === "email_roster_outreach");
+      isEmailFlowIntent;
     const inboundInterestSelectionActive =
       !interaction_response &&
       !emailRevisionMode &&
-      resolvedFlowMode === "inbound" &&
       flowIntent === "inbound_company_athlete_match" &&
       selectedInterests.length === 0;
-    const isEmailFlowIntent =
-      flowIntent === "email_single_athlete" ||
-      flowIntent === "email_group_outreach" ||
-      flowIntent === "email_roster_outreach";
 
     const emitSseSources = (emit?: (event: ChatSseEvent) => void) => {
       if (!emit) return;
@@ -2088,6 +2096,7 @@ REQUIRED behavior — do not deviate:
       lastMessage: any;
       interactionPause?: AgentInteractionPause;
       turnTelemetry?: TurnTelemetry;
+      userVisibleStreamText?: string;
     }> => {
       let currentMessages: any[];
       if (agentOptions?.resumeMessages) {
@@ -2124,6 +2133,15 @@ REQUIRED behavior — do not deviate:
       const MAX_TOOL_ITERATIONS = 6;
       let maxIterations = MAX_TOOL_ITERATIONS;
       let lastMessage: any = null;
+      let userVisibleStreamText = "";
+      const emitAcceptedAssistantText = (text: string) => {
+        const trimmed = String(text ?? "").trim();
+        if (!trimmed) return;
+        userVisibleStreamText = trimmed;
+        if (sseEmit) {
+          sseEmit({ type: "token", text: trimmed });
+        }
+      };
       let previousAnthropicMessageId: string | null = null;
       const cacheMissReasons: string[] = [];
       const applyAnthropicDiagnostics = (
@@ -2235,13 +2253,12 @@ REQUIRED behavior — do not deviate:
         if (sseEmit) {
           const streamResult = await streamChatCompletionToMessage(
             () =>
-              createChatCompletionStreamWithReasoningCompat({
+              createChatCompletionStream({
                 ...completionBody,
                 messages: currentMessages,
                 previous_message_id: previousAnthropicMessageId,
               }),
             {
-              onToken: (text) => sseEmit({ type: "token", text }),
               onToolCallsDetected: (tools) =>
                 sseEmit({ type: "meta", phase: "tools", tools }),
             }
@@ -2253,7 +2270,7 @@ REQUIRED behavior — do not deviate:
             `[AI Chat] Response finish_reason: ${streamResult.finishReason}, tool_calls: ${lastMessage.tool_calls?.length ?? 0}`
           );
         } else {
-          const completion = await createChatCompletionWithReasoningCompat({
+          const completion = await createChatCompletion({
             ...completionBody,
             messages: currentMessages,
             previous_message_id: previousAnthropicMessageId,
@@ -2284,17 +2301,15 @@ REQUIRED behavior — do not deviate:
           askUserQuestionCallCount,
           usedToolNames,
         });
-        const skipTargetListDraftToolCorrection =
-          targetListUiContext &&
-          !explicitProspectIntent &&
-          toolCalls.length === 0 &&
-          missingRequiredTools.length > 0 &&
-          missingRequiredTools.every((name) => EMAIL_PIPELINE_TOOL_NAMES.has(name)) &&
-          assistantHasPresentableOutreachDraft(String(lastMessage?.content ?? ""));
+        const skipPresentableDraftToolCorrection = shouldSkipPresentableDraftToolCorrection({
+          toolCallCount: toolCalls.length,
+          missingRequiredTools,
+          assistantContent: String(lastMessage?.content ?? ""),
+        });
         const missingToolsCondition =
           toolCalls.length === 0 &&
           missingRequiredTools.length > 0 &&
-          !skipTargetListDraftToolCorrection;
+          !skipPresentableDraftToolCorrection;
         if (missingToolsCondition && !injectedCorrections.has("missing_required_tools")) {
           injectedCorrections.add("missing_required_tools");
           currentMessages.push(lastMessage);
@@ -2311,89 +2326,6 @@ REQUIRED behavior — do not deviate:
           injectedCorrections.has("missing_required_tools")
         ) {
           correctionInjections.push("missing_required_tools_repeated_skip");
-        }
-
-        const skipOutboundProspectValidation =
-          targetListUiContext || isEmailFlowIntent;
-
-        if (
-          toolCalls.length === 0 &&
-          resolvedFlowMode === "outbound" &&
-          !skipOutboundProspectValidation
-        ) {
-          const prospectValidation = validateGroupedProspectingOutput(
-            String(lastMessage?.content ?? "")
-          );
-          const prospectValidationFailed = !prospectValidation.ok;
-          if (
-            prospectValidationFailed &&
-            !injectedCorrections.has("outbound_prospect_validation_failed")
-          ) {
-            injectedCorrections.add("outbound_prospect_validation_failed");
-            currentMessages.push(lastMessage);
-            currentMessages.push({
-              role: "user",
-              content:
-                "Required: prospecting reply must include generateAthleteProspectList output verbatim. Call getSponsorshipTargets then generateAthleteProspectList if needed, then paste the tool markdown field exactly. Each category table must use: | Company | Match Score | Website | Partnership Justification | with Match Score as an integer 0–100 (never stars or labels like High) and Website as markdown links; rows sorted by Match Score descending within the category.",
-            });
-            correctionInjections.push("outbound_prospect_validation_failed");
-            continue;
-          } else if (
-            prospectValidationFailed &&
-            injectedCorrections.has("outbound_prospect_validation_failed")
-          ) {
-            correctionInjections.push("outbound_prospect_validation_failed_repeated_skip");
-          }
-        }
-
-        const emailEnrichmentMissingComposeCondition =
-          toolCalls.length === 0 &&
-          emailEnrichmentMode &&
-          isEmailFlowIntent &&
-          !usedToolNames.has("composePitchEmail") &&
-          !usedToolNames.has("mergePitchEmails");
-        if (
-          emailEnrichmentMissingComposeCondition &&
-          !injectedCorrections.has("email_enrichment_missing_compose")
-        ) {
-          injectedCorrections.add("email_enrichment_missing_compose");
-          currentMessages.push(lastMessage);
-          currentMessages.push({
-            role: "user",
-            content:
-              "Required: call composePitchEmail (or mergePitchEmails) with revision_hint set to the user's latest message for email enrichment or rewrite. Output only body_markdown from the tool — no standalone stats analysis.",
-          });
-          correctionInjections.push("email_enrichment_missing_compose");
-          continue;
-        } else if (
-          emailEnrichmentMissingComposeCondition &&
-          injectedCorrections.has("email_enrichment_missing_compose")
-        ) {
-          correctionInjections.push("email_enrichment_missing_compose_repeated_skip");
-        }
-
-        const targetListPushMissingUpdateCondition =
-          toolCalls.length === 0 &&
-          injectTargetListPushGuard &&
-          !usedToolNames.has("updateTargetListOutreach");
-        if (
-          targetListPushMissingUpdateCondition &&
-          !injectedCorrections.has("target_list_push_missing_update")
-        ) {
-          injectedCorrections.add("target_list_push_missing_update");
-          currentMessages.push(lastMessage);
-          currentMessages.push({
-            role: "user",
-            content:
-              "Required: save this email on the athlete Target List (Outreach Email / Email Subject columns). Call getAthleteTargetList if you need pipeline_id, then updateTargetListOutreach with outreach_email_subject and outreach_email. Do not use pushEmailToCrm for target-list saves.",
-          });
-          correctionInjections.push("target_list_push_missing_update");
-          continue;
-        } else if (
-          targetListPushMissingUpdateCondition &&
-          injectedCorrections.has("target_list_push_missing_update")
-        ) {
-          correctionInjections.push("target_list_push_missing_update_repeated_skip");
         }
 
         const targetListFalseSaveClaimCondition =
@@ -2423,7 +2355,10 @@ REQUIRED behavior — do not deviate:
 
         currentMessages.push(lastMessage);
 
-        if (!toolCalls.length) break;
+        if (!toolCalls.length) {
+          emitAcceptedAssistantText(String(lastMessage?.content ?? ""));
+          break;
+        }
 
         const questionCall = toolCalls.find((c: any) => c?.function?.name === ASK_USER_QUESTION_TOOL);
         let interestsFromThisTurn: string[] | null = null;
@@ -2618,10 +2553,7 @@ REQUIRED behavior — do not deviate:
                 );
               }
             }
-            const rawJson = JSON.stringify(result);
-            const MAX_TOOL_JSON_CHARS = 20000;
-            const truncatedJson =
-              rawJson.length > MAX_TOOL_JSON_CHARS ? `${rawJson.slice(0, MAX_TOOL_JSON_CHARS)}\n...(truncated)` : rawJson;
+            const truncatedJson = stringifyToolResultForModel(name, result);
 
             toolResults.push({
               tool_call_id: call.id,
@@ -2789,23 +2721,21 @@ REQUIRED behavior — do not deviate:
           if (sseEmit) {
             const streamResult = await streamChatCompletionToMessage(
               () =>
-                createChatCompletionStreamWithReasoningCompat({
+                createChatCompletionStream({
                   model: resolvedChatModel,
                   messages: forcedMessages,
                   tools: activeToolDefinitions,
                   tool_choice: forcedToolChoice,
                   cache_tools: true,
                   previous_message_id: previousAnthropicMessageId,
-                }),
-              {
-                onToken: (text) => sseEmit({ type: "token", text }),
-              }
+                })
             );
             accumulateUsage(streamResult.usage);
             applyAnthropicDiagnostics(streamResult, "forced-completion");
             lastMessage = streamResult.message;
+            emitAcceptedAssistantText(String(lastMessage?.content ?? ""));
           } else {
-            const completion = await createChatCompletionWithReasoningCompat({
+            const completion = await createChatCompletion({
               model: resolvedChatModel,
               messages: forcedMessages,
               tools: activeToolDefinitions,
@@ -2822,7 +2752,7 @@ REQUIRED behavior — do not deviate:
         }
       }
 
-      return { lastMessage, turnTelemetry: emitTurnSummary(hitIterationCap) };
+      return { lastMessage, turnTelemetry: emitTurnSummary(hitIterationCap), userVisibleStreamText };
     };
 
     if (interaction_response && resumeMessages && project_id && conversation_id) {
@@ -2951,8 +2881,10 @@ REQUIRED behavior — do not deviate:
       return intro;
     };
 
-    const buildAssistantResponse = (lastMessage: any) => {
-      let response = stripModelSourcesFooter(String(lastMessage?.content ?? "").trim());
+    const buildAssistantResponse = (lastMessage: any, streamedText?: string) => {
+      const raw =
+        String(streamedText ?? "").trim() || String(lastMessage?.content ?? "").trim();
+      let response = stripModelSourcesFooter(raw);
       if (!response) {
         response = "I wasn't able to generate a response. Please try rephrasing your question.";
       }
@@ -3005,6 +2937,19 @@ REQUIRED behavior — do not deviate:
         .eq("owner_user_id", profile.user_id);
     };
 
+    const maybeLearnFromTurn = async (turnTelemetry?: TurnTelemetry) => {
+      try {
+        await proposeAndStoreUserMemory(supabase, profile, {
+          messages: trimmedMessages,
+          correctionInjections: turnTelemetry?.corrections ?? [],
+          emailRevisionMode,
+          projectId: project_id,
+        });
+      } catch (e) {
+        console.warn("[AI Chat] Memory learning skipped:", e);
+      }
+    };
+
     if (wantStream) {
       const encoder = new TextEncoder();
       const sseBody = new ReadableStream({
@@ -3027,8 +2972,12 @@ REQUIRED behavior — do not deviate:
               controller.close();
               return;
             }
-            const { response, dedupedWebSources } = buildAssistantResponse(agentResult.lastMessage);
+            const { response, dedupedWebSources } = buildAssistantResponse(
+              agentResult.lastMessage,
+              agentResult.userVisibleStreamText
+            );
             await persistChatTurn(response, agentResult.turnTelemetry);
+            void maybeLearnFromTurn(agentResult.turnTelemetry);
             emit({
               type: "done",
               message: response,
@@ -3068,8 +3017,12 @@ REQUIRED behavior — do not deviate:
         },
       });
     }
-    const { response, dedupedWebSources } = buildAssistantResponse(agentResult.lastMessage);
+    const { response, dedupedWebSources } = buildAssistantResponse(
+      agentResult.lastMessage,
+      agentResult.userVisibleStreamText
+    );
     await persistChatTurn(response, agentResult.turnTelemetry);
+    void maybeLearnFromTurn(agentResult.turnTelemetry);
     return NextResponse.json({
       message: response,
       sources,

@@ -22,7 +22,7 @@ import {
   getPostInterestSelectionComposeAddon,
 } from "@/lib/ai/flow-guards";
 import {
-  interestPickerAllowed,
+  interestPickerAllowedForIntent,
   resolveFlowIntentForMode,
   type ResolvedFlowMode,
 } from "@/lib/ai/flow-mode";
@@ -43,6 +43,8 @@ type BuildFlowContextInput = {
   pipelineDrafting: boolean;
   sessionContextText?: string | null;
   flowMode: ResolvedFlowMode;
+  explicitFlowMode?: import("@/lib/ai/flow-mode").FlowMode | null;
+  conversationFlowMode?: import("@/lib/ai/flow-mode").FlowMode | null;
   athleteId?: string | null;
   targetListContext?: boolean;
   /** Interests from ask_user_question interaction_response (client may not include them in messages yet). */
@@ -57,10 +59,8 @@ export type AIChatFlowContext = {
   flowIntent: AIFlowIntent;
   selectedInterests: ApprovedInterestCategory[];
   flowPromptAddon: string;
-  interestGateAddons: string;
   emailInterestAddon: string;
   emailRevisionMode: boolean;
-  emailRoutingAddon: string;
   emailRoutingShouldClarify: boolean;
   skipInterestPicker: boolean;
   composeAfterInterestSelection: boolean;
@@ -82,9 +82,11 @@ export function buildAIChatFlowContext(input: BuildFlowContextInput): AIChatFlow
     pipelineDrafting,
     athleteId: input.athleteId,
     targetListContext: input.targetListContext === true,
+    explicitFlowMode: input.explicitFlowMode,
+    conversationFlowMode: input.conversationFlowMode,
   });
   if (
-    flowMode === "email" &&
+    (input.explicitFlowMode === "email" || pipelineDrafting) &&
     emailRouting.confidence === "high" &&
     emailRouting.flow_intent &&
     (emailRouting.is_revision || emailRouting.athlete_count >= 2)
@@ -122,7 +124,9 @@ export function buildAIChatFlowContext(input: BuildFlowContextInput): AIChatFlow
     interactionSelectedPitchAngles.length > 0 ||
     (input.interactionSelectedInterests?.length ?? 0) > 0;
   const applyUserStatedAngles =
-    flowMode === "email" && userStatedPitchAngles.length > 0 && !audiencePicksRecorded;
+    interestPickerAllowedForIntent(flowIntent) &&
+    userStatedPitchAngles.length > 0 &&
+    !audiencePicksRecorded;
 
   if (applyUserStatedAngles) {
     const approved = new Set<string>(APPROVED_INTEREST_CATEGORIES);
@@ -159,13 +163,7 @@ export function buildAIChatFlowContext(input: BuildFlowContextInput): AIChatFlow
     (skipInterestPicker && autoConfirmAddon.length > 0);
 
   const afterInterestPrompt = userReplyingAfterInterestCategoryPrompt(trimmedMessages);
-  const allowInterestPicker =
-    interestPickerAllowed(flowMode) ||
-    flowIntent === "inbound_company_athlete_match" ||
-    flowIntent === "email_single_athlete" ||
-    flowIntent === "email_group_outreach" ||
-    flowIntent === "email_roster_outreach" ||
-    flowIntent === "email_general_outreach";
+  const allowInterestPicker = interestPickerAllowedForIntent(flowIntent);
 
   const revisionAddon = emailRevisionMode
     ? getEmailRevisionModeAddon({
@@ -202,7 +200,6 @@ export function buildAIChatFlowContext(input: BuildFlowContextInput): AIChatFlow
       : "";
 
   const flowPromptAddon = [
-    getFlowIntentRoutingAddon(flowIntent),
     revisionAddon,
     routingAddon,
     userStatedAnglesAddon,
@@ -219,17 +216,13 @@ export function buildAIChatFlowContext(input: BuildFlowContextInput): AIChatFlow
       ? getEmailInterestSelectionPromptAddon(selectedInterests, flowIntent)
       : "";
 
-  const interestGateAddons = "";
-
   return {
     flowMode,
     flowIntent,
     selectedInterests,
     flowPromptAddon,
-    interestGateAddons,
     emailInterestAddon,
     emailRevisionMode,
-    emailRoutingAddon: routingAddon,
     emailRoutingShouldClarify: emailRouting.should_clarify,
     skipInterestPicker,
     composeAfterInterestSelection,

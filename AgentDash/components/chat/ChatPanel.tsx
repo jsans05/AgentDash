@@ -169,10 +169,12 @@ const AssistantMessageBody = memo(function AssistantMessageBody({
   content,
   isStreaming,
   onEmailDraftChange,
+  uiContext,
 }: {
   content: string;
   isStreaming: boolean;
   onEmailDraftChange?: (subject: string, body: string) => void;
+  uiContext?: ChatUiContext;
 }) {
   if (!content.trim()) return null;
 
@@ -182,7 +184,11 @@ const AssistantMessageBody = memo(function AssistantMessageBody({
     return (
       <div className="relative">
         {emailDraft.preamble ? (
-          <ChatMarkdown content={emailDraft.preamble} className="text-[15px] text-[#EFEAE1] mb-1" />
+          <ChatMarkdown
+            content={emailDraft.preamble}
+            className="text-[15px] text-[#EFEAE1] mb-1"
+            uiContext={uiContext}
+          />
         ) : null}
         <ChatEmailDraftCard
           subject={emailDraft.subject}
@@ -191,7 +197,11 @@ const AssistantMessageBody = memo(function AssistantMessageBody({
           onChange={(subject, body) => onEmailDraftChange?.(subject, body)}
         />
         {emailDraft.postamble ? (
-          <ChatMarkdown content={emailDraft.postamble} className="text-[15px] text-[#EFEAE1] mt-2" />
+          <ChatMarkdown
+            content={emailDraft.postamble}
+            className="text-[15px] text-[#EFEAE1] mt-2"
+            uiContext={uiContext}
+          />
         ) : null}
       </div>
     );
@@ -200,7 +210,7 @@ const AssistantMessageBody = memo(function AssistantMessageBody({
   const markdown = isStreaming ? repairStreamingMarkdown(content) : content;
   return (
     <div className="relative">
-      <ChatMarkdown content={markdown} className="text-[15px] text-[#EFEAE1]" />
+      <ChatMarkdown content={markdown} className="text-[15px] text-[#EFEAE1]" uiContext={uiContext} />
       {isStreaming ? (
         <span
           className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse bg-[#EFEAE1]/80"
@@ -371,6 +381,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [instructionsModalOpen, setInstructionsModalOpen] = useState(false);
   const [memoryModalOpen, setMemoryModalOpen] = useState(false);
+  const [memoryTab, setMemoryTab] = useState<"project" | "user">("project");
+  const [userMemoryDraft, setUserMemoryDraft] = useState("");
+  const [userMemoryLoading, setUserMemoryLoading] = useState(false);
   const [renameModalOpen, setRenameModalOpen] = useState(false);
   const [newProjectModalOpen, setNewProjectModalOpen] = useState(false);
   const [instructionsDraft, setInstructionsDraft] = useState("");
@@ -1177,8 +1190,51 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
 
   const editProjectMemoryNotes = async () => {
     if (!activeProject) return;
+    setMemoryTab("project");
     setMemoryDraft(activeProject.memoryNotes.join("\n"));
+    setUserMemoryLoading(true);
     setMemoryModalOpen(true);
+    try {
+      const qs = activeProject.id ? `?project_id=${encodeURIComponent(activeProject.id)}` : "";
+      const res = await fetch(`/api/ai/user-memory${qs}`, { credentials: "include" });
+      if (res.ok) {
+        const data = await readApiJson<{ global_memory?: string[]; project_memory?: string[] }>(res);
+        const lines = [
+          ...(Array.isArray(data?.global_memory) ? data.global_memory : []),
+          ...(Array.isArray(data?.project_memory) ? data.project_memory : []),
+        ];
+        setUserMemoryDraft(lines.join("\n"));
+      }
+    } finally {
+      setUserMemoryLoading(false);
+    }
+  };
+
+  const saveUserMemoryNotes = async () => {
+    if (!activeProject) return;
+    const globalLines = userMemoryDraft
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    setSavingProjectMeta(true);
+    const res = await fetch("/api/ai/user-memory", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        global_memory: globalLines,
+        project_id: activeProject.id,
+        project_memory: [],
+      }),
+    });
+    setSavingProjectMeta(false);
+    if (!res.ok) return;
+    setMemoryModalOpen(false);
+  };
+
+  const saveActiveMemoryTab = async () => {
+    if (memoryTab === "user") await saveUserMemoryNotes();
+    else await saveProjectMemoryNotes();
   };
 
   const saveProjectMemoryNotes = async () => {
@@ -1421,6 +1477,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
                     <AssistantMessageBody
                       content={msg.content}
                       isStreaming={streamingAssistantId === msg.id}
+                      uiContext={uiContext}
                       onEmailDraftChange={(subject, body) =>
                         handleEmailDraftEdit(msg.id, subject, body)
                       }
@@ -1765,15 +1822,45 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
       {memoryModalOpen && (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-2xl rounded-2xl border border-white/15 bg-[#151917] p-4 shadow-xl">
-            <h3 className="mb-2 text-base font-semibold text-[#F4F1EB]">Project memory</h3>
+            <h3 className="mb-2 text-base font-semibold text-[#F4F1EB]">Memory</h3>
+            <div className="mb-3 flex gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setMemoryTab("project")}
+                className={cn(
+                  "text-xs",
+                  memoryTab === "project" ? "bg-white/10 text-[#F4F1EB]" : "text-[#AFA89C]"
+                )}
+              >
+                Project
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setMemoryTab("user")}
+                className={cn(
+                  "text-xs",
+                  memoryTab === "user" ? "bg-white/10 text-[#F4F1EB]" : "text-[#AFA89C]"
+                )}
+              >
+                AI learns
+              </Button>
+            </div>
             <p className="mb-3 text-xs text-[#AFA89C]">
-              Add key facts one per line. These are reused as project memory context.
+              {memoryTab === "project"
+                ? "Project facts (one per line) reused in this project's chats."
+                : "Global AI memory from chat learning and writeUserMemory. Edit or prune facts the assistant should remember."}
             </p>
             <Textarea
-              value={memoryDraft}
-              onChange={(e) => setMemoryDraft(e.target.value)}
+              value={memoryTab === "project" ? memoryDraft : userMemoryDraft}
+              onChange={(e) =>
+                memoryTab === "project"
+                  ? setMemoryDraft(e.target.value)
+                  : setUserMemoryDraft(e.target.value)
+              }
               className="min-h-[180px] resize-y border-white/15 bg-[#101311] text-[#F4F1EB] placeholder:text-[#8E877A]"
-              disabled={savingProjectMeta}
+              disabled={savingProjectMeta || userMemoryLoading}
             />
             <div className="mt-3 flex justify-end gap-2">
               <Button
@@ -1787,8 +1874,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function Ch
               </Button>
               <Button
                 size="sm"
-                onClick={saveProjectMemoryNotes}
-                disabled={savingProjectMeta}
+                onClick={saveActiveMemoryTab}
+                disabled={savingProjectMeta || userMemoryLoading}
                 className="text-white"
                 style={{ backgroundColor: FOREST_GREEN }}
               >

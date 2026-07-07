@@ -32,7 +32,7 @@ import { writeUserMemory as writeUserMemoryImpl } from "@/lib/ai/tools/write-use
 import { fetchPitchToneSamples } from "@/lib/ai/pitch-tone-samples";
 import { stripSponsorGapCopy } from "@/lib/ai/email-copy-guard";
 import type { PitchType } from "@/lib/ai/pitch-spec";
-import { computeRosterAudienceSummary, formatRosterAudienceCountDisplay } from "@/lib/ai/roster-audience";
+import { computeRosterAudienceSummary } from "@/lib/ai/roster-audience";
 import { APPROVED_INTEREST_CATEGORIES } from "@/lib/ai/interest-taxonomy";
 import { ilikeContains, normalizeOrIlikeFragment } from "@/lib/supabase/ilike";
 import { fetchAthleteTargetListRows } from "@/lib/crm/athlete-target-list";
@@ -43,7 +43,7 @@ import { getConsultingTargetListDomains, fetchConsultingTargetListRows } from "@
 import { getOrCreateCompanyByName } from "@/lib/consulting/companies";
 import { domainFromWebsite, normalizeDomainForCompare } from "@/lib/apollo/org-search-utils";
 import { isEffectivelyUncategorizedCompanyCategory } from "@/lib/crm/company-category";
-import { discoverAthleteProspects } from "@/lib/ai/athlete-prospect-discovery";
+import { discoverAthleteProspectsWithClaude } from "@/lib/ai/claude-prospect-discovery";
 import { mergeAthleteIntoPotentialAthletes, parseOptionalMatchScore, setMatchScoreForAthlete } from "@/lib/crm/potential-athletes";
 import { searchCompanies } from "@/lib/enrichment";
 import { formatAthleteGender, normalizeAthleteGender } from "@/lib/athletes/gender";
@@ -213,8 +213,6 @@ async function fetchRosterAthletesWithFilters(
   }
   return unique.slice(0, limit);
 }
-
-export { formatRosterAudienceCountDisplay } from "@/lib/ai/roster-audience";
 
 async function agentCanAccessAthlete(
   supabase: Awaited<ReturnType<typeof createServerClient>>,
@@ -1788,36 +1786,42 @@ export async function createAITools(profile: Profile) {
         return { ok: false as const, error: "Unauthorized athlete access" };
       }
 
-      const discovery = await discoverAthleteProspects(supabase, {
-        athleteId: resolved.athleteId,
-        categoryHint: params.category_hint,
-        categoriesOverride: Array.isArray(params.categories) ? params.categories : undefined,
-        minPerCategory: params.min_per_category,
-        revenueRangeMin: params.revenue_range_min,
-        revenueRangeMax: params.revenue_range_max,
-        organizationLocations: params.organization_locations,
-        userRequestText: params.user_request,
-      });
-      if (!discovery) return { ok: false as const, error: "Athlete not found" };
+      try {
+        const discovery = await discoverAthleteProspectsWithClaude(supabase, {
+          athleteId: resolved.athleteId,
+          userId: profile.user_id,
+          categoryHint: params.category_hint,
+          categoriesOverride: Array.isArray(params.categories) ? params.categories : undefined,
+          minPerCategory: params.min_per_category,
+          revenueRangeMin: params.revenue_range_min,
+          revenueRangeMax: params.revenue_range_max,
+          organizationLocations: params.organization_locations,
+          userRequestText: params.user_request,
+        });
+        if (!discovery) return { ok: false as const, error: "Athlete not found" };
 
-      return {
-        ok: true as const,
-        athlete: {
-          athlete_id: resolved.athleteId,
-          name: discovery.athleteName,
-          sport: discovery.sport,
-        },
-        markdown: discovery.markdown,
-        rows: discovery.rows.map((r) => ({
-          company_name: r.company_name,
-          category: r.category,
-          website: r.website,
-          match_score: r.match_score,
-        })),
-        categories_searched: Object.keys(discovery.groupedCandidates),
-        prioritized_categories: discovery.prioritizedCategories,
-        blocked_companies: discovery.blockedCompanies,
-      };
+        return {
+          ok: true as const,
+          athlete: {
+            athlete_id: resolved.athleteId,
+            name: discovery.athleteName,
+            sport: discovery.sport,
+          },
+          markdown: discovery.markdown,
+          rows: discovery.rows.map((r) => ({
+            company_name: r.company_name,
+            category: r.category,
+            website: r.website,
+            match_score: r.match_score,
+          })),
+          categories_searched: Object.keys(discovery.groupedCandidates),
+          prioritized_categories: discovery.prioritizedCategories,
+          blocked_companies: discovery.blockedCompanies,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Prospect discovery failed";
+        return { ok: false as const, error: message };
+      }
     },
 
     apolloSearchCompanies: async (params: {

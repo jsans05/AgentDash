@@ -42,6 +42,7 @@ import {
   buildTargetListSessionContext,
   type TargetListFocusedRow,
 } from "@/lib/crm/target-list-session-context";
+import { writeTargetListSessionContext } from "@/lib/crm/target-list-session-storage";
 import { buildMasterTargetListSessionContext } from "@/lib/crm/master-target-list-session-context";
 import { cn } from "@/lib/utils";
 import { formatApolloPartnershipSearchSummary } from "@/lib/apollo/search-defaults";
@@ -608,6 +609,16 @@ export function TargetListSpreadsheet({
     isAthlete,
     isMaster,
   ]);
+
+  useEffect(() => {
+    if (!isAthlete || !athleteId) return;
+    writeTargetListSessionContext(athleteId, getSessionContext());
+  }, [athleteId, getSessionContext, isAthlete]);
+
+  const persistSessionContextForDeepLink = useCallback(() => {
+    if (!isAthlete || !athleteId) return;
+    writeTargetListSessionContext(athleteId, getSessionContext());
+  }, [athleteId, getSessionContext, isAthlete]);
 
   const refreshAfterAiMutation = useCallback(async () => {
     const toFlash = new Set<string>();
@@ -1274,7 +1285,10 @@ export function TargetListSpreadsheet({
                       <Link
                         href={`/ai?athlete_id=${encodeURIComponent(athleteId)}&context=target_list&athlete_name=${encodeURIComponent(athleteName)}`}
                         className="block px-3 py-2 text-left text-xs text-[#CEE4D4] hover:bg-white/5"
-                        onClick={() => setBulkActionsOpen(false)}
+                        onClick={() => {
+                          persistSessionContextForDeepLink();
+                          setBulkActionsOpen(false);
+                        }}
                       >
                         Prospect & import in Mystery Machine
                       </Link>
@@ -1344,6 +1358,7 @@ export function TargetListSpreadsheet({
                 <Link
                   href={`/ai?athlete_id=${encodeURIComponent(athleteId)}&context=target_list&athlete_name=${encodeURIComponent(athleteName)}`}
                   className="mt-1 inline-block text-xs text-[#CEE4D4] underline hover:text-[#E8F6ED]"
+                  onClick={persistSessionContextForDeepLink}
                 >
                   Prospect & import in Mystery Machine
                 </Link>

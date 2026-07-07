@@ -1,6 +1,6 @@
 {
   "name": "agentdash",
-  "version": "3.0.1",
+  "version": "3.1.1",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -10,8 +10,8 @@
     "vercel-build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "test": "tsx --test lib/ai/*.test.ts lib/crm/*.test.ts lib/consulting/*.test.ts lib/taxonomy.test.ts components/chat/*.test.ts",
-    "ciq:refresh": "tsx scripts/ciq_monthly_refresh.ts"
+    "test": "tsx --test lib/ai/*.test.ts lib/chat/*.test.ts lib/crm/*.test.ts lib/consulting/*.test.ts lib/taxonomy.test.ts components/chat/*.test.ts",
+    "test:phase5-gate": "tsx scripts/phase5-regression-gate.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.1",

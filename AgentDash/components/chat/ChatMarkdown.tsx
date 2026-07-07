@@ -1,8 +1,14 @@
 "use client";
 
 import React, { useState } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import type { ChatUiContext } from "@/components/chat/chat-routing";
+import {
+  isGroupedProspectingTableHeader,
+  isTargetListCompactTableContext,
+} from "@/lib/chat/prospect-table-markdown";
 
 function CopyCodeButton({ code }: { code: string }) {
   const [copied, setCopied] = useState(false);
@@ -22,10 +28,107 @@ function CopyCodeButton({ code }: { code: string }) {
   );
 }
 
+type InlineRenderer = (text: string) => React.ReactNode;
+
+function CompactProspectTableRow({
+  cells,
+  renderInline,
+}: {
+  cells: string[];
+  renderInline: InlineRenderer;
+}) {
+  const [open, setOpen] = useState(false);
+  const company = cells[0] ?? "";
+  const score = cells[1] ?? "";
+  const website = cells[2] ?? "";
+  const justification = cells[3] ?? "";
+  const hasJustification = Boolean(justification.trim());
+
+  return (
+    <>
+      <tr>
+        <td className="border border-border px-2 py-1.5 align-top font-medium">{renderInline(company)}</td>
+        <td className="border border-border px-2 py-1.5 align-top tabular-nums">{renderInline(score)}</td>
+        <td className="border border-border px-2 py-1.5 align-top">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="min-w-0">{renderInline(website)}</span>
+            {hasJustification ? (
+              <button
+                type="button"
+                className="inline-flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 text-[11px] font-medium text-[#8FD4A0] hover:bg-[#2E7040]/20"
+                onClick={() => setOpen((v) => !v)}
+                aria-expanded={open}
+              >
+                {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                Why
+              </button>
+            ) : null}
+          </div>
+        </td>
+      </tr>
+      {open && hasJustification ? (
+        <tr>
+          <td
+            colSpan={3}
+            className="border border-border bg-muted/30 px-2 py-2 text-xs leading-relaxed text-[#C9C4BC]"
+          >
+            {renderInline(justification)}
+          </td>
+        </tr>
+      ) : null}
+    </>
+  );
+}
+
+function renderCompactProspectTable(
+  tableRows: string[][],
+  renderInline: InlineRenderer,
+  tableKey: number
+): React.ReactNode {
+  const [header, ...rows] = tableRows;
+  return (
+    <div key={`table-${tableKey}`} className="my-3 overflow-x-auto rounded-lg border border-border">
+      <table className="w-full text-sm border-collapse table-fixed">
+        <thead className="bg-muted/80">
+          <tr>
+            {header.slice(0, 3).map((cell, c) => (
+              <th
+                key={c}
+                className={cn(
+                  "border border-border px-2 py-1.5 text-left text-xs font-medium",
+                  c === 0 && "w-[34%]",
+                  c === 1 && "w-[18%]",
+                  c === 2 && "w-[48%]"
+                )}
+              >
+                {renderInline(cell.trim())}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, r) => (
+            <CompactProspectTableRow key={r} cells={row} renderInline={renderInline} />
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 /** Lightweight markdown renderer: code blocks (with copy), tables, headings, bold, lists. No external deps. */
-export function ChatMarkdown({ content, className }: { content: string; className?: string }) {
+export function ChatMarkdown({
+  content,
+  className,
+  uiContext,
+}: {
+  content: string;
+  className?: string;
+  uiContext?: ChatUiContext;
+}) {
   const out: React.ReactNode[] = [];
   let key = 0;
+  const compactProspectTables = isTargetListCompactTableContext(uiContext);
 
   // Normalize common LaTeX-style output from model responses so it displays
   // cleanly in plain markdown (without requiring a full math renderer).
@@ -139,28 +242,32 @@ export function ChatMarkdown({ content, className }: { content: string; classNam
     const flushTable = () => {
       if (tableRows.length === 0) return;
       const [header, ...rows] = tableRows;
-      el.push(
-        <div key={`table-${key++}`} className="my-3 overflow-x-auto rounded-lg border border-border">
-          <table className="w-full text-sm border-collapse">
-            <thead className="bg-muted/80">
-              <tr>
-                {header.map((cell, c) => (
-                  <th key={c} className="border border-border px-3 py-2 text-left font-medium">{renderInline(cell.trim())}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, r) => (
-                <tr key={r}>
-                  {row.map((cell, c) => (
-                    <td key={c} className="border border-border px-3 py-2">{renderInline(cell.trim())}</td>
+      if (compactProspectTables && isGroupedProspectingTableHeader(header)) {
+        el.push(renderCompactProspectTable(tableRows, renderInline, key++));
+      } else {
+        el.push(
+          <div key={`table-${key++}`} className="my-3 overflow-x-auto rounded-lg border border-border">
+            <table className="w-full text-sm border-collapse">
+              <thead className="bg-muted/80">
+                <tr>
+                  {header.map((cell, c) => (
+                    <th key={c} className="border border-border px-3 py-2 text-left font-medium">{renderInline(cell.trim())}</th>
                   ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      );
+              </thead>
+              <tbody>
+                {rows.map((row, r) => (
+                  <tr key={r}>
+                    {row.map((cell, c) => (
+                      <td key={c} className="border border-border px-3 py-2">{renderInline(cell.trim())}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        );
+      }
       tableRows = [];
     };
 

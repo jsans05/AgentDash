@@ -7,6 +7,7 @@ import type { ChatSseEvent } from "@/lib/ai/chat-sse";
 import type { InteractionResponsePayload } from "@/lib/ai/user-question";
 import { ChatPanel, type ChatFlowMode, type ChatProject, type ChatUiContext, type Message } from "@/components/chat/ChatPanel";
 import { parseFlowMode } from "@/lib/ai/flow-mode";
+import { readTargetListSessionContext } from "@/lib/crm/target-list-session-storage";
 
 function parseUiContext(raw: string | null): ChatUiContext | undefined {
   if (
@@ -54,6 +55,10 @@ function AIChatClientInner({ role }: { role: string }) {
       const resolvedAthleteId = options?.athleteId ?? athleteId;
       const resolvedUiContext = options?.uiContext ?? uiContext;
       const resolvedFlowMode = options?.flowMode;
+      const extraSystemContext =
+        resolvedUiContext === "target_list" && resolvedAthleteId
+          ? readTargetListSessionContext(resolvedAthleteId)
+          : "";
       return postAiChat(
         {
           messages: payload,
@@ -69,6 +74,7 @@ function AIChatClientInner({ role }: { role: string }) {
           ...(resolvedAthleteId ? { athlete_id: resolvedAthleteId } : {}),
           ...(resolvedUiContext ? { ui_context: resolvedUiContext } : {}),
           flow_mode: resolvedFlowMode ?? "auto",
+          ...(extraSystemContext ? { extra_system_context: extraSystemContext } : {}),
         },
         {
           signal: options?.signal,

@@ -1,11 +1,7 @@
 import { createServerClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
 import { NextResponse } from "next/server";
-import { formatAthleteGender } from "@/lib/athletes/gender";
-import { discoverAthleteProspects } from "@/lib/ai/athlete-prospect-discovery";
-import { PROSPECTING_TABLE_HEADER } from "@/lib/ai/grouped-prospecting";
-import { validateGroupedProspectingOutput } from "@/lib/ai/output-validation";
-import { createChatCompletion } from "@/lib/ai/anthropic-chat-client";
+import { discoverAthleteProspectsWithClaude } from "@/lib/ai/claude-prospect-discovery";
 
 export async function POST(
   req: Request,
@@ -56,67 +52,29 @@ export async function POST(
     ? requestBody.organization_locations.map(String).filter(Boolean)
     : undefined;
 
-  const discovery = await discoverAthleteProspects(supabase, {
-    athleteId,
-    requestedCategories,
-    categoryHint,
-    userRequestText,
-    minPerCategory,
-    revenueRangeMin,
-    revenueRangeMax,
-    organizationLocations,
-  });
+  let discovery;
+  try {
+    discovery = await discoverAthleteProspectsWithClaude(supabase, {
+      athleteId,
+      userId: profile.user_id,
+      requestedCategories,
+      categoryHint,
+      userRequestText,
+      minPerCategory,
+      revenueRangeMin,
+      revenueRangeMax,
+      organizationLocations,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Prospect discovery failed";
+    return NextResponse.json({ error: message }, { status: 502 });
+  }
 
   if (!discovery) {
     return NextResponse.json({ error: "Athlete not found" }, { status: 404 });
   }
 
-  const { data: athlete } = await supabase
-    .from("athletes")
-    .select("first_name, last_name, sport, gender, city, state, country, notes")
-    .eq("athlete_id", athleteId)
-    .single();
-
-  let aiResponse = discovery.markdown;
-
-  const polishPrompt = `You are a sports sponsorship prospecting assistant. Polish ONLY the Partnership Justification column wording in the markdown below. Do NOT change company names, match scores, websites, category headers, or row order.
-
-Athlete: ${discovery.athleteName}
-Sport: ${athlete?.sport || "Unknown"}
-Gender: ${formatAthleteGender(athlete?.gender as Parameters<typeof formatAthleteGender>[0]) ?? "Unknown"}
-
-Rules:
-- Keep "## <Category>" headers unchanged.
-- Table must use EXACT header: ${PROSPECTING_TABLE_HEADER}
-- Each Partnership Justification must cite: user request, interest match, brand affinity match, and/or demographic fit.
-- If a category has fewer than ${minPerCategory} rows, keep any italicized shortage note.
-- Return only the grouped markdown sections.
-
-Markdown to polish:
-${discovery.markdown}`;
-
-  try {
-    const completion = await createChatCompletion({
-      messages: [
-        {
-          role: "system",
-          content:
-            "You polish partnership justification copy in sponsorship prospecting tables. Never alter scores, websites, or company names.",
-          cache_control: { type: "ephemeral" },
-        },
-        { role: "user", content: polishPrompt },
-      ],
-      temperature: 0.5,
-    });
-
-    const polished = completion.choices[0].message.content || "";
-    const validation = validateGroupedProspectingOutput(polished);
-    if (validation.ok) {
-      aiResponse = polished;
-    }
-  } catch (error) {
-    console.error("AI prospecting polish error:", error);
-  }
+  const aiResponse = discovery.markdown;
 
   try {
     await supabase.from("prospecting_logs").insert({
@@ -129,7 +87,7 @@ ${discovery.markdown}`;
         blocked: discovery.blockedCompanies,
       },
       sources: discovery.sources,
-      request_messages: [{ role: "user", content: polishPrompt }],
+      request_messages: [{ role: "user", content: userRequestText || categoryHint || "(prospect run)" }],
       response_text: aiResponse,
     });
   } catch (logError) {

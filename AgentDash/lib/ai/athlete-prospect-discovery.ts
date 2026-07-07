@@ -1,25 +1,17 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getAthleteAudienceProfile } from "@/lib/athlete-data";
-import { companyDiscoveryProvider } from "@/lib/apollo/config";
-import { searchApolloOrganizationsAdvanced } from "@/lib/apollo/organizations";
-import { searchCompanies } from "@/lib/enrichment";
+import { fetchAthleteTargetListRows } from "@/lib/crm/athlete-target-list";
 import {
   fetchTaxonomyNodesForSport,
   getTaxonomyBySport,
   normalizeCategoryForMatch,
 } from "@/lib/taxonomy";
 import {
-  buildCategorySearchQueries,
   buildProspectingAudienceSignals,
   prioritizeProspectingCategories,
+  type ProspectingAudienceSignals,
 } from "@/lib/ai/prospecting-signals";
-import {
-  buildGroupedProspectsMarkdown,
-  flattenGroupedToRows,
-  scoreCategoryCandidate,
-  type ProspectCategoryCandidate,
-  type ProspectListRow,
-} from "@/lib/ai/grouped-prospecting";
+import type { ProspectCategoryCandidate, ProspectListRow } from "@/lib/ai/grouped-prospecting";
 
 function normalizeCategory(cat: string): string {
   return cat.toLowerCase().trim().replace(/\s+/g, " ");
@@ -36,8 +28,17 @@ function getMissingByTier(
   return { endemicMissing, nonEndemicMissing };
 }
 
+function taxonomyCategory(
+  rel: { category?: string } | { category?: string }[] | null | undefined
+): string | undefined {
+  if (!rel) return undefined;
+  if (Array.isArray(rel)) return rel[0]?.category;
+  return rel.category;
+}
+
 export type AthleteProspectDiscoveryParams = {
   athleteId: string;
+  userId?: string;
   requestedCategories?: string[];
   categoryHint?: string | null;
   userRequestText?: string;
@@ -69,10 +70,41 @@ export type AthleteProspectDiscoveryResult = {
   sources: string[];
 };
 
-export async function discoverAthleteProspects(
+export type AthleteProspectingContext = {
+  athlete: Record<string, unknown>;
+  athleteName: string;
+  sport: string | null;
+  existingCategories: string[];
+  endemicMissing: string[];
+  nonEndemicMissing: string[];
+  categoriesMissing: string[];
+  prioritizedCategories: string[];
+  unmetPriorityTerms: string[];
+  audienceSignals: ProspectingAudienceSignals;
+  categoriesToSearch: string[];
+  blockedCategories: Array<{
+    category: string;
+    taxonomy_id?: string;
+    reason: string;
+  }>;
+  targetListCompanies: Array<{
+    company_name: string;
+    category: string | null;
+    match_score: number | null;
+  }>;
+  minPerCategory: number;
+  categoryHint: string | null;
+  userRequestText: string;
+  requestedCategories: string[];
+  revenueRangeMin?: number;
+  revenueRangeMax?: number;
+  organizationLocations?: string[];
+};
+
+export async function gatherAthleteProspectingContext(
   supabase: SupabaseClient,
   params: AthleteProspectDiscoveryParams
-): Promise<AthleteProspectDiscoveryResult | null> {
+): Promise<AthleteProspectingContext | null> {
   const athleteId = params.athleteId;
   const { data: athlete } = await supabase
     .from("athletes")
@@ -87,10 +119,6 @@ export async function discoverAthleteProspects(
   const categoryHint = params.categoryHint?.trim() || null;
   const userRequestText = params.userRequestText?.trim() ?? "";
   const minPerCategory = Math.max(1, Math.min(params.minPerCategory ?? 5, 10));
-  const revenueRangeMin = params.revenueRangeMin;
-  const revenueRangeMax = params.revenueRangeMax;
-  const organizationLocations = params.organizationLocations;
-  const useApolloDiscovery = companyDiscoveryProvider() === "apollo";
   const sport = athlete.sport?.trim() ?? null;
 
   const { data: contractsRaw } = await supabase
@@ -114,13 +142,6 @@ export async function discoverAthleteProspects(
   const restrictedTaxonomyIds = new Set(
     (exclusivitiesRaw || []).map((e: { taxonomy_id: string }) => e.taxonomy_id)
   );
-  const taxonomyCategory = (
-    rel: { category?: string } | { category?: string }[] | null | undefined
-  ): string | undefined => {
-    if (!rel) return undefined;
-    if (Array.isArray(rel)) return rel[0]?.category;
-    return rel.category;
-  };
 
   let existingCategories = [
     ...new Set(
@@ -145,7 +166,9 @@ export async function discoverAthleteProspects(
   existingCategories = [...new Set(existingCategories)];
 
   if (existingCategories.length === 0 && contracts.length > 0) {
-    existingCategories = contracts.map((c: { category?: string }) => c.category).filter(Boolean) as string[];
+    existingCategories = contracts
+      .map((c: { category?: string }) => c.category)
+      .filter(Boolean) as string[];
   }
 
   const taxonomyNodes = sport ? await fetchTaxonomyNodesForSport(sport) : [];
@@ -171,156 +194,46 @@ export async function discoverAthleteProspects(
     athleteNotes: [athlete.notes, userRequestText].filter(Boolean).join("\n"),
   });
 
-  const categoriesToSearch = (
-    params.categoriesOverride?.length
-      ? params.categoriesOverride
-      : prioritized.orderedCategories
+  const categoriesRequested = (
+    params.categoriesOverride?.length ? params.categoriesOverride : prioritized.orderedCategories
   ).slice(0, 10);
 
-  const prioritizedCategorySet = new Set(
-    prioritized.prioritizedCategories.map((category) => normalizeCategoryForMatch(category))
-  );
-  const groupedCandidates: Record<string, ProspectCategoryCandidate[]> = {};
-  const blockedCompanies: AthleteProspectDiscoveryResult["blockedCompanies"] = [];
+  const blockedCategories: AthleteProspectingContext["blockedCategories"] = [];
+  const categoriesToSearch: string[] = [];
 
-  for (const category of categoriesToSearch) {
+  for (const category of categoriesRequested) {
+    const taxonomyId = categoryToTaxonomyId.get(normalizeCategory(category));
+    let categoryBlockedReason = "";
+    if (taxonomyId && restrictedTaxonomyIds.has(taxonomyId)) {
+      categoryBlockedReason = `Category "${category}" is restricted by active contract exclusivity`;
+    } else if (!taxonomyId && restrictedTaxonomyIds.size > 0) {
+      categoryBlockedReason = `Category "${category}" is unmapped and athlete has active exclusivities (needs review)`;
+    }
+    if (categoryBlockedReason) {
+      blockedCategories.push({ category, taxonomy_id: taxonomyId, reason: categoryBlockedReason });
+    } else {
+      categoriesToSearch.push(category);
+    }
+  }
+
+  let targetListCompanies: AthleteProspectingContext["targetListCompanies"] = [];
+  if (params.userId) {
     try {
-      const taxonomyId = categoryToTaxonomyId.get(normalizeCategory(category));
-      let categoryBlockedReason = "";
-      if (taxonomyId && restrictedTaxonomyIds.has(taxonomyId)) {
-        categoryBlockedReason = `Category "${category}" is restricted by active contract exclusivity`;
-      } else if (!taxonomyId && restrictedTaxonomyIds.size > 0) {
-        categoryBlockedReason = `Category "${category}" is unmapped and athlete has active exclusivities (needs review)`;
-      }
-      if (categoryBlockedReason) {
-        blockedCompanies.push({
-          name: "N/A",
-          category,
-          taxonomy_id: taxonomyId,
-          reason: categoryBlockedReason,
-        });
-        continue;
-      }
-
-      const queries = buildCategorySearchQueries({
-        category,
-        topInterests: audienceSignals.topInterests,
-        topBrandAffinities: audienceSignals.topBrandAffinities,
-        demographicInferences: audienceSignals.demographicInferences,
-        priorityTerms: [
-          ...requestedCategories,
-          ...(categoryHint ? [categoryHint] : []),
-          ...prioritized.unmatchedPriorityTerms,
-        ],
-      });
-
-      const uniqueByName = new Map<string, ProspectCategoryCandidate>();
-
-      const ingestResult = (result: {
-        name: string;
-        industry?: string;
-        website?: string;
-        description?: string;
-        apollo_organization_id?: string;
-      }) => {
-        const name = String(result.name ?? "").trim();
-        if (!name) return;
-        const key = name.toLowerCase();
-        if (uniqueByName.has(key)) return;
-        const scoreInfo = scoreCategoryCandidate(
-          { name, description: result.description, category },
-          {
-            prioritizedCategories: prioritizedCategorySet,
-            topInterests: audienceSignals.topInterests,
-            topBrands: audienceSignals.topBrandAffinities,
-            demographicInferences: audienceSignals.demographicInferences,
-          }
-        );
-        uniqueByName.set(key, {
-          name,
-          industry: result.industry || category,
-          website: result.website,
-          description: result.description,
-          category,
-          taxonomy_id: taxonomyId,
-          apollo_organization_id: result.apollo_organization_id,
-          score: scoreInfo.score,
-          reason_tags: scoreInfo.tags,
-          reason_summary: `Fits ${category} opportunity for this athlete`,
-        });
-      };
-
-      if (useApolloDiscovery) {
-        const keywordTags = [category, sport, ...queries.slice(0, 2)]
-          .map((t) => String(t ?? "").trim())
-          .filter(Boolean);
-        try {
-          const { organizations } = await searchApolloOrganizationsAdvanced({
-            keyword_tags: [...new Set(keywordTags)],
-            revenue_range_min: revenueRangeMin,
-            revenue_range_max: revenueRangeMax,
-            organization_locations: organizationLocations,
-            per_page: Math.max(minPerCategory * 3, 15),
-          });
-          for (const org of organizations) {
-            ingestResult({
-              name: org.name,
-              industry: org.industry,
-              website: org.website,
-              description: org.description,
-              apollo_organization_id: org.apollo_organization_id ?? undefined,
-            });
-          }
-        } catch (apolloErr) {
-          console.error(`Apollo org search failed for ${category}:`, apolloErr);
-        }
-      }
-
-      if (uniqueByName.size < minPerCategory) {
-        for (const query of queries) {
-          const results = await searchCompanies(query, {
-            revenue_range_min: revenueRangeMin,
-            revenue_range_max: revenueRangeMax,
-            organization_locations: organizationLocations,
-          });
-          for (const result of results) {
-            ingestResult(result);
-          }
-          if (uniqueByName.size >= minPerCategory * 2) break;
-        }
-      }
-
-      const ranked = Array.from(uniqueByName.values())
-        .sort((a, b) => b.score - a.score)
-        .slice(0, Math.max(minPerCategory, 8));
-      if (ranked.length > 0) {
-        groupedCandidates[category] = ranked;
-      } else {
-        blockedCompanies.push({
-          name: "N/A",
-          category,
-          taxonomy_id: taxonomyId,
-          reason: `No viable companies found from web search for "${category}"`,
-        });
-      }
-    } catch (error) {
-      console.error(`Failed to search companies for ${category}:`, error);
+      const targetRows = await fetchAthleteTargetListRows(supabase, params.userId, athleteId);
+      targetListCompanies = targetRows.map((r) => ({
+        company_name: r.company_name,
+        category: r.category,
+        match_score: r.match_score,
+      }));
+    } catch (err) {
+      console.error("Failed to load athlete target list for prospecting context:", err);
     }
   }
 
   const athleteName = `${athlete.first_name} ${athlete.last_name}`.trim();
-  const markdown = buildGroupedProspectsMarkdown({
-    athleteName,
-    grouped: groupedCandidates,
-    minPerCategory,
-  });
-  const rows = flattenGroupedToRows(groupedCandidates);
-  const sources = Object.values(groupedCandidates)
-    .flat()
-    .map((c) => c.website || c.name)
-    .filter(Boolean);
 
   return {
+    athlete,
     athleteName,
     sport,
     existingCategories,
@@ -329,10 +242,16 @@ export async function discoverAthleteProspects(
     categoriesMissing,
     prioritizedCategories: prioritized.prioritizedCategories,
     unmetPriorityTerms: prioritized.unmatchedPriorityTerms,
-    groupedCandidates,
-    blockedCompanies,
-    markdown,
-    rows,
-    sources,
+    audienceSignals,
+    categoriesToSearch,
+    blockedCategories,
+    targetListCompanies,
+    minPerCategory,
+    categoryHint,
+    userRequestText,
+    requestedCategories,
+    revenueRangeMin: params.revenueRangeMin,
+    revenueRangeMax: params.revenueRangeMax,
+    organizationLocations: params.organizationLocations,
   };
 }

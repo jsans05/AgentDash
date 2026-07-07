@@ -8,10 +8,6 @@ export const CHAT_MODEL_IDS = {
 
 export const DEFAULT_CHAT_MODEL_TIER: ChatModelTier = "sonnet";
 
-export const CHAT_MODEL_LABELS: Record<ChatModelTier, string> = {
-  sonnet: "Sonnet 4.6",
-};
-
 export function parseChatModelTier(raw: unknown): ChatModelTier | null {
   const value = String(raw ?? "").trim().toLowerCase();
   if (value === "sonnet") return value;

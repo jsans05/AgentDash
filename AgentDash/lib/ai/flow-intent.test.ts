@@ -48,6 +48,30 @@ test("detectTargetListOutreachPushIntent requires target list phrase and email a
   );
 });
 
+test("detectTargetListOutreachPushIntent ignores company imports onto the target list", () => {
+  assert.equal(
+    detectTargetListOutreachPushIntent([
+      { role: "user", content: "Yes push these to his target list and delete tesla & honda" },
+    ]),
+    false
+  );
+  assert.equal(
+    detectTargetListOutreachPushIntent([
+      { role: "user", content: "Add Porsche and Lamborghini to the target list" },
+    ]),
+    false
+  );
+});
+
+test("detectTargetListSaveIntent ignores company imports onto the target list", () => {
+  assert.equal(
+    detectTargetListSaveIntent([
+      { role: "user", content: "Yes push these to his target list and delete tesla & honda" },
+    ]),
+    false
+  );
+});
+
 test("detectTargetListSaveIntent matches outreach column without target list phrase", () => {
   assert.equal(
     detectTargetListSaveIntent([

@@ -60,7 +60,6 @@ export async function streamChatCompletionToMessage(
     { id: string; type: "function"; function: { name: string; arguments: string } }
   > = {};
   let finishReason: string | null = null;
-  let sawToolCallDelta = false;
   let usage:
     | {
         input_tokens: number;
@@ -94,7 +93,6 @@ export async function streamChatCompletionToMessage(
     if (!delta) continue;
 
     if (delta.tool_calls?.length) {
-      sawToolCallDelta = true;
       for (const tc of delta.tool_calls) {
         const idx = tc.index ?? 0;
         if (!toolCallsByIndex[idx]) {
@@ -112,7 +110,7 @@ export async function streamChatCompletionToMessage(
 
     if (delta.content) {
       content += delta.content;
-      if (!sawToolCallDelta && options?.onToken) {
+      if (options?.onToken) {
         options.onToken(delta.content);
       }
     }

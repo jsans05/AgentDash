@@ -101,11 +101,11 @@ export function buildPartnershipJustification(candidate: ProspectCategoryCandida
   return unique.join("; ");
 }
 
-function escapeTableCell(value: string): string {
+export function escapeTableCell(value: string): string {
   return value.replace(/\|/g, "/").replace(/\n/g, " ").trim();
 }
 
-function formatWebsite(website: string | undefined): string {
+export function formatWebsite(website: string | undefined): string {
   const w = String(website ?? "").trim();
   if (!w) return "—";
   let url = w;
@@ -170,4 +170,65 @@ export function buildGroupedProspectsMarkdown(params: {
     return `No viable prospect categories were found for ${params.athleteName} after applying exclusivity filters.`;
   }
   return sections.join("\n").trim();
+}
+
+export type ClaudeProspectDisplayRow = {
+  name: string;
+  website?: string;
+  match_score: number;
+  justification: string;
+};
+
+export function buildGroupedProspectsMarkdownFromDisplayScores(params: {
+  athleteName: string;
+  grouped: Record<string, ClaudeProspectDisplayRow[]>;
+  minPerCategory: number;
+}): string {
+  const sections: string[] = [];
+  const categories = Object.keys(params.grouped);
+
+  for (const category of categories) {
+    const entries = [...(params.grouped[category] ?? [])].sort(
+      (a, b) => b.match_score - a.match_score
+    );
+    sections.push(`## ${category}`);
+    if (entries.length < params.minPerCategory) {
+      sections.push(
+        `_Best effort: found ${entries.length} brand${entries.length === 1 ? "" : "s"} for this category (target minimum ${params.minPerCategory})._`
+      );
+    }
+    sections.push(PROSPECTING_TABLE_HEADER);
+    sections.push(PROSPECTING_TABLE_SEPARATOR);
+    for (const row of entries) {
+      const displayScore = Math.min(100, Math.max(0, Math.round(row.match_score)));
+      sections.push(
+        `| ${escapeTableCell(row.name)} | ${displayScore} | ${formatWebsite(row.website)} | ${escapeTableCell(row.justification)} |`
+      );
+    }
+    sections.push("");
+  }
+
+  if (sections.length === 0) {
+    return `No viable prospect categories were found for ${params.athleteName} after applying exclusivity filters.`;
+  }
+  return sections.join("\n").trim();
+}
+
+export function flattenClaudeDisplayRowsToProspectListRows(
+  grouped: Record<string, ClaudeProspectDisplayRow[]>
+): ProspectListRow[] {
+  const rows: ProspectListRow[] = [];
+  for (const [category, entries] of Object.entries(grouped)) {
+    const sorted = [...entries].sort((a, b) => b.match_score - a.match_score);
+    for (const entry of sorted) {
+      rows.push({
+        company_name: entry.name,
+        category,
+        match_score: Math.min(100, Math.max(0, Math.round(entry.match_score))),
+        website: entry.website?.trim() || null,
+        justification: entry.justification,
+      });
+    }
+  }
+  return rows;
 }

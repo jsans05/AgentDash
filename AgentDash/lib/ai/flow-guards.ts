@@ -1,4 +1,3 @@
-import { getFlowModeEnforcement } from "@/lib/ai/feature-flags";
 import { isEmailDraftContent } from "@/lib/chat/email-draft";
 import { ASK_USER_QUESTION_TOOL } from "@/lib/ai/user-question";
 import type { AIFlowIntent } from "@/lib/ai/flow-intent";
@@ -67,6 +66,22 @@ export const EMAIL_PIPELINE_TOOL_NAMES = new Set([
   "composePitchEmail",
   "mergePitchEmails",
 ]);
+
+/** Accept a presentable outreach draft instead of forcing missing email-pipeline tool calls. */
+export function shouldSkipPresentableDraftToolCorrection(options: {
+  toolCallCount: number;
+  missingRequiredTools: string[];
+  assistantContent: string;
+}): boolean {
+  if (options.toolCallCount > 0) return false;
+  if (!options.missingRequiredTools.length) return false;
+  if (
+    !options.missingRequiredTools.every((name) => EMAIL_PIPELINE_TOOL_NAMES.has(name))
+  ) {
+    return false;
+  }
+  return assistantHasPresentableOutreachDraft(options.assistantContent);
+}
 
 function isClarifyingAssistantQuestion(content: string | undefined): boolean {
   const text = String(content ?? "").trim();
@@ -140,20 +155,7 @@ Multi-company fan-out: after each composePitchEmail, finish by calling pushEmail
 
 /** Appended when Mystery Machine is embedded from CRM pipeline drafting (SESSION CONTEXT names the company). */
 export function getCrmPipelineDraftingSystemAddon(): string {
-  return `
-
-━━━ CRM PIPELINE DRAFTING (INLINE MYSTERY MACHINE) ━━━
-- SESSION CONTEXT above names the **target company** for this pipeline card. Treat that company as the intended recipient brand unless the user explicitly switches to a different company.
-- Do NOT ask "what company?" or "please provide the company name" when the company is already stated in SESSION CONTEXT.
-- If **Potential athletes linked on this card** are listed in SESSION CONTEXT, use them as the default athlete set for multi-athlete / group outreach (FLOW 6) unless the user asks for different athletes or full-roster / roster pitch outreach (FLOW 7).
-- Use **Past partnerships / sponsorship history**, **Company description**, and **Contact points** from SESSION CONTEXT as authoritative for tone and facts; do not invent deals or contacts not supported by that context.
-- When referencing past partnerships in outreach copy, use **one sentence** (preferably) beginning with **"I recently noticed "** plus a concise summary of SESSION CONTEXT / CRM research—see system prompt—not lengthy marketing summaries.
-- If athlete count for the email decision tree is unclear but SESSION CONTEXT lists multiple potential athletes, assume **multiple athletes** toward that company; only ask a clarifying question if neither SESSION CONTEXT nor the user's message resolves one athlete vs many vs roster-wide.
-- For Flow 4, 6, or 7 outreach: **curatePitchInterests** first. When curation returns **interest_strength: strong**, auto-confirm the top suggested categories and call **composePitchEmail** in the same turn (skip **ask_user_question**). Otherwise use **ask_user_question** then **composePitchEmail**. Never paste interests as a markdown list.
-- After interest selection or auto-confirm, the user-visible email **must** come from **composePitchEmail** / **mergePitchEmails** \`body_markdown\` — do not hand-craft a parallel draft.
-- When SESSION CONTEXT lists **CRM contacts for this company** (each line has \`contact_id=\` and **first name for greeting:**), you MUST call **pushEmailToCrm once per contact** with that UUID in \`contact_id\` whenever the user asks to prepare/push/save for **contacts**, **push to contacts**, **company contacts**, **"[brand] contacts"**, **each/all contacts**, or similar. Each contact's saved email must open with **Hey [FirstName],** using **only** that line's **first name for greeting** value (e.g. Hey Jane,) — not "Hi", not the full name, never \`[Recipient Name]\` or other placeholders. Then continue with the rest of the mandatory opening (Hope you are well… I'm … at The·Team…). Reusing the same pitch is fine; only the Hey line varies per contact. If SESSION CONTEXT lists **Company channels** (support email or Instagram on the card) **and** you are saving per-contact drafts, also call **pushEmailToCrm once without contact_id** with label exactly **Company —** plus the SESSION CONTEXT company name, and an opening **Hi [SESSION CONTEXT company name],** for generic/support/social use. Do **not** claim per-contact saves unless every listed contact received its own successful tool call. If there are no \`crm_contacts\` yet, tell the user to add contacts first; otherwise save to the pipeline only (omit \`contact_id\`).
-- Saved email bodies must end with exactly **Looking forward to hearing from you,** as the last line — **no** sender name on its own line and **no** "The·Team" footer.
-`.trim();
+  return "";
 }
 
 export function getAthleteTargetListSessionAddon(athleteId: string, athleteName?: string | null): string {
@@ -162,26 +164,7 @@ export function getAthleteTargetListSessionAddon(athleteId: string, athleteName?
   const nameLine = athleteName?.trim()
     ? `Athlete: ${athleteName.trim()} (\`athlete_id\`: ${id}).`
     : `Athlete UUID (\`athlete_id\`): ${id}.`;
-
-  return `
-
-━━━ ATHLETE TARGET LIST SESSION (FLOW 8D) ━━━
-${nameLine}
-The user opened Mystery Machine from this athlete's **Target List / Outreach** tab (inline AI panel or full page). When the user asks to save outreach copy, use the athlete Target List spreadsheet columns below — **not** CRM pipeline \`draft_messages\`.
-
-You MUST in **this** assistant turn when saving outreach copy:
-1) Call **getAthleteTargetList** with \`athlete_id: "${id}"\` (\`include_contacts: true\` when saving per-contact copy) → \`pipeline_id\` for each company.
-2) Call **updateTargetListOutreach** with \`updates: [{ pipeline_id, outreach_email_subject, outreach_email, contact_id? }]\` using the approved subject/body from the thread. Up to 80 rows per call.
-- When **getAthleteTargetList** shows **contacts** on a row, outreach appears on **contact** rows in the spreadsheet — pass \`contact_id\` from SESSION CONTEXT focused row when set; if omitted, the tool saves on **all contacts** for that company (not pipeline-only columns).
-
-You must **NOT** use **pushEmailToCrm** for target-list saves (that writes CRM drafting only).
-Do not claim the email is on the target list unless **updateTargetListOutreach** returned \`ok: true\` and \`updated\` > 0.
-If SESSION CONTEXT lists selected \`pipeline_id\` values or a focused row, prefer those over asking which company — use them directly when the user says "this company" or "selected companies". Do not say a company must be added to the list first when SESSION CONTEXT or **getAthleteTargetList** already shows that company.
-If a company is missing from the list, use **bulkImportCompaniesToCrmForAthlete** or **pushCompanyToCrmPipeline** with \`athlete_id: "${id}"\`, then **updateTargetListOutreach**.
-- Default workflow here is **outreach drafting** for companies already on the list: **curatePitchInterests** → **composePitchEmail**; user-visible copy must be the tool's \`body_markdown\` — never hand-crafted parallel drafts.
-- Do **not** call **generateAthleteProspectList** unless the user explicitly asks to find new sponsors or brands to add.
-- The email **ends** at **Looking forward to hearing from you,** — put save offers, questions, or next steps **after** a blank line below that closing (never inside the email body).
-`.trim();
+  return `\n\n━━━ ACTIVE ATHLETE TARGET LIST ━━━\n${nameLine}`;
 }
 
 export function getConsultingTargetListSessionAddon(
@@ -193,38 +176,11 @@ export function getConsultingTargetListSessionAddon(
   const nameLine = profileName?.trim()
     ? `Consulting profile: ${profileName.trim()} (\`consulting_profile_id\`: ${id}).`
     : `Consulting profile UUID (\`consulting_profile_id\`): ${id}.`;
-
-  return `
-
-━━━ CONSULTING TARGET LIST SESSION ━━━
-${nameLine}
-The user opened Mystery Machine from a **Consulting Target List** page (inline AI panel). Use consulting-specific tools only — not athlete target list tools.
-
-You MUST:
-1) Call **getConsultingTargetList** with \`consulting_profile_id: "${id}"\` when you need live list rows (entry_id = pipeline_id in responses).
-2) Bulk-add companies with **bulkImportCompaniesToConsultingTargetList** (same companies[] shape as athlete bulk import, without outreach fields).
-3) Fix categories with **updateConsultingTargetListCategories** (entry_id + industry_category).
-4) Find lookalikes with **apolloExpandSimilarForConsulting** (seed entry_ids or seed company_ids).
-
-Do **not** use getAthleteTargetList, bulkImportCompaniesToCrmForAthlete, updateTargetListOutreach, or generateAthleteProspectList unless the user explicitly switches to an athlete list.
-If SESSION CONTEXT lists selected entry_id values or a focused row, prefer those when the user says "this company" or "selected companies".
-`.trim();
+  return `\n\n━━━ ACTIVE CONSULTING TARGET LIST ━━━\n${nameLine}`;
 }
 
 export function getMasterTargetListSessionAddon(): string {
-  return `
-
-━━━ MASTER TARGET LIST SESSION ━━━
-The user opened Mystery Machine from the agency **Master Target List** page — an aggregated view of companies across all roster athletes' target lists.
-
-You MUST:
-1) Use **getAthleteTargetList** with the correct \`athlete_id\` when you need live rows or pipeline_id for a specific athlete. Rows may list multiple assigned athletes — ask which athlete if ambiguous.
-2) Save outreach with **updateTargetListOutreach** using the resolved \`athlete_id\` and \`pipeline_id\` from SESSION CONTEXT or **getAthleteTargetList**.
-3) Fix categories with **updateTargetListCompanyCategories**; remove athletes from cards with **removeAthleteFromTargetListCards**.
-
-Do **not** use consulting target list tools (getConsultingTargetList, bulkImportCompaniesToConsultingTargetList, etc.) from this view.
-If SESSION CONTEXT lists selected \`pipeline_id\` values, assigned athletes, or a focused row, prefer those when the user says "this company" or "selected companies".
-`.trim();
+  return "";
 }
 
 export function getTargetListOutreachPushAddon(): string {
@@ -373,8 +329,6 @@ export function getMissingRequiredTools(
 ): string[] {
   const required: string[] = [];
   const selectedInterestsCount = context?.selectedInterestsCount ?? 0;
-  const flowMode =
-    getFlowModeEnforcement() === "off" ? "default" : (context?.flowMode ?? "default");
   if (context?.emailRevisionMode) {
     return required;
   }
@@ -400,12 +354,9 @@ export function getMissingRequiredTools(
   }
 
   const isCompanyTargets =
-    (flowIntent === "company_targets" || flowMode === "outbound") &&
-    !(context?.targetListContext && !context?.explicitProspectIntent);
-  const isInboundMatch =
-    flowIntent === "inbound_company_athlete_match" || flowMode === "inbound";
+    flowIntent === "company_targets" && !(context?.targetListContext && !context?.explicitProspectIntent);
+  const isInboundMatch = flowIntent === "inbound_company_athlete_match";
   const isEmailPitchFlow =
-    flowMode === "email" ||
     flowIntent === "email_single_athlete" ||
     flowIntent === "email_group_outreach" ||
     flowIntent === "email_roster_outreach" ||
