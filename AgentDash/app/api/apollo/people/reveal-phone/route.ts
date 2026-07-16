@@ -4,6 +4,7 @@ import { createServerClient, createServiceRoleClient } from "@/lib/supabase/serv
 import { isApolloEnabled, isApolloPhoneRevealAllowed } from "@/lib/apollo/config";
 import { resolveOrganizationForCompany } from "@/lib/apollo/resolve-organization";
 import { requestPersonPhoneReveal } from "@/lib/apollo/people-phone-reveal";
+import { canEnrichContactViaApollo } from "@/lib/apollo/contact-enrichment";
 import { buildApolloPhoneWebhookUrl } from "@/lib/apollo/webhook-url";
 import { logApolloUsage } from "@/lib/apollo/usage";
 import { ApolloApiError } from "@/lib/apollo/client";
@@ -49,8 +50,11 @@ export async function POST(req: Request) {
   if (contact.created_by_user_id !== profile.user_id && profile.role !== "admin" && profile.role !== "sales") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
-  if (!contact.apollo_person_id) {
-    return NextResponse.json({ error: "Contact is not an Apollo candidate" }, { status: 400 });
+  if (!canEnrichContactViaApollo(contact)) {
+    return NextResponse.json(
+      { error: "Add an email, LinkedIn URL, or full name to reveal phone via Apollo" },
+      { status: 400 }
+    );
   }
   if (contact.phone && contact.apollo_phone_reveal_status === "revealed") {
     return NextResponse.json({
@@ -86,8 +90,8 @@ export async function POST(req: Request) {
   }
 
   try {
-    const { work_phone } = await requestPersonPhoneReveal({
-      apollo_person_id: String(contact.apollo_person_id),
+    const { work_phone, apollo_person_id: resolvedPersonId } = await requestPersonPhoneReveal({
+      apollo_person_id: contact.apollo_person_id,
       first_name: contact.first_name,
       last_name: contact.last_name !== "—" ? contact.last_name : undefined,
       organization_name: companyName,
@@ -97,23 +101,28 @@ export async function POST(req: Request) {
       webhook_url: webhookUrl,
     });
 
+    const apolloPersonId = resolvedPersonId ?? contact.apollo_person_id;
+
     await logApolloUsage(supabaseAdmin, {
       user_id: profile.user_id,
       endpoint: "people/match",
       company_id: contact.company_id,
-      apollo_person_id: contact.apollo_person_id,
+      apollo_person_id: apolloPersonId,
     });
 
-    await supabaseAdmin.from("apollo_phone_reveal_requests").insert({
-      contact_id,
-      apollo_person_id: contact.apollo_person_id,
-      user_id: profile.user_id,
-      status: "pending",
-    });
+    if (apolloPersonId) {
+      await supabaseAdmin.from("apollo_phone_reveal_requests").insert({
+        contact_id,
+        apollo_person_id: apolloPersonId,
+        user_id: profile.user_id,
+        status: "pending",
+      });
+    }
 
     const patch: Record<string, unknown> = {
       apollo_phone_reveal_status: "pending",
     };
+    if (apolloPersonId) patch.apollo_person_id = apolloPersonId;
     if (work_phone && !contact.phone) {
       patch.phone = work_phone;
     }
@@ -122,7 +131,7 @@ export async function POST(req: Request) {
       .from("crm_contacts")
       .update(patch)
       .eq("contact_id", contact_id)
-      .select("contact_id, phone, apollo_phone_reveal_status")
+      .select("contact_id, phone, apollo_phone_reveal_status, apollo_person_id")
       .single();
 
     if (updateErr) {

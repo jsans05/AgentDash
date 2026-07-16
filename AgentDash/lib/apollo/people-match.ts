@@ -11,27 +11,29 @@ function str(v: unknown): string | null {
 }
 
 export async function matchPerson(params: {
-  apollo_person_id: string;
+  apollo_person_id?: string | null;
   first_name?: string;
   last_name?: string;
   organization_name?: string;
   domain?: string | null;
   linkedin_url?: string | null;
+  email?: string | null;
 }): Promise<ApolloMatchResult> {
-  const query: Record<string, string | number | boolean | string[] | undefined> = {
-    id: params.apollo_person_id,
-  };
+  const query: Record<string, string | number | boolean | string[] | undefined> = {};
 
+  if (params.apollo_person_id) query.id = params.apollo_person_id;
   if (params.first_name) query.first_name = params.first_name;
   if (params.last_name) query.last_name = params.last_name;
   if (params.organization_name) query.organization_name = params.organization_name;
   if (params.domain) query.domain = params.domain;
   if (params.linkedin_url) query.linkedin_url = params.linkedin_url;
+  if (params.email) query.email = params.email;
 
   const data = await fetchApollo<PeopleMatchResponse>("/people/match", { query });
   const person = data.person;
   if (!person || typeof person !== "object") {
     return {
+      apollo_person_id: params.apollo_person_id ?? null,
       email: null,
       linkedin_url: null,
       first_name: params.first_name ?? null,
@@ -49,6 +51,7 @@ export async function matchPerson(params: {
       : null);
 
   return {
+    apollo_person_id: str(person.id) ?? params.apollo_person_id ?? null,
     email,
     linkedin_url: str(person.linkedin_url),
     first_name: str(person.first_name) ?? params.first_name ?? null,

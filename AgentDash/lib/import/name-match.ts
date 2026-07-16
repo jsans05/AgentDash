@@ -10,6 +10,21 @@ export type NameResolution = {
   candidates?: NameMatchCandidate[];
 };
 
+/** Trailing honorifics / generational suffixes ignored for matching (e.g. Phil Hanson Mr). */
+const NAME_SUFFIX_TOKENS = new Set([
+  "mr",
+  "mrs",
+  "ms",
+  "miss",
+  "dr",
+  "jr",
+  "sr",
+  "ii",
+  "iii",
+  "iv",
+  "v",
+]);
+
 export function normalizeForNameMatch(raw: string): string {
   const lowered = raw
     .trim()
@@ -26,16 +41,31 @@ export function normalizeForNameMatch(raw: string): string {
     .trim();
 }
 
+/** Drop trailing mr/mrs/jr/etc so "Phil Hanson Mr" aligns with "Phil Hanson". */
+export function stripNameSuffixTokens(tokens: string[]): string[] {
+  const out = [...tokens];
+  while (out.length > 2 && NAME_SUFFIX_TOKENS.has(out[out.length - 1]!)) {
+    out.pop();
+  }
+  // Also strip a single trailing suffix when only 2+ tokens remain after (e.g. "hanson" "mr" → need first)
+  while (out.length >= 2 && NAME_SUFFIX_TOKENS.has(out[out.length - 1]!)) {
+    out.pop();
+  }
+  return out;
+}
+
 export function tokensFromImportName(rawName: string): string[] {
   if (rawName.includes(",")) {
     const [lastPart, ...rest] = rawName.split(",");
     const firstPart = rest.join(",");
     const swapped = normalizeForNameMatch(`${firstPart} ${lastPart}`);
-    return swapped ? swapped.split(" ").filter(Boolean) : [];
+    const tokens = swapped ? swapped.split(" ").filter(Boolean) : [];
+    return stripNameSuffixTokens(tokens);
   }
 
   const normalized = normalizeForNameMatch(rawName);
-  return normalized ? normalized.split(" ").filter(Boolean) : [];
+  const tokens = normalized ? normalized.split(" ").filter(Boolean) : [];
+  return stripNameSuffixTokens(tokens);
 }
 
 export function tokensFromAthleteRow(firstName: string | null, lastName: string | null): string[] {

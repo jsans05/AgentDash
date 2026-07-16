@@ -15,7 +15,7 @@ export type FunnelStage = (typeof FUNNEL_STAGES)[number];
 
 export const FUNNEL_TO_PIPELINE: Record<FunnelStage, PipelineStage> = {
   idea: "target",
-  research: "research",
+  research: "target",
   contacted: "outreach",
   negotiating: "in_progress",
   paused: "follow_up",
@@ -26,7 +26,7 @@ export const FUNNEL_TO_PIPELINE: Record<FunnelStage, PipelineStage> = {
 /** Higher ordinal = further along the operational funnel (max-wins backfill). */
 export const PIPELINE_STAGE_ORDINAL: Record<PipelineStage, number> = {
   target: 0,
-  research: 1,
+  research: 0,
   drafting: 2,
   outreach: 3,
   bounced: 3,
@@ -53,6 +53,7 @@ export function normalizeFunnelStage(value: unknown, fallback: FunnelStage = "id
 
 export function normalizePipelineStage(value: unknown, fallback: PipelineStage = "target"): PipelineStage {
   const stage = String(value ?? "").trim().toLowerCase();
+  if (stage === "research") return "target";
   if (PIPELINE_STAGES.has(stage)) return stage as PipelineStage;
   if (isFunnelStage(stage)) return pipelineStageFromFunnel(stage);
   return fallback;
@@ -71,6 +72,7 @@ export function pipelineStageToFunnel(stage: PipelineStage): FunnelStage {
     case "target":
       return "idea";
     case "research":
+      return "idea";
     case "drafting":
       return "research";
     case "outreach":

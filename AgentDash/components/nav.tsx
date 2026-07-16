@@ -32,7 +32,8 @@ function normalizeAppRole(
 ): AppRole | undefined {
   if (raw == null || typeof raw !== "string") return undefined;
   const r = raw.trim().toLowerCase();
-  if (r === "admin" || r === "sales" || r === "agent" || r === "accounting") return r;
+  if (r === "admin" || r === "sales" || r === "agent" || r === "accounting" || r === "operations")
+    return r;
   return undefined;
 }
 
@@ -57,11 +58,13 @@ export function Nav() {
     sales: "bg-[#21384A] text-[#D7ECFF] border border-[#4378A5]/50",
     agent: "bg-[#1B2F21] text-[#DBEEE0] border border-[#2E7040]/60",
     accounting: "bg-[#3A3020] text-[#F3E4C8] border border-[#8A7348]/50",
+    operations: "bg-[#2A3540] text-[#D4E8F5] border border-[#5A7A94]/50",
   };
 
   const role = normalizeAppRole(profile?.role);
   const displayEmail = profile?.email?.trim() || user.email || "—";
   const isAccounting = role === "accounting";
+  const isOperations = role === "operations";
   const showAdminLinks = role === "admin";
   const showInsightsLink = role === "admin" || role === "sales";
   const showMarketIntelLink = showInsightsLink || isConsultingUser;
@@ -74,6 +77,12 @@ export function Nav() {
         { href: "/roster", label: "Roster" },
         { href: "/contracts", label: "Contracts" },
       ]
+    : isOperations
+    ? [
+        { href: "/roster", label: "Roster" },
+        { href: "/contracts", label: "Contracts" },
+        { href: "/admin/import", label: "Import" },
+      ]
     : [
         { href: "/roster", label: "Roster" },
         ...(showInsightsLink ? [{ href: "/insights", label: "Insights" }] : []),
@@ -82,6 +91,8 @@ export function Nav() {
         { href: "/ai", label: "Mystery Machine" },
         { href: "/master-target-list", label: "Master Target List" },
         { href: "/crm", label: "Pipeline" },
+        { href: "/crm/analytics", label: "Analytics" },
+        { href: "/crm/contacts", label: "Contacts" },
         { href: "/crm/drafts", label: "Drafts" },
         { href: "/contracts", label: "Contracts" },
         { href: "/email-templates", label: "Email Templates" },
@@ -96,7 +107,9 @@ export function Nav() {
   ];
 
   const isActive = (href: string) => {
-    if (href === "/crm") return pathname === "/crm" || pathname.startsWith("/crm/contacts");
+    if (href === "/crm") return pathname === "/crm";
+    if (href === "/crm/analytics") return pathname === "/crm/analytics";
+    if (href === "/crm/contacts") return pathname === "/crm/contacts" || pathname.startsWith("/crm/contacts/");
     if (href === "/insights") return pathname === "/insights";
     if (href === "/market-intel") return pathname === "/market-intel";
     if (href === "/consulting") return pathname === "/consulting" || pathname.startsWith("/consulting/");

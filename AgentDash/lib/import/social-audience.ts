@@ -30,7 +30,7 @@ export type ParsedAudienceRow = {
   current_ig_following: number | null;
 };
 
-export type ImportSheetName = "Social Data" | "Audience Data" | "Talent Info";
+export type ImportSheetName = "Social Data" | "Audience Data" | "Talent Info" | "Roster";
 
 export type ImportRowFailure = {
   sheet: ImportSheetName;
@@ -59,22 +59,32 @@ const SOCIAL_HEADER_MAP: Record<string, string> = {
   "avg. er (20p)": "avg_er_20p",
   "avg er (20p)": "avg_er_20p",
   "total lifetime posts": "total_lifetime_posts",
+  // Metabase Owned Social exports
+  "total posts": "total_lifetime_posts",
   "ig followers": "ig_followers",
   "avg. er (ig, 20p)": "avg_er_ig_20p",
   "avg er (ig, 20p)": "avg_er_ig_20p",
+  "ig er (20p)": "avg_er_ig_20p",
   "ig lifetime posts": "ig_lifetime_posts",
+  "ig total posts": "ig_lifetime_posts",
   "tt followers": "tt_followers",
   "avg. er (tt, 20p)": "avg_er_tt_20p",
   "avg er (tt, 20p)": "avg_er_tt_20p",
+  "tt er (20p)": "avg_er_tt_20p",
   "tt lifetime posts": "tt_lifetime_posts",
+  "tt total posts": "tt_lifetime_posts",
   "fb followers": "fb_followers",
   "avg. er (fb, 20p)": "avg_er_fb_20p",
   "avg er (fb, 20p)": "avg_er_fb_20p",
+  "fb er (20p)": "avg_er_fb_20p",
   "fb lifetime posts": "fb_lifetime_posts",
+  "fb total posts": "fb_lifetime_posts",
   "x followers": "x_followers",
   "avg. er (x, 20p)": "avg_er_x_20p",
   "avg er (x, 20p)": "avg_er_x_20p",
+  "x er (20p)": "avg_er_x_20p",
   "x lifetime posts": "x_lifetime_posts",
+  "x total posts": "x_lifetime_posts",
 };
 
 const AUDIENCE_HEADER_MAP: Record<string, string> = {
@@ -85,8 +95,16 @@ const AUDIENCE_HEADER_MAP: Record<string, string> = {
   "audience name": "audience_name",
   "% ig audience": "ig_audience_percent",
   "# ig audience": "ig_audience_count",
+  // Metabase Audience exports
+  "ig audience %": "ig_audience_percent",
+  "ig audience #": "ig_audience_count",
   "current ig following": "current_ig_following",
+  "total ig followers": "current_ig_following",
 };
+
+/** Export for Metabase preview header-mapping UI. */
+export const SOCIAL_HEADER_ALIASES = SOCIAL_HEADER_MAP;
+export const AUDIENCE_HEADER_ALIASES = AUDIENCE_HEADER_MAP;
 
 const VALID_AUDIENCE_CATEGORIES: AudienceCategoryEnum[] = [
   "Brands",

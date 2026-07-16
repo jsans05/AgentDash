@@ -3,6 +3,7 @@ import { requireNonAccounting } from "@/lib/auth";
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { isApolloEmailRevealAllowed, isApolloEnabled } from "@/lib/apollo/config";
 import { matchPerson } from "@/lib/apollo/people-match";
+import { canEnrichContactViaApollo } from "@/lib/apollo/contact-enrichment";
 import { resolveOrganizationForCompany } from "@/lib/apollo/resolve-organization";
 import { logApolloUsage } from "@/lib/apollo/usage";
 import { ApolloApiError } from "@/lib/apollo/client";
@@ -37,8 +38,11 @@ export async function POST(req: Request) {
   if (contact.created_by_user_id !== profile.user_id && profile.role !== "admin" && profile.role !== "sales") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
-  if (!contact.apollo_person_id) {
-    return NextResponse.json({ error: "Contact is not an Apollo candidate" }, { status: 400 });
+  if (!canEnrichContactViaApollo(contact)) {
+    return NextResponse.json(
+      { error: "Add an email, LinkedIn URL, or full name to enrich this contact via Apollo" },
+      { status: 400 }
+    );
   }
 
   const company = Array.isArray(contact.companies) ? contact.companies[0] : contact.companies;
@@ -55,24 +59,26 @@ export async function POST(req: Request) {
 
   try {
     const matched = await matchPerson({
-      apollo_person_id: String(contact.apollo_person_id),
+      apollo_person_id: contact.apollo_person_id,
       first_name: contact.first_name,
       last_name: contact.last_name !== "—" ? contact.last_name : undefined,
       organization_name: companyName,
       domain,
       linkedin_url: contact.linkedin_url,
+      email: contact.email,
     });
 
     await logApolloUsage(supabaseAdmin, {
       user_id: profile.user_id,
       endpoint: "people/match",
       company_id: contact.company_id,
-      apollo_person_id: contact.apollo_person_id,
+      apollo_person_id: matched.apollo_person_id ?? contact.apollo_person_id,
     });
 
     const patch: Record<string, unknown> = {
       apollo_reveal_status: "revealed",
     };
+    if (matched.apollo_person_id) patch.apollo_person_id = matched.apollo_person_id;
     if (matched.email) patch.email = matched.email.toLowerCase();
     if (matched.linkedin_url) patch.linkedin_url = matched.linkedin_url;
     if (matched.first_name) patch.first_name = matched.first_name;
@@ -84,7 +90,7 @@ export async function POST(req: Request) {
       .update(patch)
       .eq("contact_id", contact_id)
       .select(
-        "contact_id, first_name, last_name, role, email, linkedin_url, apollo_person_id, apollo_reveal_status"
+        "contact_id, first_name, last_name, role, email, linkedin_url, phone, apollo_person_id, apollo_reveal_status, apollo_phone_reveal_status"
       )
       .single();
 

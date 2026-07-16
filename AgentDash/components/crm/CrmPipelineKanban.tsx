@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ChatPanel, type ChatPanelHandle, type ChatProject, type Message } from "@/components/chat/ChatPanel";
@@ -25,14 +26,18 @@ import { normalizePipelineContacts, type PipelineContactSlot } from "@/lib/crm/p
 import { CompanyContactsTable } from "@/components/crm/CompanyContactsTable";
 import { PartnershipNotesDisplay } from "@/components/crm/PartnershipNotesDisplay";
 import { CompanyCategorySelect } from "@/components/crm/CompanyCategorySelect";
-import { CrmBrandIdeaQuickAdd } from "@/components/crm/CrmBrandIdeaQuickAdd";
 import { safeHttpUrl } from "@/lib/security/url";
 import { normalizeOrIlikeFragment } from "@/lib/supabase/ilike";
 import {
   formatNoPartnershipsMessage,
   formatPartnershipResearchClientError,
 } from "@/lib/ai/partnership-research";
-import { STAGES, STAGE_LABEL, type PipelineStage } from "@/lib/crm/pipeline-stages";
+import { STAGES, STAGE_LABEL, normalizeDisplayStage, type PipelineStage } from "@/lib/crm/pipeline-stages";
+import type { FollowUpLogEntry } from "@/lib/crm/pipeline-cadence";
+import { PipelineDueDrawer, PipelineDuePill } from "@/components/crm/PipelineDueDrawer";
+import { batchDeletePipelineCards } from "@/lib/crm/batch-delete-pipeline-cards";
+import { PipelineAddBrandModal } from "@/components/crm/PipelineAddBrandModal";
+import { cadenceStepLabel, countDueInStage, getCadenceBadge } from "@/lib/crm/pipeline-cadence-ui";
 
 export type { PipelineStage } from "@/lib/crm/pipeline-stages";
 export { STAGE_LABEL } from "@/lib/crm/pipeline-stages";
@@ -55,6 +60,11 @@ export type PipelineCard = {
   pipeline_stage: PipelineStage;
   outreach_at: string | null;
   responded_at: string | null;
+  follow_up_step: number;
+  last_touch_at: string | null;
+  next_follow_up_at: string | null;
+  next_action: "email" | "linkedin" | "call" | "cool" | null;
+  follow_up_log: FollowUpLogEntry[] | null;
   idea_notes: string | null;
   company_description: string | null;
   personal_notes: string | null;
@@ -77,6 +87,10 @@ export type PipelineCard = {
   managed_by_agency?: boolean;
   agency_name?: string | null;
   hq_phone?: string | null;
+  total_funding_printed?: string | null;
+  latest_funding_stage?: string | null;
+  headcount_twelve_month_growth?: number | null;
+  firmographics_enriched_at?: string | null;
   /** People linked from CRM contacts (`source_contact_id` = crm_contacts.contact_id) */
   relevant_people?: Array<{
     name?: string | null;
@@ -86,11 +100,32 @@ export type PipelineCard = {
   }> | null;
 };
 
+const CRM_PIPELINE_VIEW_KEY = "teamintel:crmPipelineViewMode";
+type PipelineViewMode = "active" | "full";
+
+const ACTIVE_STAGE_IDS = new Set<PipelineStage>([
+  "drafting",
+  "outreach",
+  "bounced",
+  "follow_up",
+  "ghost",
+  "in_progress",
+  "closed",
+]);
+
+function readStoredPipelineViewMode(): PipelineViewMode {
+  try {
+    const v = localStorage.getItem(CRM_PIPELINE_VIEW_KEY);
+    return v === "full" ? "full" : "active";
+  } catch {
+    return "active";
+  }
+}
+
 const NEXT_STAGE: Partial<Record<PipelineStage, PipelineStage>> = {
-  target: "research",
+  target: "drafting",
   research: "drafting",
   drafting: "outreach",
-  outreach: "in_progress",
 };
 
 export function timeAgo(date: string): string {
@@ -256,7 +291,20 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [bulkMoving, setBulkMoving] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const [pendingOutreachBulk, setPendingOutreachBulk] = useState<string[] | null>(null);
+  const [brandAddOpen, setBrandAddOpen] = useState(false);
+  const [dueDrawerOpen, setDueDrawerOpen] = useState(false);
+  const [viewMode, setViewMode] = useState<PipelineViewMode>("active");
+
+  useEffect(() => {
+    setViewMode(readStoredPipelineViewMode());
+  }, []);
+
+  const visibleStages = useMemo(
+    () => (viewMode === "full" ? STAGES : STAGES.filter((s) => ACTIVE_STAGE_IDS.has(s.id))),
+    [viewMode]
+  );
 
   const openCard = useMemo(() => cards.find((c) => c.id === openId) ?? null, [cards, openId]);
   const selectedCount = selectedIds.size;
@@ -268,40 +316,12 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error ?? "Failed to load pipeline");
       let list: PipelineCard[] = Array.isArray(data.cards) ? data.cards : [];
-
-      const patchFns: Promise<unknown>[] = [];
-      for (const card of list) {
-        if (card.pipeline_stage !== "outreach" || !card.outreach_at || card.responded_at) continue;
-        const now = Date.now();
-        const outreachMs = new Date(card.outreach_at).getTime();
-        const daysSince = (now - outreachMs) / (1000 * 60 * 60 * 24);
-        if (daysSince >= 28) {
-          patchFns.push(
-            fetch(`/api/crm/pipeline/${card.id}`, {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json" },
-              credentials: "include",
-              body: JSON.stringify({ pipeline_stage: "ghost" }),
-            })
-          );
-        } else if (daysSince >= 14) {
-          patchFns.push(
-            fetch(`/api/crm/pipeline/${card.id}`, {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json" },
-              credentials: "include",
-              body: JSON.stringify({ pipeline_stage: "follow_up" }),
-            })
-          );
-        }
-      }
-
-      if (patchFns.length) {
-        await Promise.all(patchFns);
-        const res2 = await fetch("/api/crm/pipeline", { credentials: "include" });
-        const data2 = await res2.json().catch(() => ({}));
-        if (res2.ok && Array.isArray(data2.cards)) list = data2.cards;
-      }
+      list = list.map((c) => ({
+        ...c,
+        pipeline_stage: normalizeDisplayStage(c.pipeline_stage),
+        follow_up_step: Number(c.follow_up_step ?? 0),
+        follow_up_log: Array.isArray(c.follow_up_log) ? c.follow_up_log : [],
+      }));
 
       setCards(list);
     } finally {
@@ -339,17 +359,18 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
 
   const byStage = useMemo(() => {
     const m = new Map<PipelineStage, PipelineCard[]>();
-    for (const s of STAGES) m.set(s.id, []);
+    for (const s of visibleStages) m.set(s.id, []);
     for (const c of filteredCards) {
-      const list = m.get(c.pipeline_stage);
-      if (list) list.push(c);
-      else m.set(c.pipeline_stage, [c]);
+      const stage = normalizeDisplayStage(c.pipeline_stage);
+      const list = m.get(stage);
+      if (list) list.push({ ...c, pipeline_stage: stage });
+      else if (viewMode === "full") m.set(stage, [{ ...c, pipeline_stage: stage }]);
     }
     for (const list of m.values()) {
       list.sort((a, b) => comparePipelineCards(a, b, sortKey));
     }
     return m;
-  }, [filteredCards, sortKey]);
+  }, [filteredCards, sortKey, visibleStages, viewMode]);
 
   const exitSelectionMode = () => {
     setSelectionMode(false);
@@ -518,6 +539,35 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
     if (openId === id) setOpenId(null);
   };
 
+  const bulkDeleteCards = async (ids: string[]) => {
+    const unique = [...new Set(ids)];
+    if (unique.length === 0) return;
+    const noun = unique.length === 1 ? "company" : "companies";
+    if (!confirm(`Remove ${unique.length} ${noun} from your pipeline?`)) return;
+
+    setBulkDeleting(true);
+    try {
+      const deleted = await batchDeletePipelineCards(unique);
+      const removed = new Set(deleted);
+      setCards((c) => c.filter((x) => !removed.has(x.id)));
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        for (const id of removed) next.delete(id);
+        return next;
+      });
+      if (openId && removed.has(openId)) setOpenId(null);
+      if (deleted.length < unique.length) {
+        alert(`Removed ${deleted.length} of ${unique.length} companies. Some deletes failed.`);
+      } else if (deleted.length > 0) {
+        setSelectedIds(new Set());
+      }
+    } catch (e: unknown) {
+      alert(e instanceof Error ? e.message : "Bulk delete failed. Please try again.");
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
+
   function handleDropOnStage(e: React.DragEvent, targetStage: PipelineStage) {
     setDragOverStage(null);
     const payload = e.dataTransfer.getData("text/plain");
@@ -539,7 +589,7 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
   }
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] min-h-0 flex-col bg-[#0F1311]">
+    <div className="flex min-h-0 flex-1 flex-col bg-[#0F1311]">
       {(pendingOutreach || pendingOutreachBulk) && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
           <div className="w-full max-w-md space-y-3 rounded-lg border border-white/10 bg-[#151A17] p-4 shadow-xl">
@@ -567,15 +617,7 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
         </div>
       )}
 
-      <div className="shrink-0 space-y-3 border-b border-white/10 bg-[#0F1311] px-4 py-3">
-        <div className="space-y-3 rounded-lg border border-white/10 bg-[#151A17] p-4 shadow-sm">
-          <h2 className="text-sm font-medium text-[#F4F1EB]">Quick Add Brand Idea</h2>
-          <CrmBrandIdeaQuickAdd onSuccess={() => void bootstrap()} />
-        </div>
-      </div>
-
       <div className="shrink-0 flex flex-wrap items-center gap-2 border-b border-white/10 bg-[#141916] px-4 py-2 text-sm">
-        <span className="mr-1 text-[#B9B2A6]">Filter</span>
         <select
           aria-label="Filter by sport"
           className="rounded-md border border-white/15 bg-[#101513] px-2 py-1.5 text-sm text-[#ECE7DF]"
@@ -605,12 +647,12 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
         </select>
         <select
           aria-label="Filter by potential athlete"
-          className="min-w-[10rem] rounded-md border border-white/15 bg-[#101513] px-2 py-1.5 text-sm text-[#ECE7DF]"
+          className="min-w-[8rem] rounded-md border border-white/15 bg-[#101513] px-2 py-1.5 text-sm text-[#ECE7DF]"
           value={filterAthleteId}
           onChange={(e) => setFilterAthleteId(e.target.value)}
         >
           <option value="">All athletes</option>
-          <option value={FILTER_UNASSIGNED_ATHLETE}>Unassigned (no athlete)</option>
+          <option value={FILTER_UNASSIGNED_ATHLETE}>Unassigned</option>
           {filterOptions.athletes.map((a) => (
             <option key={a.id} value={a.id}>
               {a.name}
@@ -629,11 +671,9 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
               setFilterAthleteId("");
             }}
           >
-            Clear filters
+            Clear
           </Button>
         )}
-        <span className="hidden text-white/20 sm:inline">|</span>
-        <span className="mr-1 text-[#B9B2A6]">Sort</span>
         <select
           aria-label="Sort cards within columns"
           className="rounded-md border border-white/15 bg-[#101513] px-2 py-1.5 text-sm text-[#ECE7DF]"
@@ -646,7 +686,6 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
           <option value="category">Product category</option>
           <option value="athlete">Potential athlete</option>
         </select>
-        <span className="hidden text-white/20 sm:inline">|</span>
         <Button
           type="button"
           variant={selectionMode ? "default" : "outline"}
@@ -657,20 +696,71 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
             else setSelectionMode(true);
           }}
         >
-          {selectionMode ? "Done selecting" : "Select"}
+          {selectionMode ? "Done" : "Select"}
         </Button>
+
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <div className="flex rounded-md border border-white/15 p-0.5">
+            <button
+              type="button"
+              className={cn(
+                "rounded px-2 py-1 text-xs",
+                viewMode === "active" ? "bg-[#2E7040] text-white" : "text-[#B9B2A6] hover:text-[#ECE7DF]"
+              )}
+              onClick={() => {
+                setViewMode("active");
+                try {
+                  localStorage.setItem(CRM_PIPELINE_VIEW_KEY, "active");
+                } catch {
+                  /* ignore */
+                }
+              }}
+            >
+              Active
+            </button>
+            <button
+              type="button"
+              className={cn(
+                "rounded px-2 py-1 text-xs",
+                viewMode === "full" ? "bg-[#2E7040] text-white" : "text-[#B9B2A6] hover:text-[#ECE7DF]"
+              )}
+              onClick={() => {
+                setViewMode("full");
+                try {
+                  localStorage.setItem(CRM_PIPELINE_VIEW_KEY, "full");
+                } catch {
+                  /* ignore */
+                }
+              }}
+            >
+              Full
+            </button>
+          </div>
+          <PipelineDuePill cards={filteredCards} onClick={() => setDueDrawerOpen(true)} />
+          <Link
+            href="/crm/analytics"
+            className="inline-flex h-8 items-center rounded-md border border-white/15 px-3 text-xs text-[#D7D0C4] hover:bg-white/5 hover:text-[#F4F1EB]"
+          >
+            Analytics
+          </Link>
+          <Button type="button" variant="outline" size="sm" className="h-8 text-xs" onClick={() => setBrandAddOpen(true)}>
+            + Add brand
+          </Button>
+        </div>
       </div>
 
       {selectionMode && selectedCount > 0 && (
         <div className="shrink-0 flex flex-wrap items-center gap-2 border-b border-[#2E7040]/40 bg-[#1A2A20] px-4 py-2 text-sm">
           <span className="font-medium text-[#A7E0B6]">
-            {selectedCount} selected{bulkMoving ? " · moving…" : ""}
+            {selectedCount} selected
+            {bulkMoving ? " · moving…" : ""}
+            {bulkDeleting ? " · deleting…" : ""}
           </span>
           <select
             aria-label="Move selected companies to stage"
             className="rounded-md border border-white/15 bg-[#101513] px-2 py-1.5 text-sm text-[#ECE7DF]"
             defaultValue=""
-            disabled={bulkMoving}
+            disabled={bulkMoving || bulkDeleting}
             onChange={(e) => {
               const stage = e.target.value as PipelineStage;
               e.target.value = "";
@@ -679,7 +769,7 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
             }}
           >
             <option value="">Move to…</option>
-            {STAGES.map((s) => (
+            {visibleStages.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.label}
               </option>
@@ -687,10 +777,20 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
           </select>
           <Button
             type="button"
+            variant="destructive"
+            size="sm"
+            className="h-8 text-xs"
+            disabled={bulkMoving || bulkDeleting}
+            onClick={() => void bulkDeleteCards([...selectedIds])}
+          >
+            Delete selected
+          </Button>
+          <Button
+            type="button"
             variant="ghost"
             size="sm"
             className="h-8 text-xs text-[#D7D0C4] hover:bg-white/5 hover:text-[#F4F1EB]"
-            disabled={bulkMoving}
+            disabled={bulkMoving || bulkDeleting}
             onClick={selectAllVisible}
           >
             Select all visible ({filteredCards.length})
@@ -700,7 +800,7 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
             variant="ghost"
             size="sm"
             className="h-8 text-xs text-[#D7D0C4] hover:bg-white/5 hover:text-[#F4F1EB]"
-            disabled={bulkMoving}
+            disabled={bulkMoving || bulkDeleting}
             onClick={() => setSelectedIds(new Set())}
           >
             Clear
@@ -710,7 +810,9 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
 
       <div className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden bg-[#101513]">
         <div className="flex h-full min-w-max gap-3 p-4">
-          {STAGES.map((col) => (
+          {visibleStages.map((col) => {
+            const stageCounts = countDueInStage(filteredCards, col.id);
+            return (
             <div
               key={col.id}
               className={cn(
@@ -720,9 +822,17 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
               )}
             >
               <div className="shrink-0 flex items-center justify-between border-b border-white/10 px-3 py-2">
-                <span className="text-xs font-semibold tracking-wide text-[#CFC8BC] uppercase">{col.label}</span>
+                <div className="min-w-0">
+                  <span className="text-xs font-semibold tracking-wide text-[#CFC8BC] uppercase">{col.label}</span>
+                  {stageCounts.due > 0 && (
+                    <span className="ml-1 text-[10px] text-[#A7E0B6]">{stageCounts.due} due</span>
+                  )}
+                  {stageCounts.cooling > 0 && (
+                    <span className="ml-1 text-[10px] text-[#8E877A]">{stageCounts.cooling} cooling</span>
+                  )}
+                </div>
                 <Badge variant="secondary" className="border border-white/10 bg-[#202723] px-1.5 py-0 text-[10px] text-[#D7D0C4]">
-                  {(byStage.get(col.id) ?? []).length}
+                  {stageCounts.total}
                 </Badge>
               </div>
               <div
@@ -811,7 +921,26 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
                         }
                       }}
                     >
-                      <div className="truncate text-sm font-medium text-[#F4F1EB]">{card.company_name}</div>
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <span className="truncate text-sm font-medium text-[#F4F1EB]">{card.company_name}</span>
+                        {(() => {
+                          const badge = getCadenceBadge(card);
+                          if (!badge) return null;
+                          const isCall = badge === "Call due";
+                          return (
+                            <span
+                              className={cn(
+                                "shrink-0 rounded border px-1 py-0 text-[9px] font-medium",
+                                isCall
+                                  ? "border-amber-400/50 bg-amber-950/40 text-amber-200"
+                                  : "border-[#2E7040]/40 bg-[#1A2A20] text-[#A7E0B6]"
+                              )}
+                            >
+                              {badge}
+                            </span>
+                          );
+                        })()}
+                      </div>
                     </div>
                     <div className="absolute top-2 right-2" data-crm-card-menu onClick={(e) => e.stopPropagation()}>
                       <button
@@ -825,7 +954,7 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
                       {menuOpenId === card.id && (
                         <div className="absolute right-0 z-20 mt-1 w-48 rounded-md border border-white/15 bg-[#161B18] py-1 text-sm shadow-lg">
                           <div className="px-2 py-1 text-[10px] uppercase text-[#8E877A]">Move to</div>
-                          {STAGES.filter((s) => s.id !== card.pipeline_stage).map((s) => (
+                          {visibleStages.filter((s) => s.id !== card.pipeline_stage).map((s) => (
                             <button
                               key={s.id}
                               type="button"
@@ -890,9 +1019,26 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
                 </div>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
       </div>
+
+      <PipelineAddBrandModal
+        open={brandAddOpen}
+        onClose={() => setBrandAddOpen(false)}
+        onSuccess={() => void bootstrap()}
+      />
+
+      <PipelineDueDrawer
+        open={dueDrawerOpen}
+        cards={filteredCards}
+        onClose={() => setDueDrawerOpen(false)}
+        onOpenCard={(id) => {
+          setDueDrawerOpen(false);
+          setOpenId(id);
+        }}
+      />
 
       {openCard && (
         <CompanySlideOver
@@ -2410,6 +2556,12 @@ function ActivityTab({
   savedFlash: boolean;
 }) {
   const [todoInput, setTodoInput] = useState("");
+  const [callOutcome, setCallOutcome] = useState("connected");
+  const contacts = useMemo(() => normalizePipelineContacts(card.pipeline_contacts), [card.pipeline_contacts]);
+  const primaryContact = contacts[0];
+  const linkedinUrl = safeHttpUrl(primaryContact?.linkedin ?? "");
+  const phone = card.hq_phone ?? "";
+
   const todos = useMemo(
     () =>
       (card.todos ?? []).map((t, i) => ({
@@ -2424,29 +2576,39 @@ function ActivityTab({
     void savePatch({ todos: next });
   };
 
+  const log = card.follow_up_log ?? [];
+
   const timeline: { line: string; sub?: string }[] = [];
   if (card.outreach_at) {
     timeline.push({
-      line: `Outreach recorded`,
+      line: "Initial send",
       sub: `${new Date(card.outreach_at).toLocaleString()} · ${timeAgo(card.outreach_at)}`,
+    });
+  }
+  for (const entry of log) {
+    timeline.push({
+      line: `${cadenceStepLabel(entry.step)} · ${entry.channel}`,
+      sub: `${new Date(entry.sent_at).toLocaleString()}${entry.outcome ? ` · ${entry.outcome}` : ""}`,
     });
   }
   if (card.pipeline_stage === "bounced") {
     timeline.push({
       line: "Email bounced",
-      sub: "Invalid address or delivery failure — update contact and try a different email",
+      sub: "Address quarantined — find a new contact",
     });
   }
-  if (card.pipeline_stage === "follow_up") {
+  if (card.follow_up_step === 5) {
     timeline.push({
-      line: "In Follow-Up",
-      sub: "Auto stage after 14 days without a response (still in outreach window)",
+      line: "Cooling period",
+      sub: card.next_follow_up_at
+        ? `Ghost after ${new Date(card.next_follow_up_at).toLocaleDateString()} if no reply`
+        : "Waiting before Ghost",
     });
   }
   if (card.pipeline_stage === "ghost") {
     timeline.push({
-      line: "In Ghost",
-      sub: "Auto stage after 28 days without a response",
+      line: "Ghost",
+      sub: "No response after full cadence",
     });
   }
   if (card.responded_at) {
@@ -2456,11 +2618,79 @@ function ActivityTab({
     });
   }
 
+  const markTouch = (channel: "email" | "linkedin" | "call", outcome?: string) => {
+    void savePatch({
+      cadence_action: "mark_touch",
+      channel,
+      outcome: outcome ?? null,
+    });
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex justify-end">
         <SavedFlash show={savedFlash} />
       </div>
+
+      {(card.pipeline_stage === "outreach" || card.pipeline_stage === "follow_up") && !card.responded_at && (
+        <div className="rounded-lg border border-white/10 bg-[#151A17] p-3 space-y-3">
+          <div className="text-xs font-medium text-[#B9B2A6]">Cadence actions</div>
+          <p className="text-xs text-[#8E877A]">
+            Send → 3 weekly follow-ups → call after email 3 → FU3 → 2-week cooling → Ghost. Best window: Tue–Thu
+            mornings.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="secondary" onClick={() => markTouch("email")}>
+              Mark email sent
+            </Button>
+            {linkedinUrl && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  window.open(linkedinUrl, "_blank", "noopener,noreferrer");
+                  markTouch("linkedin");
+                }}
+              >
+                Open LinkedIn
+              </Button>
+            )}
+            {!linkedinUrl && (
+              <Button size="sm" variant="outline" disabled title="Add LinkedIn on contact">
+                LinkedIn
+              </Button>
+            )}
+          </div>
+          {(card.follow_up_step === 3 || card.next_action === "call") && (
+            <div className="space-y-2 border-t border-white/10 pt-3">
+              <div className="text-xs font-medium text-amber-200/90">Call due (after 3 emails)</div>
+              {phone ? (
+                <a href={`tel:${phone}`} className="text-sm text-[#A7E0B6] hover:underline">
+                  {phone}
+                </a>
+              ) : (
+                <p className="text-xs text-[#8E877A]">Add HQ phone or reveal via Apollo on the company row.</p>
+              )}
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  className="rounded border border-white/15 bg-[#101513] px-2 py-1 text-sm text-[#ECE7DF]"
+                  value={callOutcome}
+                  onChange={(e) => setCallOutcome(e.target.value)}
+                >
+                  <option value="connected">Connected</option>
+                  <option value="voicemail">Voicemail</option>
+                  <option value="no_answer">No answer</option>
+                  <option value="wrong_number">Wrong number</option>
+                </select>
+                <Button size="sm" onClick={() => markTouch("call", callOutcome)}>
+                  Log call
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       <div>
         <div className="text-xs font-medium text-[#B9B2A6] mb-2">Timeline</div>
         <ul className="space-y-3 border-l-2 border-white/15 pl-3">
@@ -2478,12 +2708,11 @@ function ActivityTab({
         <Button
           onClick={() =>
             void savePatch({
-              pipeline_stage: "in_progress",
-              responded_at: new Date().toISOString(),
+              cadence_action: "mark_responded",
             })
           }
         >
-          Mark as Responded
+          Mark as Responded → Negotiating
         </Button>
       )}
 
@@ -2560,7 +2789,7 @@ function ActivityTab({
           variant="outline"
           onClick={() =>
             void savePatch({
-              pipeline_stage: "research",
+              pipeline_stage: "target",
             })
           }
         >

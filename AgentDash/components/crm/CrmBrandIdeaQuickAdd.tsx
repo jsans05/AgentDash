@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase/client";
 import { normalizeOrIlikeFragment } from "@/lib/supabase/ilike";
+import { cn } from "@/lib/utils";
 
 type AthleteOption = {
   athlete_id: string;
@@ -13,9 +14,17 @@ type AthleteOption = {
 type CrmBrandIdeaQuickAddProps = {
   /** Called after a successful add (e.g. refetch client-side pipeline data). `router.refresh()` still runs. */
   onSuccess?: () => void;
+  /** Called after successful submit or when user cancels (modal layout). */
+  onClose?: () => void;
+  /** `modal` stacks fields vertically for dialog use. */
+  layout?: "inline" | "modal";
 };
 
-export function CrmBrandIdeaQuickAdd({ onSuccess }: CrmBrandIdeaQuickAddProps = {}) {
+export function CrmBrandIdeaQuickAdd({
+  onSuccess,
+  onClose,
+  layout = "inline",
+}: CrmBrandIdeaQuickAddProps = {}) {
   const router = useRouter();
   const [companyName, setCompanyName] = useState("");
   const [notes, setNotes] = useState("");
@@ -110,26 +119,36 @@ export function CrmBrandIdeaQuickAdd({ onSuccess }: CrmBrandIdeaQuickAddProps = 
       setSearchOpen(false);
       router.refresh();
       onSuccess?.();
+      onClose?.();
     } finally {
       setSubmitting(false);
     }
   }
 
+  const isModal = layout === "modal";
+
   return (
-    <form onSubmit={onSubmit} className="flex flex-wrap items-end gap-3">
-      <label className="flex flex-col gap-1 text-sm">
+    <form
+      onSubmit={onSubmit}
+      className={isModal ? "flex flex-col gap-4" : "flex flex-wrap items-end gap-3"}
+    >
+      <label className={cn("flex flex-col gap-1 text-sm", isModal && "w-full")}>
         <span className="text-[#D7D0C4]">Company Name</span>
         <input
           required
           value={companyName}
           onChange={(e) => setCompanyName(e.target.value)}
-          className="min-w-[220px] rounded-md border border-white/20 bg-[#101513] px-3 py-2 text-sm text-[#ECE7DF] placeholder:text-[#8E877A]"
+          className={cn(
+            "rounded-md border border-white/20 bg-[#101513] px-3 py-2 text-sm text-[#ECE7DF] placeholder:text-[#8E877A]",
+            isModal ? "w-full" : "min-w-[220px]"
+          )}
           placeholder="Nike"
+          autoFocus={isModal}
         />
       </label>
-      <label className="flex flex-col gap-1 text-sm">
+      <label className={cn("flex flex-col gap-1 text-sm", isModal ? "w-full" : "min-w-[260px]")}>
         <span className="text-[#D7D0C4]">Potential Athlete</span>
-        <div className="relative min-w-[260px]">
+        <div className={cn("relative", isModal ? "w-full" : "min-w-[260px]")}>
           {selectedAthlete ? (
             <div className="flex items-center justify-between gap-2 rounded-md border border-white/20 bg-[#101513] px-3 py-2 text-sm text-[#ECE7DF]">
               <span className="truncate">{selectedAthlete.name}</span>
@@ -188,22 +207,36 @@ export function CrmBrandIdeaQuickAdd({ onSuccess }: CrmBrandIdeaQuickAddProps = 
           )}
         </div>
       </label>
-      <label className="flex flex-col gap-1 text-sm min-w-[260px]">
+      <label className={cn("flex flex-col gap-1 text-sm", isModal ? "w-full" : "min-w-[260px]")}>
         <span className="text-[#D7D0C4]">Notes</span>
         <input
           value={notes}
           onChange={(e) => setNotes(e.target.value)}
-          className="rounded-md border border-white/20 bg-[#101513] px-3 py-2 text-sm text-[#ECE7DF] placeholder:text-[#8E877A]"
+          className={cn(
+            "rounded-md border border-white/20 bg-[#101513] px-3 py-2 text-sm text-[#ECE7DF] placeholder:text-[#8E877A]",
+            isModal && "w-full"
+          )}
           placeholder="Creator fit, campaign angle, etc."
         />
       </label>
-      <button
-        type="submit"
-        disabled={submitting || !companyName.trim()}
-        className="rounded-md bg-[#2E7040] px-4 py-2 text-sm text-white hover:bg-[#285F36] disabled:opacity-50"
-      >
-        {submitting ? "Adding..." : "Add idea"}
-      </button>
+      <div className={cn("flex gap-2", isModal ? "justify-end pt-1" : "")}>
+        {isModal && onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-white/15 px-4 py-2 text-sm text-[#D7D0C4] hover:bg-white/5"
+          >
+            Cancel
+          </button>
+        )}
+        <button
+          type="submit"
+          disabled={submitting || !companyName.trim()}
+          className="rounded-md bg-[#2E7040] px-4 py-2 text-sm text-white hover:bg-[#285F36] disabled:opacity-50"
+        >
+          {submitting ? "Adding..." : "Add idea"}
+        </button>
+      </div>
     </form>
   );
 }

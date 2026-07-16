@@ -2,7 +2,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { TargetListActionDialog } from "@/components/crm/TargetListActionDialog";
+import { CONTACT_STATUS_OPTIONS } from "@/lib/crm/contact-filter-sort";
+import type { CrmContact } from "@/lib/supabase/types";
 import { TAXONOMY_NON_ENDEMIC_GLOBAL_SPORT } from "@/lib/taxonomy-constants";
+import { cn } from "@/lib/utils";
 
 type TaxonomyNode = {
   id: string;
@@ -60,12 +64,27 @@ type Props = {
     selectedAthleteIds: string[];
     last_outreach_at: string | null;
     email_drafts?: CrmContactEmailDraft[];
+    status_tag?: CrmContact["status_tag"];
+    archived?: boolean;
+    outreach_mode?: CrmContact["outreach_mode"];
   };
 
   taxonomyNodes: TaxonomyNode[];
   athleteOptions: AthleteOption[];
   initialLogs: OutreachLog[];
 };
+
+const INPUT_CLASS =
+  "mt-1 w-full rounded-md border border-white/15 bg-[#101513] px-3 py-2 text-sm text-[#ECE7DF] placeholder:text-[#8E877A]";
+const CARD_CLASS = "rounded-xl border border-white/10 bg-[#141916] p-4 space-y-4";
+const LABEL_CLASS = "text-sm text-[#D7D0C4]";
+const SECTION_TITLE = "text-lg font-semibold text-[#F4F1EB]";
+
+const OUTREACH_MODE_OPTIONS: { value: CrmContact["outreach_mode"]; label: string }[] = [
+  { value: "email", label: "Email" },
+  { value: "linkedin", label: "LinkedIn" },
+  { value: "other", label: "Other" },
+];
 
 function toIsoStringFromLocal(localValue: string): string | null {
   if (!localValue) return null;
@@ -86,6 +105,13 @@ export function CrmContactEditor(props: Props) {
   const [phone, setPhone] = useState(props.initial.phone);
   const [linkedinUrl, setLinkedinUrl] = useState(props.initial.linkedin_url);
   const [zoominfoUrl, setZoominfoUrl] = useState(props.initial.zoominfo_url);
+  const [statusTag, setStatusTag] = useState<CrmContact["status_tag"]>(
+    props.initial.status_tag ?? "none"
+  );
+  const [archived, setArchived] = useState(props.initial.archived ?? false);
+  const [outreachMode, setOutreachMode] = useState<CrmContact["outreach_mode"]>(
+    props.initial.outreach_mode ?? "email"
+  );
 
   const [taxonomyId, setTaxonomyId] = useState<string | null>(props.initial.taxonomy_id);
   const [productDescription, setProductDescription] = useState(props.initial.product_description);
@@ -94,10 +120,14 @@ export function CrmContactEditor(props: Props) {
   const [selectedAthleteIds, setSelectedAthleteIds] = useState<string[]>(props.initial.selectedAthleteIds);
 
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [addingOutreach, setAddingOutreach] = useState(false);
   const [aiWorking, setAiWorking] = useState(false);
+  const [bannerError, setBannerError] = useState<string | null>(null);
+  const [bannerSuccess, setBannerSuccess] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
-  // Outreach manual form
   const [outreachChannel, setOutreachChannel] = useState("other");
   const [outreachNotes, setOutreachNotes] = useState("");
   const [outreachAthleteId, setOutreachAthleteId] = useState<string | null>(
@@ -130,10 +160,30 @@ export function CrmContactEditor(props: Props) {
 
   const selectedAthleteSet = useMemo(() => new Set(selectedAthleteIds), [selectedAthleteIds]);
 
-  // Keep simple; we don't assume company_name is a URL.
+  function validateForm(): boolean {
+    const errors: Record<string, string> = {};
+    if (!firstName.trim()) errors.firstName = "First name is required";
+    if (!lastName.trim()) errors.lastName = "Last name is required";
+    if (!companyName.trim()) errors.companyName = "Company name is required";
+    setFieldErrors(errors);
+    if (Object.keys(errors).length > 0) {
+      setBannerError("Please fix the highlighted fields.");
+      setBannerSuccess(null);
+      return false;
+    }
+    setBannerError(null);
+    return true;
+  }
+
+  function fieldClass(field: string) {
+    return cn(INPUT_CLASS, fieldErrors[field] && "border-[#8A4848]/80");
+  }
 
   async function saveContact() {
+    if (!validateForm()) return;
     setSaving(true);
+    setBannerError(null);
+    setBannerSuccess(null);
     try {
       const payload = {
         company_name: companyName,
@@ -147,6 +197,13 @@ export function CrmContactEditor(props: Props) {
         taxonomy_id: taxonomyId,
         product_description: productDescription || null,
         notes: notes || null,
+        outreach_mode: outreachMode,
+        ...(mode === "edit"
+          ? {
+              status_tag: statusTag,
+              archived: statusTag === "red_bounced" ? true : archived,
+            }
+          : { outreach_mode: outreachMode }),
       };
 
       let createdId: string | undefined = contactId;
@@ -160,12 +217,12 @@ export function CrmContactEditor(props: Props) {
         });
         const data = await res.json();
         if (!res.ok) {
-          alert(data.error || "Failed to create contact");
+          setBannerError(data.error || "Failed to create contact");
           return;
         }
         createdId = data.contact?.contact_id;
         if (!createdId) {
-          alert("CRM contact_id missing from response");
+          setBannerError("CRM contact_id missing from response");
           return;
         }
       } else {
@@ -177,28 +234,28 @@ export function CrmContactEditor(props: Props) {
         });
         const data = await res.json();
         if (!res.ok) {
-          alert(data.error || "Failed to update contact");
+          setBannerError(data.error || "Failed to update contact");
           return;
         }
+        if (statusTag === "red_bounced") setArchived(true);
       }
 
-      // Link athletes (replace)
-      const finalAthleteIds = selectedAthleteIds;
       const linkRes = await fetch(`/api/crm/contacts/${createdId}/athletes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ athlete_ids: finalAthleteIds }),
+        body: JSON.stringify({ athlete_ids: selectedAthleteIds }),
       });
       const linkData = await linkRes.json();
       if (!linkRes.ok) {
-        alert(linkData.error || "Failed to link athletes");
+        setBannerError(linkData.error || "Failed to link athletes");
         return;
       }
 
       if (mode === "new" && createdId) {
         router.push(`/crm/contacts/${createdId}`);
       } else {
+        setBannerSuccess("Contact saved.");
         router.refresh();
       }
     } finally {
@@ -206,9 +263,31 @@ export function CrmContactEditor(props: Props) {
     }
   }
 
+  async function deleteContact() {
+    if (!contactId) return;
+    setDeleting(true);
+    setBannerError(null);
+    try {
+      const res = await fetch(`/api/crm/contacts/${contactId}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setBannerError(data.error || "Failed to delete contact");
+        return;
+      }
+      router.push("/crm/contacts");
+    } finally {
+      setDeleting(false);
+      setDeleteDialogOpen(false);
+    }
+  }
+
   async function addManualOutreach() {
     if (!contactId) return;
     setAddingOutreach(true);
+    setBannerError(null);
     try {
       const outreach_at = toIsoStringFromLocal(outreachAtLocal);
       const res = await fetch(`/api/crm/contacts/${contactId}/outreach`, {
@@ -225,12 +304,13 @@ export function CrmContactEditor(props: Props) {
 
       const data = await res.json();
       if (!res.ok) {
-        alert(data.error || "Failed to add outreach");
+        setBannerError(data.error || "Failed to add outreach");
         return;
       }
 
       setOutreachNotes("");
       setOutreachAtLocal("");
+      setBannerSuccess("Outreach logged.");
       router.refresh();
     } finally {
       setAddingOutreach(false);
@@ -240,6 +320,7 @@ export function CrmContactEditor(props: Props) {
   async function addAiOutreach() {
     if (!contactId) return;
     setAiWorking(true);
+    setBannerError(null);
     try {
       const res = await fetch(`/api/crm/contacts/${contactId}/outreach/ai`, {
         method: "POST",
@@ -252,10 +333,11 @@ export function CrmContactEditor(props: Props) {
       });
       const data = await res.json();
       if (!res.ok) {
-        alert(data.error || "Failed to generate AI outreach");
+        setBannerError(data.error || "Failed to generate AI outreach");
         return;
       }
       setOutreachNotes("");
+      setBannerSuccess("AI outreach generated and logged.");
       router.refresh();
     } finally {
       setAiWorking(false);
@@ -273,7 +355,7 @@ export function CrmContactEditor(props: Props) {
     });
     const data = await res.json();
     if (!res.ok) {
-      alert(data.error || "Failed to update drafts");
+      setBannerError(data.error || "Failed to update drafts");
       return;
     }
     setEmailDrafts(next);
@@ -288,70 +370,187 @@ export function CrmContactEditor(props: Props) {
 
   return (
     <div className="space-y-6">
-      <div>
-        <div className="sm:flex sm:items-center sm:justify-between">
-          <div className="sm:flex-auto">
-            <h1 className="text-2xl font-semibold text-gray-900">{mode === "new" ? "Create Contact" : "Edit Contact"}</h1>
-            <p className="mt-1 text-sm text-gray-500">
-              {props.initial.last_outreach_at ? `Last outreach: ${new Date(props.initial.last_outreach_at).toLocaleDateString()}` : "No outreach logged yet."}
-            </p>
-          </div>
-          <div className="mt-3 sm:mt-0">
+      <div className="sm:flex sm:items-center sm:justify-between">
+        <div className="sm:flex-auto">
+          <h1 className="text-2xl font-semibold text-[#F4F1EB]">
+            {mode === "new" ? "Create Contact" : "Edit Contact"}
+          </h1>
+          <p className="mt-1 text-sm text-[#B9B2A6]">
+            {props.initial.last_outreach_at
+              ? `Last outreach: ${new Date(props.initial.last_outreach_at).toLocaleDateString()}`
+              : "No outreach logged yet."}
+            {archived ? " · Archived" : ""}
+          </p>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2 sm:mt-0">
+          {mode === "edit" && contactId ? (
             <button
-              onClick={saveContact}
-              disabled={saving}
-              className="px-4 py-2 bg-blue-600 text-white rounded-md text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+              type="button"
+              onClick={() => setDeleteDialogOpen(true)}
+              disabled={deleting || saving}
+              className="rounded-md border border-[#8A4848]/60 px-4 py-2 text-sm font-medium text-[#F1A2A2] hover:bg-[#3A201F] disabled:opacity-50"
             >
-              {saving ? "Saving..." : "Save"}
+              Delete
             </button>
-          </div>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => void saveContact()}
+            disabled={saving}
+            className="rounded-md border border-[#2E7040]/60 bg-[#1B2F21] px-4 py-2 text-sm font-medium text-[#DBEEE0] hover:bg-[#23452E] disabled:opacity-50"
+          >
+            {saving ? "Saving…" : "Save"}
+          </button>
         </div>
       </div>
 
-      <div className="bg-white shadow rounded-lg p-4 space-y-4">
-        <h2 className="text-lg font-medium text-gray-900">Contact Details</h2>
+      {bannerError ? (
+        <p className="rounded-lg border border-[#8A4848]/50 bg-[#3A201F] px-3 py-2 text-sm text-[#F1A2A2]">
+          {bannerError}
+        </p>
+      ) : null}
+      {bannerSuccess ? (
+        <p className="rounded-lg border border-[#2E7040]/50 bg-[#1B2F21] px-3 py-2 text-sm text-[#A7E0B6]">
+          {bannerSuccess}
+        </p>
+      ) : null}
+
+      <div className={CARD_CLASS}>
+        <h2 className={SECTION_TITLE}>Contact Details</h2>
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <label className="text-sm text-gray-700">
-            First Name
-            <input className="mt-1 w-full border rounded-md p-2 text-sm" value={firstName} onChange={(e) => setFirstName(e.target.value)} />
+          <label className={LABEL_CLASS}>
+            First Name *
+            <input
+              className={fieldClass("firstName")}
+              value={firstName}
+              onChange={(e) => {
+                setFirstName(e.target.value);
+                if (fieldErrors.firstName) setFieldErrors((p) => ({ ...p, firstName: "" }));
+              }}
+            />
+            {fieldErrors.firstName ? (
+              <span className="mt-1 block text-xs text-[#F1A2A2]">{fieldErrors.firstName}</span>
+            ) : null}
           </label>
-          <label className="text-sm text-gray-700">
-            Last Name
-            <input className="mt-1 w-full border rounded-md p-2 text-sm" value={lastName} onChange={(e) => setLastName(e.target.value)} />
+          <label className={LABEL_CLASS}>
+            Last Name *
+            <input
+              className={fieldClass("lastName")}
+              value={lastName}
+              onChange={(e) => {
+                setLastName(e.target.value);
+                if (fieldErrors.lastName) setFieldErrors((p) => ({ ...p, lastName: "" }));
+              }}
+            />
+            {fieldErrors.lastName ? (
+              <span className="mt-1 block text-xs text-[#F1A2A2]">{fieldErrors.lastName}</span>
+            ) : null}
           </label>
 
-          <label className="text-sm text-gray-700">
+          <label className={LABEL_CLASS}>
             Role / Title
-            <input className="mt-1 w-full border rounded-md p-2 text-sm" value={role} onChange={(e) => setRole(e.target.value)} />
+            <input className={INPUT_CLASS} value={role} onChange={(e) => setRole(e.target.value)} />
           </label>
-          <label className="text-sm text-gray-700">
-            Company Name
-            <input className="mt-1 w-full border rounded-md p-2 text-sm" value={companyName} onChange={(e) => setCompanyName(e.target.value)} />
+          <label className={LABEL_CLASS}>
+            Company Name *
+            <input
+              className={fieldClass("companyName")}
+              value={companyName}
+              onChange={(e) => {
+                setCompanyName(e.target.value);
+                if (fieldErrors.companyName) setFieldErrors((p) => ({ ...p, companyName: "" }));
+              }}
+            />
+            {fieldErrors.companyName ? (
+              <span className="mt-1 block text-xs text-[#F1A2A2]">{fieldErrors.companyName}</span>
+            ) : null}
           </label>
 
-          <label className="text-sm text-gray-700">
+          <label className={LABEL_CLASS}>
             Email
-            <input className="mt-1 w-full border rounded-md p-2 text-sm" value={email} onChange={(e) => setEmail(e.target.value)} />
+            <input className={INPUT_CLASS} value={email} onChange={(e) => setEmail(e.target.value)} />
           </label>
-          <label className="text-sm text-gray-700">
+          <label className={LABEL_CLASS}>
             Phone
-            <input className="mt-1 w-full border rounded-md p-2 text-sm" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+1 (555) 555-5555" />
+            <input
+              className={INPUT_CLASS}
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              placeholder="+1 (555) 555-5555"
+            />
           </label>
-          <label className="text-sm text-gray-700">
+          <label className={LABEL_CLASS}>
             LinkedIn URL
-            <input className="mt-1 w-full border rounded-md p-2 text-sm" value={linkedinUrl} onChange={(e) => setLinkedinUrl(e.target.value)} placeholder="https://..." />
+            <input
+              className={INPUT_CLASS}
+              value={linkedinUrl}
+              onChange={(e) => setLinkedinUrl(e.target.value)}
+              placeholder="https://..."
+            />
           </label>
-
-          <label className="text-sm text-gray-700">
+          <label className={LABEL_CLASS}>
             ZoomInfo Link
-            <input className="mt-1 w-full border rounded-md p-2 text-sm" value={zoominfoUrl} onChange={(e) => setZoominfoUrl(e.target.value)} placeholder="https://..." />
+            <input
+              className={INPUT_CLASS}
+              value={zoominfoUrl}
+              onChange={(e) => setZoominfoUrl(e.target.value)}
+              placeholder="https://..."
+            />
           </label>
 
-          <label className="text-sm text-gray-700 sm:col-span-2">
+          <label className={LABEL_CLASS}>
+            Outreach mode
+            <select
+              className={INPUT_CLASS}
+              value={outreachMode}
+              onChange={(e) => setOutreachMode(e.target.value as CrmContact["outreach_mode"])}
+            >
+              {OUTREACH_MODE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {mode === "edit" ? (
+            <>
+              <label className={LABEL_CLASS}>
+                Status
+                <select
+                  className={INPUT_CLASS}
+                  value={statusTag}
+                  onChange={(e) => {
+                    const next = e.target.value as CrmContact["status_tag"];
+                    setStatusTag(next);
+                    if (next === "red_bounced") setArchived(true);
+                  }}
+                >
+                  {CONTACT_STATUS_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className={cn(LABEL_CLASS, "flex items-end gap-2 pb-2")}>
+                <input
+                  type="checkbox"
+                  checked={archived}
+                  disabled={statusTag === "red_bounced"}
+                  onChange={(e) => setArchived(e.target.checked)}
+                  className="rounded border-white/20 bg-[#101513]"
+                />
+                <span>Archived</span>
+              </label>
+            </>
+          ) : null}
+
+          <label className={cn(LABEL_CLASS, "sm:col-span-2")}>
             Category
             <select
-              className="mt-1 w-full border rounded-md p-2 text-sm"
+              className={INPUT_CLASS}
               value={taxonomyId ?? ""}
               onChange={(e) => setTaxonomyId(e.target.value || null)}
             >
@@ -364,33 +563,43 @@ export function CrmContactEditor(props: Props) {
             </select>
           </label>
 
-          <label className="text-sm text-gray-700 sm:col-span-2">
+          <label className={cn(LABEL_CLASS, "sm:col-span-2")}>
             Product / Category Description
-            <textarea className="mt-1 w-full border rounded-md p-2 text-sm min-h-[70px]" value={productDescription} onChange={(e) => setProductDescription(e.target.value)} />
+            <textarea
+              className={cn(INPUT_CLASS, "min-h-[70px]")}
+              value={productDescription}
+              onChange={(e) => setProductDescription(e.target.value)}
+            />
           </label>
 
-          <label className="text-sm text-gray-700 sm:col-span-2">
+          <label className={cn(LABEL_CLASS, "sm:col-span-2")}>
             Notes
-            <textarea className="mt-1 w-full border rounded-md p-2 text-sm min-h-[90px]" value={notes} onChange={(e) => setNotes(e.target.value)} />
+            <textarea
+              className={cn(INPUT_CLASS, "min-h-[90px]")}
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+            />
           </label>
         </div>
-
       </div>
 
-      <div className="bg-white shadow rounded-lg p-4 space-y-4">
-        <h2 className="text-lg font-medium text-gray-900">Athletes (Links)</h2>
+      <div className={CARD_CLASS}>
+        <h2 className={SECTION_TITLE}>Athletes (Links)</h2>
 
-        <div className="max-h-[280px] overflow-auto border rounded-md p-3">
-          {props.athleteOptions.length === 0 && <div className="text-sm text-gray-500">No athletes available.</div>}
+        <div className="max-h-[280px] overflow-auto rounded-md border border-white/10 p-3">
+          {props.athleteOptions.length === 0 && (
+            <div className="text-sm text-[#B9B2A6]">No athletes available.</div>
+          )}
 
           {props.athleteOptions.map((a) => {
             const checked = selectedAthleteSet.has(a.athlete_id);
             const label = `${a.first_name} ${a.last_name}${a.sport ? ` • ${a.sport}` : ""}${a.country ? ` • ${a.country}` : ""}`;
             return (
-              <label key={a.athlete_id} className="flex items-center gap-2 text-sm py-1">
+              <label key={a.athlete_id} className="flex items-center gap-2 py-1 text-sm">
                 <input
                   type="checkbox"
                   checked={checked}
+                  className="rounded border-white/20 bg-[#101513]"
                   onChange={(e) => {
                     const next = new Set(selectedAthleteIds);
                     if (e.target.checked) next.add(a.athlete_id);
@@ -402,7 +611,7 @@ export function CrmContactEditor(props: Props) {
                     }
                   }}
                 />
-                <span className="text-gray-800">{label}</span>
+                <span className="text-[#ECE7DF]">{label}</span>
               </label>
             );
           })}
@@ -410,45 +619,45 @@ export function CrmContactEditor(props: Props) {
       </div>
 
       {mode === "edit" && contactId && (
-        <div className="bg-white shadow rounded-lg p-4 space-y-4">
+        <div className={CARD_CLASS}>
           <div className="flex items-center justify-between gap-3">
-            <h2 className="text-lg font-medium text-gray-900">Email drafts</h2>
-            <span className="text-xs text-gray-500">{emailDrafts.length} saved</span>
+            <h2 className={SECTION_TITLE}>Email drafts</h2>
+            <span className="text-xs text-[#8E877A]">{emailDrafts.length} saved</span>
           </div>
           {emailDrafts.length === 0 && (
-            <p className="text-sm text-gray-500">
+            <p className="text-sm text-[#B9B2A6]">
               No drafts yet. Saves from Mystery Machine pipeline chat appear here when the model uses your CRM{" "}
-              <code className="text-xs bg-gray-100 px-1 rounded">contact_id</code>.
+              <code className="rounded bg-white/10 px-1 text-xs">contact_id</code>.
             </p>
           )}
           {emailDrafts.length > 0 && (
             <div className="space-y-4">
               {emailDrafts.map((d, i) => (
-                <div key={`${d.created_at}-${i}`} className="border rounded-md p-3 space-y-2">
+                <div key={`${d.created_at}-${i}`} className="space-y-2 rounded-md border border-white/10 p-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="text-sm font-medium text-gray-900">{d.label || d.subject || "Draft"}</div>
-                    <div className="text-xs text-gray-500">{new Date(d.created_at).toLocaleString()}</div>
+                    <div className="text-sm font-medium text-[#F4F1EB]">{d.label || d.subject || "Draft"}</div>
+                    <div className="text-xs text-[#8E877A]">{new Date(d.created_at).toLocaleString()}</div>
                   </div>
                   {d.subject ? (
-                    <div className="text-xs text-gray-600">
+                    <div className="text-xs text-[#B9B2A6]">
                       <span className="font-medium">Subject:</span> {d.subject}
                     </div>
                   ) : null}
-                  <div className="text-sm text-gray-800 whitespace-pre-wrap max-h-48 overflow-auto border border-gray-100 rounded p-2 bg-gray-50">
+                  <div className="max-h-48 overflow-auto whitespace-pre-wrap rounded border border-white/10 bg-[#101513] p-2 text-sm text-[#ECE7DF]">
                     {d.body}
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <button
                       type="button"
                       onClick={() => copyText(`${d.subject ? `Subject: ${d.subject}\n\n` : ""}${d.body}`)}
-                      className="px-3 py-1.5 text-xs font-medium bg-gray-100 text-gray-800 rounded-md hover:bg-gray-200"
+                      className="rounded-md border border-white/15 px-3 py-1.5 text-xs font-medium text-[#D7D0C4] hover:bg-white/5"
                     >
                       Copy
                     </button>
                     <button
                       type="button"
                       onClick={() => void deleteEmailDraft(i)}
-                      className="px-3 py-1.5 text-xs font-medium bg-red-50 text-red-800 rounded-md hover:bg-red-100"
+                      className="rounded-md border border-[#8A4848]/60 px-3 py-1.5 text-xs font-medium text-[#F1A2A2] hover:bg-[#3A201F]"
                     >
                       Remove
                     </button>
@@ -460,19 +669,23 @@ export function CrmContactEditor(props: Props) {
         </div>
       )}
 
-      <div className="bg-white shadow rounded-lg p-4 space-y-4">
-        <h2 className="text-lg font-medium text-gray-900">Outreach</h2>
+      <div className={CARD_CLASS}>
+        <h2 className={SECTION_TITLE}>Outreach</h2>
 
         <div className="space-y-3">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <label className="text-sm text-gray-700">
+            <label className={LABEL_CLASS}>
               Channel
-              <input className="mt-1 w-full border rounded-md p-2 text-sm" value={outreachChannel} onChange={(e) => setOutreachChannel(e.target.value)} />
+              <input
+                className={INPUT_CLASS}
+                value={outreachChannel}
+                onChange={(e) => setOutreachChannel(e.target.value)}
+              />
             </label>
-            <label className="text-sm text-gray-700">
+            <label className={LABEL_CLASS}>
               Athlete (optional)
               <select
-                className="mt-1 w-full border rounded-md p-2 text-sm"
+                className={INPUT_CLASS}
                 value={outreachAthleteId ?? ""}
                 onChange={(e) => setOutreachAthleteId(e.target.value || null)}
               >
@@ -486,47 +699,53 @@ export function CrmContactEditor(props: Props) {
                   ))}
               </select>
             </label>
-            <label className="text-sm text-gray-700">
+            <label className={LABEL_CLASS}>
               Outreach At (optional)
               <input
                 type="datetime-local"
-                className="mt-1 w-full border rounded-md p-2 text-sm"
+                className={INPUT_CLASS}
                 value={outreachAtLocal}
                 onChange={(e) => setOutreachAtLocal(e.target.value)}
               />
             </label>
           </div>
 
-          <label className="text-sm text-gray-700">
+          <label className={LABEL_CLASS}>
             Outreach Notes
-            <textarea className="mt-1 w-full border rounded-md p-2 text-sm min-h-[90px]" value={outreachNotes} onChange={(e) => setOutreachNotes(e.target.value)} />
+            <textarea
+              className={cn(INPUT_CLASS, "min-h-[90px]")}
+              value={outreachNotes}
+              onChange={(e) => setOutreachNotes(e.target.value)}
+            />
           </label>
 
-          <div className="flex gap-3">
+          <div className="flex flex-wrap gap-3">
             <button
-              onClick={addManualOutreach}
+              type="button"
+              onClick={() => void addManualOutreach()}
               disabled={addingOutreach || !contactId}
-              className="px-4 py-2 bg-gray-900 text-white rounded-md text-sm font-medium hover:bg-black disabled:opacity-50"
+              className="rounded-md border border-white/15 bg-[#1A211D] px-4 py-2 text-sm font-medium text-[#ECE7DF] hover:bg-[#222A26] disabled:opacity-50"
             >
-              {addingOutreach ? "Adding..." : "Add Outreach"}
+              {addingOutreach ? "Adding…" : "Add Outreach"}
             </button>
             <button
-              onClick={addAiOutreach}
+              type="button"
+              onClick={() => void addAiOutreach()}
               disabled={aiWorking || !contactId}
-              className="px-4 py-2 bg-blue-700 text-white rounded-md text-sm font-medium hover:bg-blue-800 disabled:opacity-50"
+              className="rounded-md border border-[#2E7040]/60 bg-[#1B2F21] px-4 py-2 text-sm font-medium text-[#DBEEE0] hover:bg-[#23452E] disabled:opacity-50"
             >
-              {aiWorking ? "Generating..." : "AI Generate + Log"}
+              {aiWorking ? "Generating…" : "AI Generate + Log"}
             </button>
           </div>
         </div>
 
-        <div className="border-t pt-4">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-medium text-gray-900">History</h3>
-            <div className="text-xs text-gray-500">{logs.length} logs</div>
+        <div className="border-t border-white/10 pt-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="text-sm font-medium text-[#F4F1EB]">History</h3>
+            <div className="text-xs text-[#8E877A]">{logs.length} logs</div>
           </div>
 
-          {logs.length === 0 && <div className="text-sm text-gray-500">No outreach logs yet.</div>}
+          {logs.length === 0 && <div className="text-sm text-[#B9B2A6]">No outreach logs yet.</div>}
 
           {logs.length > 0 && (
             <div className="space-y-3">
@@ -539,14 +758,14 @@ export function CrmContactEditor(props: Props) {
                       : "General";
 
                 return (
-                  <div key={l.id} className="border rounded-md p-3">
+                  <div key={l.id} className="rounded-md border border-white/10 p-3">
                     <div className="flex items-center justify-between gap-3">
-                      <div className="text-sm font-medium text-gray-900">
+                      <div className="text-sm font-medium text-[#F4F1EB]">
                         {l.outreach_channel} • {athleteLabel}
                       </div>
-                      <div className="text-xs text-gray-500">{new Date(l.outreach_at).toLocaleString()}</div>
+                      <div className="text-xs text-[#8E877A]">{new Date(l.outreach_at).toLocaleString()}</div>
                     </div>
-                    <div className="mt-2 text-sm text-gray-800 whitespace-pre-wrap">
+                    <div className="mt-2 whitespace-pre-wrap text-sm text-[#D7D0C4]">
                       {l.outreach_notes || "—"}
                     </div>
                   </div>
@@ -556,7 +775,17 @@ export function CrmContactEditor(props: Props) {
           )}
         </div>
       </div>
+
+      <TargetListActionDialog
+        open={deleteDialogOpen}
+        title="Delete this contact?"
+        description="This will permanently delete the contact and cannot be undone."
+        confirmLabel={deleting ? "Deleting…" : "Delete contact"}
+        variant="danger"
+        dismissStorageKey="crm-contact-delete"
+        onConfirm={() => void deleteContact()}
+        onCancel={() => setDeleteDialogOpen(false)}
+      />
     </div>
   );
 }
-

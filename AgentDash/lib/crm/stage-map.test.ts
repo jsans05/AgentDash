@@ -23,6 +23,7 @@ describe("stage-map", () => {
   it("mergePipelineStages picks further progress", () => {
     assert.equal(mergePipelineStages("target", "outreach"), "outreach");
     assert.equal(mergePipelineStages("closed", "research"), "closed");
+    assert.equal(normalizePipelineStage("research"), "target");
   });
 
   it("round-trips pipeline to funnel for legacy column", () => {

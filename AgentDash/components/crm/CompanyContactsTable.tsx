@@ -134,7 +134,23 @@ export function CompanyContactsTable({ companyId, companyName }: { companyId: st
                       )}
                     </td>
                     <td className="px-2 py-1.5">
-                      <ContactLinkedinCell linkedinUrl={c.linkedin_url} />
+                      <ContactLinkedinCell
+                        contactId={c.contact_id}
+                        linkedinUrl={c.linkedin_url}
+                        email={c.email}
+                        firstName={c.first_name}
+                        lastName={c.last_name}
+                        apolloPersonId={c.apollo_person_id}
+                        onRevealed={(updated) => {
+                          patchContact(c.contact_id, {
+                            linkedin_url: (updated.linkedin_url as string) ?? c.linkedin_url,
+                            apollo_person_id:
+                              (updated.apollo_person_id as string) ?? c.apollo_person_id,
+                            apollo_reveal_status: "revealed",
+                            email: (updated.email as string) ?? c.email,
+                          });
+                        }}
+                      />
                     </td>
                   </tr>
                 );

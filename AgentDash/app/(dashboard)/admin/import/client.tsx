@@ -141,7 +141,7 @@ function importWithProgress(
   });
 }
 
-export function ImportClient() {
+export function ImportClient({ isAdmin = false }: { isAdmin?: boolean }) {
   const [file, setFile] = useState<File | null>(null);
   const [importType, setImportType] = useState<"athletes" | "contracts" | "social_audience">("athletes");
   const [preview, setPreview] = useState<Record<string, unknown>[]>([]);
@@ -701,100 +701,102 @@ export function ImportClient() {
         </div>
       )}
 
-      {/* Danger Zone: clear contracts or athletes */}
-      <div className="rounded-lg border border-[#8C3A3A]/50 bg-[#2B1616] p-6 shadow">
-        <h2 className="mb-2 text-lg font-medium text-[#FFD2D2]">Danger Zone</h2>
-        <p className="mb-4 text-sm text-[#E4C2C2]">
-          Permanently delete data. These actions cannot be undone.
-        </p>
-
-        <div className="space-y-4">
-          {/* Clear all contracts */}
-          <div className="flex flex-wrap items-center gap-2">
-            {showContractsClearConfirm && (
-              <span className="mr-2 text-sm text-[#FFD2D2]">Click again to confirm:</span>
-            )}
-            <button
-              onClick={handleClearContracts}
-              disabled={clearingContracts}
-              className={`px-4 py-2 rounded-md text-sm font-medium ${
-                showContractsClearConfirm
-                  ? "bg-[#8C3A3A] text-white hover:bg-[#A64747]"
-                  : "bg-[#3A1E1E] text-[#FFD2D2] hover:bg-[#4A2525]"
-              } disabled:opacity-50`}
-            >
-              {clearingContracts ? "Clearing..." : showContractsClearConfirm ? "Confirm: Clear all contracts" : "Clear all contracts"}
-            </button>
-            {showContractsClearConfirm && (
-              <button
-                onClick={() => setShowContractsClearConfirm(false)}
-                className="rounded-md bg-[#202723] px-4 py-2 text-sm text-[#D7D0C4] hover:bg-[#28302B]"
-              >
-                Cancel
-              </button>
-            )}
-          </div>
-
-          {/* Clear all athletes */}
-          <div className="flex flex-wrap items-center gap-2">
-            {showAthletesClearConfirm && (
-              <span className="mr-2 text-sm text-[#FFD2D2]">Click again to confirm:</span>
-            )}
-            <button
-              onClick={handleClearAthletes}
-              disabled={clearingAthletes}
-              className={`px-4 py-2 rounded-md text-sm font-medium ${
-                showAthletesClearConfirm
-                  ? "bg-[#8C3A3A] text-white hover:bg-[#A64747]"
-                  : "bg-[#3A1E1E] text-[#FFD2D2] hover:bg-[#4A2525]"
-              } disabled:opacity-50`}
-            >
-              {clearingAthletes ? "Clearing..." : showAthletesClearConfirm ? "Confirm: Clear all athletes" : "Clear all athletes"}
-            </button>
-            {showAthletesClearConfirm && (
-              <button
-                onClick={() => setShowAthletesClearConfirm(false)}
-                className="rounded-md bg-[#202723] px-4 py-2 text-sm text-[#D7D0C4] hover:bg-[#28302B]"
-              >
-                Cancel
-              </button>
-            )}
-          </div>
-          <p className="text-xs text-[#C8A8A8]">
-            Clearing athletes also removes their contracts, CreatorIQ snapshots, and athlete–agent links.
+      {/* Danger Zone: admin only — clear contracts/athletes, merge duplicates */}
+      {isAdmin && (
+        <div className="rounded-lg border border-[#8C3A3A]/50 bg-[#2B1616] p-6 shadow">
+          <h2 className="mb-2 text-lg font-medium text-[#FFD2D2]">Danger Zone</h2>
+          <p className="mb-4 text-sm text-[#E4C2C2]">
+            Permanently delete data. These actions cannot be undone.
           </p>
 
-          {/* Merge duplicates */}
-          <div className="flex flex-wrap items-center gap-2">
-            {showMergeDuplicatesConfirm && (
-              <span className="mr-2 text-sm text-[#FFD2D2]">Click again to confirm:</span>
-            )}
-            <button
-              onClick={handleMergeDuplicateAthletes}
-              disabled={mergingDuplicates}
-              className={`px-4 py-2 rounded-md text-sm font-medium ${
-                showMergeDuplicatesConfirm
-                  ? "bg-[#8C3A3A] text-white hover:bg-[#A64747]"
-                  : "bg-[#3A1E1E] text-[#FFD2D2] hover:bg-[#4A2525]"
-              } disabled:opacity-50`}
-            >
-              {mergingDuplicates
-                ? "Merging..."
-                : showMergeDuplicatesConfirm
-                ? "Confirm: Merge duplicates (social/audience)"
-                : "Merge duplicates (social/audience)"}
-            </button>
-            {showMergeDuplicatesConfirm && (
+          <div className="space-y-4">
+            {/* Clear all contracts */}
+            <div className="flex flex-wrap items-center gap-2">
+              {showContractsClearConfirm && (
+                <span className="mr-2 text-sm text-[#FFD2D2]">Click again to confirm:</span>
+              )}
               <button
-                onClick={() => setShowMergeDuplicatesConfirm(false)}
-                className="rounded-md bg-[#202723] px-4 py-2 text-sm text-[#D7D0C4] hover:bg-[#28302B]"
+                onClick={handleClearContracts}
+                disabled={clearingContracts}
+                className={`px-4 py-2 rounded-md text-sm font-medium ${
+                  showContractsClearConfirm
+                    ? "bg-[#8C3A3A] text-white hover:bg-[#A64747]"
+                    : "bg-[#3A1E1E] text-[#FFD2D2] hover:bg-[#4A2525]"
+                } disabled:opacity-50`}
               >
-                Cancel
+                {clearingContracts ? "Clearing..." : showContractsClearConfirm ? "Confirm: Clear all contracts" : "Clear all contracts"}
               </button>
-            )}
+              {showContractsClearConfirm && (
+                <button
+                  onClick={() => setShowContractsClearConfirm(false)}
+                  className="rounded-md bg-[#202723] px-4 py-2 text-sm text-[#D7D0C4] hover:bg-[#28302B]"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+
+            {/* Clear all athletes */}
+            <div className="flex flex-wrap items-center gap-2">
+              {showAthletesClearConfirm && (
+                <span className="mr-2 text-sm text-[#FFD2D2]">Click again to confirm:</span>
+              )}
+              <button
+                onClick={handleClearAthletes}
+                disabled={clearingAthletes}
+                className={`px-4 py-2 rounded-md text-sm font-medium ${
+                  showAthletesClearConfirm
+                    ? "bg-[#8C3A3A] text-white hover:bg-[#A64747]"
+                    : "bg-[#3A1E1E] text-[#FFD2D2] hover:bg-[#4A2525]"
+                } disabled:opacity-50`}
+              >
+                {clearingAthletes ? "Clearing..." : showAthletesClearConfirm ? "Confirm: Clear all athletes" : "Clear all athletes"}
+              </button>
+              {showAthletesClearConfirm && (
+                <button
+                  onClick={() => setShowAthletesClearConfirm(false)}
+                  className="rounded-md bg-[#202723] px-4 py-2 text-sm text-[#D7D0C4] hover:bg-[#28302B]"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+            <p className="text-xs text-[#C8A8A8]">
+              Clearing athletes also removes their contracts, CreatorIQ snapshots, and athlete–agent links.
+            </p>
+
+            {/* Merge duplicates */}
+            <div className="flex flex-wrap items-center gap-2">
+              {showMergeDuplicatesConfirm && (
+                <span className="mr-2 text-sm text-[#FFD2D2]">Click again to confirm:</span>
+              )}
+              <button
+                onClick={handleMergeDuplicateAthletes}
+                disabled={mergingDuplicates}
+                className={`px-4 py-2 rounded-md text-sm font-medium ${
+                  showMergeDuplicatesConfirm
+                    ? "bg-[#8C3A3A] text-white hover:bg-[#A64747]"
+                    : "bg-[#3A1E1E] text-[#FFD2D2] hover:bg-[#4A2525]"
+                } disabled:opacity-50`}
+              >
+                {mergingDuplicates
+                  ? "Merging..."
+                  : showMergeDuplicatesConfirm
+                  ? "Confirm: Merge duplicates (social/audience)"
+                  : "Merge duplicates (social/audience)"}
+              </button>
+              {showMergeDuplicatesConfirm && (
+                <button
+                  onClick={() => setShowMergeDuplicatesConfirm(false)}
+                  className="rounded-md bg-[#202723] px-4 py-2 text-sm text-[#D7D0C4] hover:bg-[#28302B]"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

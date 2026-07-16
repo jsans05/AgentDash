@@ -22,35 +22,39 @@ export default async function NewCrmContactPage() {
     .order("first_name", { ascending: true });
 
   return (
-    <div className="px-4 sm:px-6 lg:px-8 py-6">
-      <div className="mb-5">
-        <Link href="/crm" className="text-sm text-blue-600 hover:text-blue-900">
-          ← Back to CRM
-        </Link>
-      </div>
+    <div className="px-4 py-6 sm:px-6 lg:px-8">
+      <div className="mx-auto max-w-4xl">
+        <div className="mb-5">
+          <Link href="/crm/contacts" className="text-sm text-[#CEE4D4] hover:underline">
+            ← Back to Contacts
+          </Link>
+        </div>
 
-      <CrmContactEditor
-        mode="new"
-        initial={{
-          company_name: "",
-          first_name: "",
-          last_name: "",
-          role: "",
-          email: "",
-          phone: "",
-          linkedin_url: "",
-          zoominfo_url: "",
-          taxonomy_id: null,
-          product_description: "",
-          notes: "",
-          selectedAthleteIds: [],
-          last_outreach_at: null,
-        }}
-        taxonomyNodes={(taxonomyNodes ?? []) as any}
-        athleteOptions={(athleteOptions ?? []) as any}
-        initialLogs={[]}
-      />
+        <div className="rounded-xl border border-white/10 bg-[#0F1311] p-4 sm:p-6">
+          <CrmContactEditor
+            mode="new"
+            initial={{
+              company_name: "",
+              first_name: "",
+              last_name: "",
+              role: "",
+              email: "",
+              phone: "",
+              linkedin_url: "",
+              zoominfo_url: "",
+              taxonomy_id: null,
+              product_description: "",
+              notes: "",
+              selectedAthleteIds: [],
+              last_outreach_at: null,
+              outreach_mode: "email",
+            }}
+            taxonomyNodes={(taxonomyNodes ?? []) as any}
+            athleteOptions={(athleteOptions ?? []) as any}
+            initialLogs={[]}
+          />
+        </div>
+      </div>
     </div>
   );
 }
-

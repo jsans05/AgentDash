@@ -1,4 +1,4 @@
-import { requireRole } from "@/lib/auth";
+import { requireAdminOrOperations, getCurrentUser } from "@/lib/auth";
 import { enforceContentLengthLimit, enforceFileSizeLimit, MAX_API_PAYLOAD_BYTES } from "@/lib/api/request-limits";
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
@@ -22,6 +22,9 @@ import {
 import { processTalentInfoRows } from "@/lib/import/talent-info";
 import { AgentDirectoryCache } from "@/lib/import/agent-directory-cache";
 import { AthleteRosterCache } from "@/lib/import/athlete-roster-cache";
+import { commitMetabaseMonthlyImport } from "@/lib/import/metabase-roster";
+import { metabaseCreateKey } from "@/lib/import/metabase-workbook";
+import { metabasePartsFromFormData } from "@/lib/import/metabase-form";
 
 function rowsToObjects(rows: unknown[][]): Record<string, unknown>[] {
   if (rows.length === 0) return [];
@@ -355,7 +358,7 @@ async function ensureAthleteForImport(
 
 export async function POST(req: Request) {
   try {
-    await requireRole("admin");
+    await requireAdminOrOperations();
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? "Unauthorized" }, { status: 401 });
   }
@@ -365,8 +368,135 @@ export async function POST(req: Request) {
     if (contentLengthError) return contentLengthError;
 
     const formData = await req.formData();
-    const file = formData.get("file") as File;
+    const file = formData.get("file") as File | null;
     const type = formData.get("type") as string;
+
+    if (type === "metabase_monthly") {
+      let approvedCreateKeys: string[] = [];
+      const rawKeys = formData.get("approvedCreateKeys");
+      if (typeof rawKeys === "string" && rawKeys.trim()) {
+        try {
+          const parsed = JSON.parse(rawKeys) as unknown;
+          if (Array.isArray(parsed)) {
+            approvedCreateKeys = parsed
+              .map((k) => metabaseCreateKey(String(k ?? "")))
+              .filter(Boolean);
+          }
+        } catch {
+          return NextResponse.json(
+            { error: "approvedCreateKeys must be a JSON array of create keys" },
+            { status: 400 }
+          );
+        }
+      }
+
+      let deniedUpdates: Array<{ athlete_id: string; deny: Array<"sport" | "social" | "audience"> }> =
+        [];
+      const rawDenied = formData.get("deniedUpdates");
+      if (typeof rawDenied === "string" && rawDenied.trim()) {
+        try {
+          const parsed = JSON.parse(rawDenied) as unknown;
+          if (Array.isArray(parsed)) {
+            deniedUpdates = parsed
+              .map((row) => {
+                const r = row as { athlete_id?: unknown; deny?: unknown };
+                const athlete_id = String(r.athlete_id ?? "");
+                const deny = Array.isArray(r.deny)
+                  ? (r.deny.filter((c) =>
+                      c === "sport" || c === "social" || c === "audience"
+                    ) as Array<"sport" | "social" | "audience">)
+                  : [];
+                return { athlete_id, deny };
+              })
+              .filter((r) => r.athlete_id && r.deny.length > 0);
+          }
+        } catch {
+          return NextResponse.json(
+            { error: "deniedUpdates must be a JSON array" },
+            { status: 400 }
+          );
+        }
+      }
+
+      let nameRemaps: Array<{ create_key: string; athlete_id: string }> = [];
+      const rawRemaps = formData.get("nameRemaps");
+      if (typeof rawRemaps === "string" && rawRemaps.trim()) {
+        try {
+          const parsed = JSON.parse(rawRemaps) as unknown;
+          if (Array.isArray(parsed)) {
+            nameRemaps = parsed
+              .map((row) => {
+                const r = row as { create_key?: unknown; athlete_id?: unknown };
+                return {
+                  create_key: String(r.create_key ?? ""),
+                  athlete_id: String(r.athlete_id ?? ""),
+                };
+              })
+              .filter((r) => r.create_key && r.athlete_id);
+          }
+        } catch {
+          return NextResponse.json(
+            { error: "nameRemaps must be a JSON array" },
+            { status: 400 }
+          );
+        }
+      }
+
+      const parts = await metabasePartsFromFormData(formData);
+      if (parts.length === 0) {
+        return NextResponse.json({ error: "No file provided" }, { status: 400 });
+      }
+      for (const part of parts) {
+        const fileSizeError = enforceFileSizeLimit(
+          { size: part.buffer.length } as File,
+          MAX_API_PAYLOAD_BYTES,
+          "Uploaded file too large. Max 25 MB."
+        );
+        if (fileSizeError) return fileSizeError;
+      }
+
+      console.log("[Admin Import] Starting import", {
+        type,
+        files: parts.map((p) => p.fileName),
+        size: parts.reduce((n, p) => n + p.buffer.length, 0),
+      });
+
+      const service = await createServiceRoleClient();
+      const result = await commitMetabaseMonthlyImport(
+        service,
+        parts,
+        approvedCreateKeys,
+        parts.map((p) => p.fileName).join(", ") || null,
+        { deniedUpdates, nameRemaps }
+      );
+
+      const sheetSummaries = [result.roster, result.social, result.audience];
+      const totalSummary = {
+        type: "metabase_monthly",
+        sheets_present: result.sheets,
+        approved_creates: result.approved_creates,
+        denied_creates: result.denied_creates,
+        remapped: result.remapped,
+        total_rows: sheetSummaries.reduce((n, s) => n + s.total, 0),
+        inserted: sheetSummaries.reduce((n, s) => n + s.inserted, 0),
+        updated: sheetSummaries.reduce((n, s) => n + s.updated, 0),
+        skipped: sheetSummaries.reduce((n, s) => n + s.skipped, 0),
+        failed: sheetSummaries.reduce((n, s) => n + s.failed, 0),
+        imported: sheetSummaries.reduce((n, s) => n + s.inserted + s.updated, 0),
+        sheets: sheetSummaries,
+        failures: result.failures,
+      };
+
+      console.log("[Admin Import] Completed metabase_monthly import", {
+        approved_creates: result.approved_creates,
+        denied_creates: result.denied_creates,
+        remapped: result.remapped,
+        imported: totalSummary.imported,
+        failed: totalSummary.failed,
+      });
+
+      return NextResponse.json(totalSummary);
+    }
 
     if (!file) {
       return NextResponse.json({ error: "No file provided" }, { status: 400 });
@@ -490,19 +620,14 @@ export async function POST(req: Request) {
       let skippedDuplicateContract = 0;
       let firstInsertError: string | null = null;
       const importErrors: { row: number; athleteName: string; sponsorName: string; category: string; reason: string }[] = [];
-      const { data: adminProfile } = await supabase
-        .from("profiles")
-        .select("user_id")
-        .eq("role", "admin")
-        .limit(1)
-        .single();
-
-      if (!adminProfile?.user_id) {
+      const importer = await getCurrentUser();
+      if (!importer?.id) {
         return NextResponse.json(
-          { error: "No admin user found. Create an admin profile so contracts can be assigned created_by_user_id." },
-          { status: 400 }
+          { error: "Not authenticated. Sign in again so contracts can be assigned created_by_user_id." },
+          { status: 401 }
         );
       }
+      const createdByUserId = importer.id;
 
       const firstRawRow = (rows[0] as Record<string, unknown>) || {};
       const rowKeysFromFile = Object.keys(firstRawRow);
@@ -620,7 +745,7 @@ export async function POST(req: Request) {
           end_date: endDate,
           status: validStatus,
           notes: row.notes ? String(row.notes).trim() || null : null,
-          created_by_user_id: adminProfile.user_id,
+          created_by_user_id: createdByUserId,
         });
 
         if (error) {

@@ -1,4 +1,4 @@
-export type AppRole = "admin" | "sales" | "agent" | "accounting";
+export type AppRole = "admin" | "sales" | "agent" | "accounting" | "operations";
 
 export type Profile = {
   user_id: string;
@@ -25,6 +25,8 @@ export type Athlete = {
   accolades: string[];
   about: string | null;
   notes: string | null;
+  /** Alternate import names (nicknames / typos). */
+  name_aliases: string[];
   created_at: string;
   updated_at: string;
 };
@@ -124,8 +126,10 @@ export type CrmContact = {
   role: string | null;
 
   email: string | null;
+  phone: string | null;
   linkedin_url: string | null;
   zoominfo_url: string | null;
+  email_drafts: unknown;
 
   taxonomy_id: string | null;
   /** Denormalized display category for the selected taxonomy node */
@@ -189,6 +193,16 @@ export type CrmCompanyPipeline = {
   priority: 1 | 2 | 3;
   next_follow_up_at: string | null;
   archived: boolean;
+  follow_up_step: number;
+  last_touch_at: string | null;
+  next_action: "email" | "linkedin" | "call" | "cool" | null;
+  follow_up_log: Array<{
+    step: number;
+    channel: string;
+    sent_at: string;
+    outcome?: string | null;
+    draft_id?: string | null;
+  }>;
   support_email: string | null;
   contact_emails: string[];
   relevant_people: Array<{

@@ -11,6 +11,7 @@ export type ApolloSearchPerson = {
 };
 
 export type ApolloMatchResult = {
+  apollo_person_id: string | null;
   email: string | null;
   linkedin_url: string | null;
   first_name: string | null;

@@ -26,6 +26,15 @@ import {
   mergeDraftMessagesPreservingSentAt,
 } from "@/lib/crm/draft-messages";
 import {
+  primaryPipelineContactEmail,
+  quarantineEmail,
+} from "@/lib/crm/email-quarantine";
+import {
+  buildCadenceTouchUpdates,
+  buildCadenceUpdatesForStageChange,
+} from "@/lib/crm/pipeline-cadence-server";
+import { initCadenceOnSend, resetCadenceOnReengage } from "@/lib/crm/pipeline-cadence";
+import {
   normalizePipelineStage,
   pipelineStageToFunnel,
   PIPELINE_STAGES,
@@ -51,6 +60,11 @@ const PATCH_KEYS = new Set([
   "outreach_email",
   "responded_at",
   "outreach_at",
+  "follow_up_step",
+  "last_touch_at",
+  "next_follow_up_at",
+  "next_action",
+  "follow_up_log",
 ]);
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -165,6 +179,39 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     );
   }
 
+  const cadenceAction = Object.prototype.hasOwnProperty.call(body, "cadence_action")
+    ? String((body as { cadence_action?: unknown }).cadence_action ?? "").trim()
+    : "";
+
+  if (cadenceAction === "mark_touch") {
+    const touchUpdates = buildCadenceTouchUpdates(
+      {
+        pipeline_stage: normalizePipelineStage(current.pipeline_stage),
+        outreach_at: current.outreach_at != null ? String(current.outreach_at) : null,
+        responded_at: current.responded_at != null ? String(current.responded_at) : null,
+        follow_up_step: Number(current.follow_up_step ?? 0),
+        last_touch_at: current.last_touch_at != null ? String(current.last_touch_at) : null,
+        next_follow_up_at: current.next_follow_up_at != null ? String(current.next_follow_up_at) : null,
+        next_action: current.next_action as "email" | "linkedin" | "call" | "cool" | null,
+        follow_up_log: Array.isArray(current.follow_up_log) ? current.follow_up_log : [],
+      },
+      body as Record<string, unknown>
+    );
+    if (!touchUpdates) {
+      return NextResponse.json({ error: "Invalid cadence touch" }, { status: 400 });
+    }
+    Object.assign(updates, touchUpdates);
+  }
+
+  if (cadenceAction === "mark_responded") {
+    updates.pipeline_stage = "in_progress";
+    updates.funnel_stage = pipelineStageToFunnel("in_progress");
+    updates.responded_at = new Date().toISOString();
+    updates.next_action = null;
+    updates.next_follow_up_at = null;
+    updates.follow_up_step = 0;
+  }
+
   if (updates.pipeline_stage !== undefined) {
     const stage = String(updates.pipeline_stage);
     if (!PIPELINE_STAGES.has(stage)) {
@@ -173,28 +220,79 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     const normalizedStage = normalizePipelineStage(stage);
     updates.pipeline_stage = normalizedStage;
     updates.funnel_stage = pipelineStageToFunnel(normalizedStage);
+    Object.assign(
+      updates,
+      buildCadenceUpdatesForStageChange(
+        {
+          pipeline_stage: normalizePipelineStage(current.pipeline_stage),
+          outreach_at: current.outreach_at != null ? String(current.outreach_at) : null,
+          responded_at: current.responded_at != null ? String(current.responded_at) : null,
+          follow_up_step: Number(current.follow_up_step ?? 0),
+          last_touch_at: current.last_touch_at != null ? String(current.last_touch_at) : null,
+          next_follow_up_at: current.next_follow_up_at != null ? String(current.next_follow_up_at) : null,
+          next_action: current.next_action as "email" | "linkedin" | "call" | "cool" | null,
+          follow_up_log: Array.isArray(current.follow_up_log) ? current.follow_up_log : [],
+        },
+        normalizedStage,
+        body as Record<string, unknown>
+      )
+    );
   }
 
   if (
     updates.pipeline_stage === "outreach" &&
     !current.outreach_at &&
-    !Object.prototype.hasOwnProperty.call(body, "outreach_at")
+    !Object.prototype.hasOwnProperty.call(body, "outreach_at") &&
+    !Object.prototype.hasOwnProperty.call(updates, "outreach_at")
   ) {
-    updates.outreach_at = new Date().toISOString();
+    Object.assign(updates, initCadenceOnSend());
   }
 
   if (
     updates.pipeline_stage === "in_progress" &&
     !current.responded_at &&
-    !Object.prototype.hasOwnProperty.call(body, "responded_at")
+    !Object.prototype.hasOwnProperty.call(body, "responded_at") &&
+    !Object.prototype.hasOwnProperty.call(updates, "responded_at")
   ) {
     updates.responded_at = new Date().toISOString();
+    updates.next_action = null;
+    updates.next_follow_up_at = null;
+    updates.follow_up_step = 0;
+  }
+
+  if (updates.pipeline_stage === "target" && normalizePipelineStage(current.pipeline_stage) === "ghost") {
+    Object.assign(updates, resetCadenceOnReengage());
+  }
+
+  if (updates.pipeline_stage === "bounced" && normalizePipelineStage(current.pipeline_stage) !== "bounced") {
+    const email =
+      primaryPipelineContactEmail(
+        Object.prototype.hasOwnProperty.call(updates, "pipeline_contacts")
+          ? updates.pipeline_contacts
+          : current.pipeline_contacts
+      ) ?? primaryPipelineContactEmail(current.pipeline_contacts);
+    if (email) {
+      try {
+        await quarantineEmail({
+          supabaseAdmin,
+          email,
+          reason: "pipeline_bounced",
+          userId: profile.user_id,
+          companyId: current.company_id,
+          pipelineId: current.id,
+        });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Failed to quarantine email";
+        return NextResponse.json({ error: msg }, { status: 500 });
+      }
+    }
   }
 
   if (
     Object.keys(updates).length === 0 &&
     Object.keys(companyPatch).length === 0 &&
-    !markDraftSentAt
+    !markDraftSentAt &&
+    !cadenceAction
   ) {
     const card = await fetchPipelineCardById(supabase, id);
     return NextResponse.json({ card });

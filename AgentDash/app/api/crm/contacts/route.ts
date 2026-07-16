@@ -4,6 +4,15 @@ import { internalServerError } from "@/lib/api/http-errors";
 import { enforceContentLengthLimit } from "@/lib/api/request-limits";
 import { NextResponse } from "next/server";
 import { ilikeContains } from "@/lib/supabase/ilike";
+import {
+  buildContactFilterOptions,
+  CONTACT_CATEGORY_FILTER_UNCATEGORIZED,
+  contactCategoryLabel,
+  type ContactSortDir,
+  type ContactSortKey,
+} from "@/lib/crm/contact-filter-sort";
+import { mapContactApiRow } from "@/lib/crm/map-contact-api-row";
+import { CONTACTS_PAGE_SIZE } from "@/lib/crm/contacts-list-query";
 
 function normalizeText(value: unknown): string {
   return String(value ?? "").trim().toLowerCase();
@@ -41,6 +50,73 @@ async function getOrCreateCompanyByName(
   return created!.company_id;
 }
 
+const CONTACT_SELECT = `
+  *,
+  companies(name, product_category),
+  sponsorship_taxonomies:taxonomy_id (sport, tier, category)
+`;
+
+function applyAgentScope<T extends { eq: (col: string, val: string) => T }>(
+  query: T,
+  role: string,
+  userId: string
+): T {
+  if (role === "agent") {
+    return query.eq("created_by_user_id", userId);
+  }
+  return query;
+}
+
+function applyHasFieldFilter(query: any, column: "email" | "phone" | "linkedin_url", value: string | null) {
+  if (value === "yes") {
+    return query.not(column, "is", null).neq(column, "");
+  }
+  if (value === "no") {
+    return query.or(`${column}.is.null,${column}.eq.`);
+  }
+  return query;
+}
+
+function applySort(query: any, sort: ContactSortKey, dir: ContactSortDir) {
+  const ascending = dir === "asc";
+  switch (sort) {
+    case "name":
+      return query.order("first_name", { ascending }).order("last_name", { ascending });
+    case "company":
+      return query.order("name", { referencedTable: "companies", ascending });
+    case "category":
+      return query.order("category", { ascending, nullsFirst: false });
+    case "role":
+      return query.order("role", { ascending, nullsFirst: false });
+    case "email":
+      return query.order("email", { ascending, nullsFirst: false });
+    case "phone":
+      return query.order("phone", { ascending, nullsFirst: false });
+    case "linkedin":
+      return query.order("linkedin_url", { ascending, nullsFirst: false });
+    case "status":
+      return query.order("status_tag", { ascending });
+    case "last_outreach":
+      return query.order("last_outreach_at", { ascending, nullsFirst: false }).order("created_at", { ascending: false });
+    default:
+      return query.order("first_name", { ascending }).order("last_name", { ascending });
+  }
+}
+
+async function fetchContactFilterOptions(
+  supabase: Awaited<ReturnType<typeof createServerClient>>,
+  profile: Awaited<ReturnType<typeof requireNonAccounting>>
+) {
+  let optionsQuery = supabase.from("crm_contacts").select(CONTACT_SELECT);
+  optionsQuery = applyAgentScope(optionsQuery, profile.role, profile.user_id);
+  const { data, error } = await optionsQuery.limit(5000);
+  if (error) {
+    return { companies: [], categories: [], roles: [], statuses: [] };
+  }
+  const rows = (data ?? []).map((c) => mapContactApiRow(c as Record<string, unknown>));
+  return buildContactFilterOptions(rows);
+}
+
 export async function GET(req: Request) {
   const profile = await requireNonAccounting();
   const supabase = await createServerClient();
@@ -51,26 +127,82 @@ export async function GET(req: Request) {
   const taxonomyId = url.searchParams.get("taxonomy_id")?.trim() || null;
   const showInProgress = url.searchParams.get("show_in_progress") === "1";
 
-  let query = supabase
-    .from("crm_contacts")
-    .select(
-      `
-        *,
-        companies(name),
-        sponsorship_taxonomies:taxonomy_id (sport, tier, category)
-      `
-    )
-    .order("last_outreach_at", { ascending: false })
-    .order("created_at", { ascending: false });
+  const page = Math.max(1, Number.parseInt(url.searchParams.get("page") ?? "1", 10) || 1);
+  const limitRaw = Number.parseInt(url.searchParams.get("limit") ?? String(CONTACTS_PAGE_SIZE), 10);
+  const limit = Math.min(200, Math.max(1, limitRaw || CONTACTS_PAGE_SIZE));
+  const offset = (page - 1) * limit;
 
-  // RLS should handle this, but we keep agent scoping explicit for performance/readability.
-  if (profile.role === "agent") {
-    query = query.eq("created_by_user_id", profile.user_id);
-  }
+  const sortRaw = url.searchParams.get("sort")?.trim() || "name";
+  const allowedSort = new Set<ContactSortKey>([
+    "name",
+    "company",
+    "category",
+    "role",
+    "email",
+    "phone",
+    "linkedin",
+    "status",
+    "last_outreach",
+  ]);
+  const sort = allowedSort.has(sortRaw as ContactSortKey) ? (sortRaw as ContactSortKey) : "name";
+  const dir: ContactSortDir = url.searchParams.get("dir") === "desc" ? "desc" : "asc";
+
+  const showArchived = url.searchParams.get("archived") === "1";
+  const companyFilter = url.searchParams.get("company")?.trim() || "";
+  const categoryFilter = url.searchParams.get("category")?.trim() || "";
+  const roleFilter = url.searchParams.get("role")?.trim() || "";
+  const statusFilter = url.searchParams.get("status")?.trim() || "";
+  const hasEmail = url.searchParams.get("has_email")?.trim() || "any";
+  const hasPhone = url.searchParams.get("has_phone")?.trim() || "any";
+  const hasLinkedin = url.searchParams.get("has_linkedin")?.trim() || "any";
+
+  let query = supabase.from("crm_contacts").select(CONTACT_SELECT, { count: "exact" });
+  query = applyAgentScope(query, profile.role, profile.user_id);
 
   if (taxonomyId) {
     query = query.eq("taxonomy_id", taxonomyId);
   }
+
+  if (!showArchived) {
+    query = query.eq("archived", false);
+  }
+
+  if (roleFilter) {
+    query = query.eq("role", roleFilter);
+  }
+
+  if (statusFilter) {
+    query = query.eq("status_tag", statusFilter);
+  }
+
+  if (categoryFilter) {
+    if (categoryFilter === CONTACT_CATEGORY_FILTER_UNCATEGORIZED) {
+      query = query.or("category.is.null,category.eq.,category.ilike.uncategorized");
+    } else {
+      query = query.ilike("category", categoryFilter);
+    }
+  }
+
+  if (companyFilter) {
+    const { data: companyRow } = await supabase
+      .from("companies")
+      .select("company_id")
+      .eq("name", companyFilter)
+      .maybeSingle();
+    if (!companyRow?.company_id) {
+      const filter_options = await fetchContactFilterOptions(supabase, profile);
+      return NextResponse.json({ contacts: [], total: 0, filter_options });
+    }
+    query = query.eq("company_id", companyRow.company_id);
+  }
+
+  query = applyHasFieldFilter(query, "email", hasEmail === "yes" || hasEmail === "no" ? hasEmail : null);
+  query = applyHasFieldFilter(query, "phone", hasPhone === "yes" || hasPhone === "no" ? hasPhone : null);
+  query = applyHasFieldFilter(
+    query,
+    "linkedin_url",
+    hasLinkedin === "yes" || hasLinkedin === "no" ? hasLinkedin : null
+  );
 
   if (!showInProgress) {
     let pipelineQuery = supabase
@@ -87,12 +219,14 @@ export async function GET(req: Request) {
     for (const id of inProgressCompanyIds) {
       excludedCompanyIds.add(id);
     }
+    if (excludedCompanyIds.size > 0) {
+      query = query.not("company_id", "in", `(${[...excludedCompanyIds].join(",")})`);
+    }
   }
 
   if (q) {
     const pattern = ilikeContains(q);
 
-    // Match on person fields first.
     const { data: personMatches } = await supabase
       .from("crm_contacts")
       .select("contact_id")
@@ -100,11 +234,10 @@ export async function GET(req: Request) {
 
     const personIds = (personMatches ?? []).map((r: any) => r.contact_id);
 
-    // Match on company name (resolve to company_ids, then contacts).
     const { data: companyMatches } = await supabase.from("companies").select("company_id").ilike("name", pattern);
     const companyIds = (companyMatches ?? []).map((r: any) => r.company_id);
 
-    let ids = new Set<string>();
+    const ids = new Set<string>();
     for (const id of personIds) ids.add(id);
     if (companyIds.length > 0) {
       const { data: companyContactMatches } = await supabase
@@ -116,18 +249,41 @@ export async function GET(req: Request) {
 
     const idList = [...ids];
     if (idList.length === 0) {
-      return NextResponse.json({ contacts: [] });
+      const filter_options = await fetchContactFilterOptions(supabase, profile);
+      return NextResponse.json({ contacts: [], total: 0, filter_options });
     }
     query = query.in("contact_id", idList);
   }
 
-  const { data, error } = await query;
+  query = applySort(query, sort, dir);
+  query = query.range(offset, offset + limit - 1);
+
+  const [{ data, error, count }, filter_options] = await Promise.all([
+    query,
+    fetchContactFilterOptions(supabase, profile),
+  ]);
+
   if (error) return internalServerError(error, "crm-contacts:get");
 
-  const contacts = excludedCompanyIds.size
-    ? (data ?? []).filter((row: any) => !excludedCompanyIds.has(String(row?.company_id ?? "")))
-    : (data ?? []);
-  return NextResponse.json({ contacts });
+  let contacts = data ?? [];
+  if (excludedCompanyIds.size > 0 && showInProgress) {
+    contacts = contacts.filter((row: any) => !excludedCompanyIds.has(String(row?.company_id ?? "")));
+  }
+
+  if (categoryFilter && categoryFilter !== CONTACT_CATEGORY_FILTER_UNCATEGORIZED) {
+    contacts = contacts.filter(
+      (row: any) =>
+        contactCategoryLabel(
+          mapContactApiRow(row as Record<string, unknown>).category
+        ).toLowerCase() === categoryFilter.toLowerCase()
+    );
+  }
+
+  return NextResponse.json({
+    contacts,
+    total: count ?? contacts.length,
+    filter_options,
+  });
 }
 
 export async function POST(req: Request) {

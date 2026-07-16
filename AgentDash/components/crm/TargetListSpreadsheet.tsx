@@ -2159,19 +2159,39 @@ export function TargetListSpreadsheet({
 
                     {/* LinkedIn */}
                     <Td className={yellowCell}>
-                      <ContactLinkedinCell linkedinUrl={contact?.linkedin_url} />
+                      <ContactLinkedinCell
+                        contactId={contact?.contact_id}
+                        linkedinUrl={contact?.linkedin_url}
+                        email={contact?.email}
+                        firstName={contact?.first_name}
+                        lastName={contact?.last_name}
+                        apolloPersonId={contact?.apollo_person_id}
+                        compact
+                        onRevealed={(updated) => {
+                          if (!contact) return;
+                          patchContactLocal(fr.rowIndex, fr.contactIndex!, {
+                            linkedin_url: (updated.linkedin_url as string) ?? contact.linkedin_url,
+                            apollo_person_id:
+                              (updated.apollo_person_id as string) ?? contact.apollo_person_id,
+                            apollo_reveal_status: "revealed",
+                            email: (updated.email as string) ?? contact.email,
+                          });
+                        }}
+                      />
                     </Td>
 
                     {/* Number */}
                     <Td className={yellowCell}>
-                      {contact?.apollo_person_id &&
-                      !contact.phone &&
-                      contact.apollo_phone_reveal_status !== "revealed" ? (
+                      {contact && !contact.phone && contact.apollo_phone_reveal_status !== "revealed" ? (
                         <ContactPhoneCell
                           contactId={contact.contact_id}
                           phone={contact.phone}
                           apolloPersonId={contact.apollo_person_id}
                           apolloPhoneRevealStatus={contact.apollo_phone_reveal_status ?? null}
+                          email={contact.email}
+                          linkedinUrl={contact.linkedin_url}
+                          firstName={contact.first_name}
+                          lastName={contact.last_name}
                           compact
                           onRevealed={(updated) => {
                             patchContactLocal(fr.rowIndex, fr.contactIndex!, {
@@ -2181,6 +2201,8 @@ export function TargetListSpreadsheet({
                                 updated.apollo_phone_reveal_status === "revealed"
                                   ? (updated.apollo_phone_reveal_status as "pending" | "revealed")
                                   : "pending",
+                              apollo_person_id:
+                                (updated.apollo_person_id as string) ?? contact.apollo_person_id,
                             });
                           }}
                         />

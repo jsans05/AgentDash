@@ -1,4 +1,4 @@
-import { requireRole } from "@/lib/auth";
+import { requireAdminOrOperations } from "@/lib/auth";
 import { enforceContentLengthLimit, enforceFileSizeLimit, MAX_API_PAYLOAD_BYTES } from "@/lib/api/request-limits";
 import { AthleteRosterCache } from "@/lib/import/athlete-roster-cache";
 import { parseTalentWorkbook } from "@/lib/import/parse-talent-workbook";
@@ -8,7 +8,7 @@ import { NextResponse } from "next/server";
 
 export async function POST(req: Request) {
   try {
-    await requireRole("admin");
+    await requireAdminOrOperations();
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unauthorized";
     return NextResponse.json({ error: message }, { status: 401 });

@@ -5,6 +5,7 @@ import {
   processAudienceDataBulk,
   processSocialDataBulk,
 } from "@/lib/import/process-social-audience-bulk";
+import { getCurrentUser } from "@/lib/auth";
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import Papa from "papaparse";
 import readXlsxFile, { readSheet } from "read-excel-file/node";
@@ -350,19 +351,14 @@ export async function runAdminImport(input: RunAdminImportInput): Promise<Record
       let skippedDuplicateContract = 0;
       let firstInsertError: string | null = null;
       const importErrors: { row: number; athleteName: string; sponsorName: string; category: string; reason: string }[] = [];
-      const { data: adminProfile } = await supabase
-        .from("profiles")
-        .select("user_id")
-        .eq("role", "admin")
-        .limit(1)
-        .single();
-
-      if (!adminProfile?.user_id) {
+      const importer = await getCurrentUser();
+      if (!importer?.id) {
         throw new ImportHttpError(
-          400,
-          "No admin user found. Create an admin profile so contracts can be assigned created_by_user_id."
+          401,
+          "Not authenticated. Sign in again so contracts can be assigned created_by_user_id."
         );
       }
+      const createdByUserId = importer.id;
 
       const firstRawRow = (rows[0] as Record<string, unknown>) || {};
       const rowKeysFromFile = Object.keys(firstRawRow);
@@ -484,7 +480,7 @@ export async function runAdminImport(input: RunAdminImportInput): Promise<Record
           end_date: endDate,
           status: validStatus,
           notes: row.notes ? String(row.notes).trim() || null : null,
-          created_by_user_id: adminProfile.user_id,
+          created_by_user_id: createdByUserId,
         });
 
         if (error) {

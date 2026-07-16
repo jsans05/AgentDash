@@ -11,7 +11,7 @@ const createUserSchema = z
     password: z.string().min(8).max(128),
     first_name: z.string().trim().max(80).optional().default(""),
     last_name: z.string().trim().max(80).optional().default(""),
-    role: z.enum(["admin", "sales", "agent", "accounting"]).optional().default("agent"),
+    role: z.enum(["admin", "sales", "agent", "accounting", "operations"]).optional().default("agent"),
   })
   .strict();
 

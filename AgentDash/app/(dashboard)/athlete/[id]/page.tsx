@@ -9,6 +9,7 @@ import { OutreachTab } from "./outreach";
 import { CoveredCategoriesSwitches } from "./CoveredCategoriesSwitches";
 import { SportEditor } from "./sport-editor";
 import { GenderEditor } from "./gender-editor";
+import { NameEditor } from "./name-editor";
 import type { AthleteGender } from "@/lib/athletes/gender";
 import { DeleteAthletePanel } from "./delete-athlete";
 import { AudiencePercentExpandable } from "@/components/athlete/AudiencePercentExpandable";
@@ -113,8 +114,11 @@ export default async function AthleteProfilePage({
 
   const audienceProfile = await getAthleteAudienceProfile(supabase, id);
 
-  const canEdit = profile.role === "admin" || (profile.role === "agent" && agentIds.includes(profile.user_id));
-  const showOutreachTab = profile.role !== "accounting";
+  const canEdit =
+    profile.role === "admin" ||
+    profile.role === "operations" ||
+    (profile.role === "agent" && agentIds.includes(profile.user_id));
+  const showOutreachTab = profile.role !== "accounting" && profile.role !== "operations";
 
   if (!showOutreachTab && activeTab === "outreach") {
     redirect(`/athlete/${id}?tab=profile`);
@@ -173,6 +177,13 @@ export default async function AthleteProfilePage({
               <section>
                 <h2 className="mb-3 text-lg font-medium text-[#F4F1EB]">Basic Information</h2>
                 <dl className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2">
+                  <NameEditor
+                    athleteId={id}
+                    initialFirstName={athlete.first_name ?? ""}
+                    initialLastName={athlete.last_name ?? ""}
+                    initialAliases={Array.isArray(athlete.name_aliases) ? athlete.name_aliases : []}
+                    canEdit={canEdit}
+                  />
                   <div>
                     <dt className="text-sm font-medium text-[#B9B2A6]">Agents</dt>
                     <dd className="mt-1 text-sm text-[#ECE7DF]">

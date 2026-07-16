@@ -9,6 +9,7 @@ import {
   type NameMatchCandidate,
   type NameResolution,
 } from "@/lib/import/name-match";
+import type { createServiceRoleClient } from "@/lib/supabase/server";
 
 export function formatAmbiguousNameReason(
   displayName: string,
@@ -25,7 +26,6 @@ export function formatAmbiguousNameReason(
     .join("; ");
   return `Multiple roster athletes match "${displayName}": ${list}. Keep one profile and remove or rename the other, then re-import.`;
 }
-import type { createServiceRoleClient } from "@/lib/supabase/server";
 
 type Supabase = Awaited<ReturnType<typeof createServiceRoleClient>>;
 
@@ -42,21 +42,35 @@ export class AthleteRosterCache {
   private byFirstLast = new Map<string, CachedAthlete[]>();
   /** Athletes with no last name (properties, brands, events). Key = normalized full display name. */
   private byOrganization = new Map<string, CachedAthlete[]>();
+  /** Exact normalized alias → athletes (for nicknames / typos). */
+  private byAliasKey = new Map<string, CachedAthlete[]>();
 
   static async load(supabase: Supabase): Promise<AthleteRosterCache> {
     const cache = new AthleteRosterCache();
     let from = 0;
 
     while (true) {
-      const { data, error } = await supabase
+      let { data, error } = await supabase
         .from("athletes")
-        .select("athlete_id, first_name, last_name")
+        .select("athlete_id, first_name, last_name, name_aliases")
         .range(from, from + PAGE_SIZE - 1);
+
+      if (error && /name_aliases/i.test(error.message)) {
+        const fallback = await supabase
+          .from("athletes")
+          .select("athlete_id, first_name, last_name")
+          .range(from, from + PAGE_SIZE - 1);
+        data = fallback.data as typeof data;
+        error = fallback.error;
+      }
 
       if (error) throw new Error(`Failed to load athletes: ${error.message}`);
       const rows = data ?? [];
       for (const row of rows) {
-        cache.addRow(row.athlete_id, row.first_name, row.last_name);
+        const aliases = Array.isArray((row as { name_aliases?: unknown }).name_aliases)
+          ? ((row as { name_aliases: string[] }).name_aliases ?? [])
+          : [];
+        cache.addRow(row.athlete_id, row.first_name, row.last_name, aliases);
       }
       if (rows.length < PAGE_SIZE) break;
       from += PAGE_SIZE;
@@ -65,7 +79,20 @@ export class AthleteRosterCache {
     return cache;
   }
 
-  private addRow(athlete_id: string, first_name: string | null, last_name: string | null) {
+  private pushByKey(map: Map<string, CachedAthlete[]>, key: string, entry: CachedAthlete) {
+    const list = map.get(key) ?? [];
+    if (!list.some((e) => e.athlete_id === entry.athlete_id)) {
+      list.push(entry);
+      map.set(key, list);
+    }
+  }
+
+  private addRow(
+    athlete_id: string,
+    first_name: string | null,
+    last_name: string | null,
+    aliases: string[] = []
+  ) {
     const first = (first_name ?? "").trim();
     const last = (last_name ?? "").trim();
 
@@ -78,34 +105,68 @@ export class AthleteRosterCache {
 
     if (isEmptyLastName(last)) {
       const orgKey = organizationKey(first);
-      if (!orgKey) return;
-      const orgList = this.byOrganization.get(orgKey) ?? [];
-      orgList.push(entry);
-      this.byOrganization.set(orgKey, orgList);
-      return;
+      if (orgKey) this.pushByKey(this.byOrganization, orgKey, entry);
+    } else {
+      const key = firstLastKey(entry.tokens);
+      if (key) this.pushByKey(this.byFirstLast, key, entry);
     }
 
-    const key = firstLastKey(entry.tokens);
-    if (!key) return;
-
-    const list = this.byFirstLast.get(key) ?? [];
-    list.push(entry);
-    this.byFirstLast.set(key, list);
+    for (const alias of aliases) {
+      const trimmed = String(alias ?? "").trim();
+      if (!trimmed) continue;
+      const aliasTokens = tokensFromImportName(trimmed);
+      if (aliasTokens.length < 2) {
+        const orgKey = organizationKey(trimmed);
+        if (orgKey) this.pushByKey(this.byOrganization, orgKey, entry);
+        continue;
+      }
+      const aliasKey = firstLastKey(aliasTokens);
+      if (aliasKey) {
+        // Index under alias first|last so resolveByName finds via that key,
+        // then filter with subset match using alias tokens stored on a shadow entry.
+        const aliasEntry: CachedAthlete = {
+          ...entry,
+          tokens: aliasTokens,
+        };
+        this.pushByKey(this.byFirstLast, aliasKey, aliasEntry);
+      }
+      // Also exact normalized full-string alias lookup
+      const exact = organizationKey(trimmed);
+      if (exact) this.pushByKey(this.byAliasKey, exact, entry);
+    }
   }
 
   private toCandidates(matches: CachedAthlete[]): NameResolution["candidates"] {
-    return matches.map((m) => ({
-      athlete_id: m.athlete_id,
-      first_name: m.first_name,
-      last_name: m.last_name,
-    }));
+    const seen = new Set<string>();
+    const out: NameMatchCandidate[] = [];
+    for (const m of matches) {
+      if (seen.has(m.athlete_id)) continue;
+      seen.add(m.athlete_id);
+      out.push({
+        athlete_id: m.athlete_id,
+        first_name: m.first_name,
+        last_name: m.last_name,
+      });
+    }
+    return out;
+  }
+
+  private dedupeMatches(matches: CachedAthlete[]): CachedAthlete[] {
+    const seen = new Set<string>();
+    const out: CachedAthlete[] = [];
+    for (const m of matches) {
+      if (seen.has(m.athlete_id)) continue;
+      seen.add(m.athlete_id);
+      out.push(m);
+    }
+    return out;
   }
 
   resolveOrganization(displayName: string): NameResolution {
     const key = organizationKey(displayName);
     if (!key) return { athlete_id: null, ambiguous: false };
 
-    const matches = this.byOrganization.get(key) ?? [];
+    const matches = this.dedupeMatches(this.byOrganization.get(key) ?? []);
     if (matches.length === 1) return { athlete_id: matches[0]!.athlete_id, ambiguous: false };
     if (matches.length === 0) return { athlete_id: null, ambiguous: false };
     return { athlete_id: null, ambiguous: true, candidates: this.toCandidates(matches) };
@@ -115,6 +176,18 @@ export class AthleteRosterCache {
     const trimmed = rawName.trim();
     if (!trimmed) return { athlete_id: null, ambiguous: false };
 
+    // Exact alias string match first (nicknames that don't share first/last tokens)
+    const aliasExact = organizationKey(trimmed);
+    if (aliasExact) {
+      const aliasHits = this.dedupeMatches(this.byAliasKey.get(aliasExact) ?? []);
+      if (aliasHits.length === 1) {
+        return { athlete_id: aliasHits[0]!.athlete_id, ambiguous: false };
+      }
+      if (aliasHits.length > 1) {
+        return { athlete_id: null, ambiguous: true, candidates: this.toCandidates(aliasHits) };
+      }
+    }
+
     const orgMatch = this.resolveOrganization(trimmed);
     if (orgMatch.athlete_id || orgMatch.ambiguous) return orgMatch;
 
@@ -123,7 +196,9 @@ export class AthleteRosterCache {
     if (!key) return { athlete_id: null, ambiguous: false };
 
     const candidates = this.byFirstLast.get(key) ?? [];
-    const matches = candidates.filter((c) => tokensSubsetMatch(tokens, c.tokens));
+    const matches = this.dedupeMatches(
+      candidates.filter((c) => tokensSubsetMatch(tokens, c.tokens))
+    );
 
     if (matches.length === 1) return { athlete_id: matches[0]!.athlete_id, ambiguous: false };
     if (matches.length === 0) return { athlete_id: null, ambiguous: false };
@@ -138,8 +213,8 @@ export class AthleteRosterCache {
   }
 
   /** Register a newly created athlete so later rows in the same import can match. */
-  register(athlete_id: string, first_name: string, last_name: string) {
-    this.addRow(athlete_id, first_name, last_name);
+  register(athlete_id: string, first_name: string, last_name: string, aliases: string[] = []) {
+    this.addRow(athlete_id, first_name, last_name, aliases);
   }
 
   /**
@@ -158,6 +233,18 @@ export class AthleteRosterCache {
     const athleteId = await this.insertAthlete(supabase, first_name, last_name);
     if (athleteId) this.register(athleteId, first_name, last_name);
     return athleteId;
+  }
+
+  /** Batch-resolve names without creating athletes. */
+  resolveManyByName(names: Iterable<string>): Map<string, string | null> {
+    const unique = [...new Set([...names].map((n) => n.trim()).filter(Boolean))];
+    const result = new Map<string, string | null>();
+    for (const name of unique) {
+      const resolution = this.resolveByName(name);
+      if (resolution.athlete_id) result.set(name, resolution.athlete_id);
+      else result.set(name, null);
+    }
+    return result;
   }
 
   /** Batch-create athletes for names that are missing (non-ambiguous). */
@@ -198,6 +285,7 @@ export class AthleteRosterCache {
             state: null,
             country: null,
             accolades: [],
+            name_aliases: [],
           }))
         )
         .select("athlete_id, first_name, last_name");
@@ -240,6 +328,7 @@ export class AthleteRosterCache {
         city: null,
         state: null,
         accolades: [],
+        name_aliases: [],
       })
       .select("athlete_id")
       .single();

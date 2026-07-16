@@ -65,6 +65,14 @@ export async function requireAdminOrSales() {
   return profile;
 }
 
+export async function requireAdminOrOperations() {
+  const profile = await requireProfile();
+  if (profile.role !== "admin" && profile.role !== "operations") {
+    redirect("/unauthorized");
+  }
+  return profile;
+}
+
 export async function requireMarketIntelAccess() {
   const profile = await requireProfile();
   if (profile.role === "admin" || profile.role === "sales") {

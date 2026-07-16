@@ -108,16 +108,20 @@ export async function processSocialDataBulk(
   sourceFileName: string | null,
   summary: SheetImportSummary,
   failures: ImportRowFailure[],
-  onRowDone?: () => void
+  onRowDone?: () => void,
+  options?: { createMissingAthletes?: boolean }
 ): Promise<void> {
   summary.total = rows.length;
+  const createMissing = options?.createMissingAthletes !== false;
 
   const namesNeeded: string[] = [];
   for (const { parsed } of rows) {
     if (parsed.name_raw) namesNeeded.push(parsed.name_raw);
   }
 
-  const nameToAthleteId = await roster.ensureManyByName(supabase, namesNeeded);
+  const nameToAthleteId = createMissing
+    ? await roster.ensureManyByName(supabase, namesNeeded)
+    : roster.resolveManyByName(namesNeeded);
   const existingSocialIds = new Set<string>();
 
   let from = 0;
@@ -208,16 +212,20 @@ export async function processAudienceDataBulk(
   sourceFileName: string | null,
   summary: SheetImportSummary,
   failures: ImportRowFailure[],
-  onRowDone?: () => void
+  onRowDone?: () => void,
+  options?: { createMissingAthletes?: boolean }
 ): Promise<void> {
   summary.total = rows.length;
+  const createMissing = options?.createMissingAthletes !== false;
 
   const namesNeeded: string[] = [];
   for (const { parsed } of rows) {
     if (parsed.name_raw) namesNeeded.push(parsed.name_raw);
   }
 
-  const nameToAthleteId = await roster.ensureManyByName(supabase, namesNeeded);
+  const nameToAthleteId = createMissing
+    ? await roster.ensureManyByName(supabase, namesNeeded)
+    : roster.resolveManyByName(namesNeeded);
 
   const existingKeys = new Set<string>();
   let from = 0;
