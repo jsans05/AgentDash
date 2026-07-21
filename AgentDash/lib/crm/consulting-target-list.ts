@@ -134,6 +134,9 @@ export async function fetchConsultingTargetListRows(
       outreach_email_subject: null,
       outreach_email: null,
       contacts: dedupeContactsForCompany(contactsByCompany.get(e.company_id) ?? []),
+      owner_user_id: "",
+      owner_name: "Shared",
+      is_own: true,
       ...mapCompanyFirmographics(company as Record<string, unknown> | undefined),
     };
   });

@@ -1,0 +1,241 @@
+/** Outreach sequence channels and engine helpers. */
+
+export type OutreachChannel =
+  | "cold_email"
+  | "support_email"
+  | "instagram_dm"
+  | "instagram_engage"
+  | "linkedin"
+  | "cold_call"
+  | "other";
+
+export type TouchStatus = "pending" | "done" | "skipped";
+export type ResponseStatus = "awaiting" | "responded" | "no_response";
+
+export type SequenceStepDef = {
+  id: string;
+  sequence_id: string;
+  step_order: number;
+  day_offset: number;
+  channel: OutreachChannel;
+  action_label: string;
+  short_code: string;
+  phase: string;
+  expects_response: boolean;
+  is_optional: boolean;
+  guidance: string | null;
+};
+
+export type CardStepState = {
+  id?: string;
+  card_id: string;
+  step_id: string;
+  touch_status: TouchStatus;
+  response_status: ResponseStatus;
+  done_at: string | null;
+  variant_id: string | null;
+  outcome: string | null;
+  notes: string | null;
+};
+
+export type SequenceCardFields = {
+  sequence_id: string | null;
+  sequence_started_at: string | null;
+  responded_at: string | null;
+  pipeline_stage?: string | null;
+};
+
+const CHANNEL_TO_NEXT_ACTION: Partial<
+  Record<OutreachChannel, "email" | "linkedin" | "call" | "cool">
+> = {
+  cold_email: "email",
+  support_email: "email",
+  linkedin: "linkedin",
+  cold_call: "call",
+  instagram_dm: "email",
+  instagram_engage: "email",
+};
+
+export function cycleTouchStatus(current: TouchStatus): TouchStatus {
+  if (current === "pending") return "done";
+  if (current === "done") return "skipped";
+  return "pending";
+}
+
+export function cycleResponseStatus(current: ResponseStatus): ResponseStatus {
+  if (current === "awaiting") return "responded";
+  if (current === "responded") return "no_response";
+  return "awaiting";
+}
+
+/** Due date for a step = sequence_started_at + day_offset (calendar days, UTC date). */
+export function stepDueAt(sequenceStartedAt: string, dayOffset: number): Date {
+  const start = new Date(sequenceStartedAt);
+  const due = new Date(
+    Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate() + dayOffset, 10, 0, 0)
+  );
+  return due;
+}
+
+export function isStepDue(
+  sequenceStartedAt: string | null,
+  dayOffset: number,
+  touchStatus: TouchStatus,
+  now = new Date()
+): boolean {
+  if (!sequenceStartedAt) return false;
+  if (touchStatus !== "pending") return false;
+  return stepDueAt(sequenceStartedAt, dayOffset).getTime() <= now.getTime();
+}
+
+export function getStepState(
+  states: CardStepState[],
+  stepId: string
+): CardStepState | undefined {
+  return states.find((s) => s.step_id === stepId);
+}
+
+export function ensureStepState(
+  cardId: string,
+  stepId: string,
+  states: CardStepState[]
+): CardStepState {
+  const existing = getStepState(states, stepId);
+  if (existing) return existing;
+  return {
+    card_id: cardId,
+    step_id: stepId,
+    touch_status: "pending",
+    response_status: "awaiting",
+    done_at: null,
+    variant_id: null,
+    outcome: null,
+    notes: null,
+  };
+}
+
+/**
+ * Next pending step that is due (or the earliest pending by order if none due yet).
+ * Skips optional steps that are already skipped. Pauses when card has responded.
+ */
+export function findNextPendingStep(
+  steps: SequenceStepDef[],
+  states: CardStepState[],
+  card: SequenceCardFields,
+  now = new Date()
+): SequenceStepDef | null {
+  if (card.responded_at) return null;
+  if (!card.sequence_started_at) return null;
+
+  const ordered = [...steps].sort((a, b) => a.step_order - b.step_order);
+  const pending = ordered.filter((step) => {
+    const st = getStepState(states, step.id);
+    const touch = st?.touch_status ?? "pending";
+    return touch === "pending";
+  });
+  if (pending.length === 0) return null;
+
+  const due = pending.filter((step) =>
+    isStepDue(card.sequence_started_at, step.day_offset, "pending", now)
+  );
+  if (due.length > 0) return due[0]!;
+  return pending[0]!;
+}
+
+/** Populate next_follow_up_at / next_action from the next pending sequence step. */
+export function cadenceFieldsFromSequence(
+  steps: SequenceStepDef[],
+  states: CardStepState[],
+  card: SequenceCardFields,
+  now = new Date()
+): {
+  next_follow_up_at: string | null;
+  next_action: "email" | "linkedin" | "call" | "cool" | null;
+  last_touch_at?: string | null;
+} {
+  if (card.responded_at) {
+    return { next_follow_up_at: null, next_action: null };
+  }
+  const next = findNextPendingStep(steps, states, card, now);
+  if (!next || !card.sequence_started_at) {
+    return { next_follow_up_at: null, next_action: null };
+  }
+  const due = stepDueAt(card.sequence_started_at, next.day_offset);
+  return {
+    next_follow_up_at: due.toISOString(),
+    next_action: CHANNEL_TO_NEXT_ACTION[next.channel] ?? "email",
+  };
+}
+
+export function anyStepResponded(states: CardStepState[]): boolean {
+  return states.some((s) => s.response_status === "responded");
+}
+
+/** Day-13 LI message is gated on day-4 connection acceptance. */
+export function isStepBlocked(
+  step: SequenceStepDef,
+  steps: SequenceStepDef[],
+  states: CardStepState[]
+): { blocked: boolean; reason: string | null } {
+  if (step.short_code === "LI4") {
+    const conn = steps.find((s) => s.short_code === "LI3");
+    if (conn) {
+      const st = getStepState(states, conn.id);
+      if (st?.response_status === "no_response") {
+        return { blocked: true, reason: "Not connected — LI3 connection was declined" };
+      }
+      if (st?.touch_status === "pending") {
+        return { blocked: true, reason: "Complete LI3 connection request first" };
+      }
+      if (st?.touch_status === "done" && st.response_status === "awaiting") {
+        return { blocked: true, reason: "Waiting for connection acceptance (LI3)" };
+      }
+    }
+  }
+  return { blocked: false, reason: null };
+}
+
+export function phaseLabel(phase: string): string {
+  switch (phase) {
+    case "warm_up":
+      return "Phase 1 · Warm-Up";
+    case "first_wave":
+      return "Phase 2 · First Wave";
+    case "channel_switch":
+      return "Phase 3 · Channel Switch";
+    case "exit":
+      return "Phase 4 · Exit";
+    default:
+      return phase;
+  }
+}
+
+export function channelLabel(channel: OutreachChannel | string): string {
+  switch (channel) {
+    case "cold_email":
+      return "Cold email";
+    case "support_email":
+      return "Support email";
+    case "instagram_dm":
+      return "Instagram DM";
+    case "instagram_engage":
+      return "Instagram engage";
+    case "linkedin":
+      return "LinkedIn";
+    case "cold_call":
+      return "Cold call";
+    default:
+      return channel;
+  }
+}
+
+export function mapLegacyChannel(raw: string): OutreachChannel {
+  const c = raw.trim().toLowerCase();
+  if (c === "linkedin") return "linkedin";
+  if (c === "call" || c === "cold_call" || c === "phone") return "cold_call";
+  if (c === "support_email" || c === "support") return "support_email";
+  if (c === "instagram_dm" || c === "ig_dm" || c === "instagram") return "instagram_dm";
+  if (c === "instagram_engage") return "instagram_engage";
+  if (c === "email" || c === "cold_email") return "cold_email";
+  return "other";
+}

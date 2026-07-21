@@ -7,7 +7,7 @@ import {
   resolveSeedsByName,
 } from "@/lib/apollo/expand-similar";
 import { domainFromWebsite, normalizeDomainForCompare } from "@/lib/apollo/org-search-utils";
-import { fetchAthleteTargetListRows } from "@/lib/crm/athlete-target-list";
+import { fetchAthleteTargetListRows } from "@/lib/crm/athlete-target-list-server";
 
 export async function expandSimilarCompaniesForChat(
   supabase: SupabaseClient,

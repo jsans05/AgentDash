@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { requireNonAccounting } from "@/lib/auth";
-import { fetchAthleteTargetListRows, type TargetListContact, type TargetListRow } from "@/lib/crm/athlete-target-list";
+import { fetchAthleteTargetListRows } from "@/lib/crm/athlete-target-list-server";
+import type { TargetListContact, TargetListRow } from "@/lib/crm/athlete-target-list";
 import { enrichTargetListRowsWithAgencyActivity } from "@/lib/crm/company-cross-agent-activity-server";
 import { removeAthleteFromTargetListCard } from "@/lib/crm/remove-athlete-from-target-list";
 
@@ -10,10 +11,9 @@ export type { TargetListContact, TargetListRow };
 /**
  * GET /api/athletes/:id/target-list
  *
- * Returns the spreadsheet-ready target list for an athlete: every pipeline card
- * (crm_companies_pipeline) where the athlete appears in `potential_athletes`,
- * plus all crm_contacts for the same company that the viewer can see (RLS
- * scopes agents to their own contacts).
+ * Returns the shared spreadsheet-ready target list for an athlete: every
+ * non-archived pipeline card (any teammate) where the athlete appears in
+ * `potential_athletes`, with owner info and that owner's contacts.
  */
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const profile = await requireNonAccounting();

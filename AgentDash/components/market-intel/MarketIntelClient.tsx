@@ -14,7 +14,7 @@ import {
   groupVenueSponsorsByVenue,
 } from "@/lib/market-intel/queries";
 
-type Tab = "brands" | "cup" | "teams" | "venues";
+type Tab = "brands" | "cup" | "teams" | "venues" | "motogp" | "f1";
 
 type FocusTarget =
   | { type: "team"; ownerName: string }
@@ -44,6 +44,112 @@ function teamFocusId(ownerName: string) {
 
 function venueFocusId(entityKey: string) {
   return `market-intel-venue-${entityKey}`;
+}
+
+function sportKey(sportType: string | null | undefined) {
+  return (sportType || "").trim().toLowerCase();
+}
+
+function isMotoGpSport(sportType: string | null | undefined) {
+  return sportKey(sportType) === "motogp";
+}
+
+function isF1Sport(sportType: string | null | undefined) {
+  return sportKey(sportType) === "f1";
+}
+
+function tabForVenueSport(sportType: string | null | undefined): Tab {
+  if (isMotoGpSport(sportType)) return "motogp";
+  if (isF1Sport(sportType)) return "f1";
+  return "venues";
+}
+
+function VenueAccordionList({
+  venues,
+  sponsorsByVenue,
+  expandedVenue,
+  setExpandedVenue,
+  focusTarget,
+  emptyMessage,
+}: {
+  venues: VenueRow[];
+  sponsorsByVenue: Map<string, VenueSponsorRow[]>;
+  expandedVenue: string | null;
+  setExpandedVenue: (key: string | null) => void;
+  focusTarget: FocusTarget | null;
+  emptyMessage: string;
+}) {
+  return (
+    <section className="space-y-3">
+      {venues.map((venue) => {
+        const sponsors = sponsorsByVenue.get(venue.entity_key) ?? [];
+        const open = expandedVenue === venue.entity_key;
+        const focused =
+          focusTarget?.type === "venue" && focusTarget.entityKey === venue.entity_key;
+        return (
+          <div
+            key={venue.entity_key}
+            id={venueFocusId(venue.entity_key)}
+            className={`rounded-lg border bg-[#151A17] shadow transition ${
+              focused
+                ? "border-[#CEE4D4]/50 ring-2 ring-[#CEE4D4]/40"
+                : "border-white/10"
+            }`}
+          >
+            <button
+              type="button"
+              onClick={() => setExpandedVenue(open ? null : venue.entity_key)}
+              className={`flex w-full items-center justify-between px-4 py-3 text-left ${
+                focused ? "bg-[#CEE4D4]/10" : ""
+              }`}
+            >
+              <div>
+                <p className="font-medium text-[#F4F1EB]">{venue.name}</p>
+                <p className="text-xs text-[#8E877A]">
+                  {venue.sport_type || "venue"} · {sponsors.length} sponsors ·{" "}
+                  <a
+                    href={venue.sponsor_page_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    source
+                  </a>
+                </p>
+              </div>
+              <span className="text-[#B9B2A6]">{open ? "−" : "+"}</span>
+            </button>
+            {open && (
+              <ul className="border-t border-white/10 px-4 py-3 text-sm text-[#ECE7DF]">
+                {sponsors.map((s) => (
+                  <li key={s.id} className="flex items-center justify-between py-1">
+                    <span>{s.company_name}</span>
+                    {s.sponsor_url ? (
+                      <a
+                        href={s.sponsor_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs text-[#CEE4D4] underline"
+                      >
+                        site
+                      </a>
+                    ) : (
+                      <span className="text-xs text-[#8E877A]">—</span>
+                    )}
+                  </li>
+                ))}
+                {sponsors.length === 0 && (
+                  <li className="text-[#B9B2A6]">No sponsors scraped yet.</li>
+                )}
+              </ul>
+            )}
+          </div>
+        );
+      })}
+      {venues.length === 0 && <p className="text-sm text-[#B9B2A6]">{emptyMessage}</p>}
+    </section>
+  );
 }
 
 export function MarketIntelClient({
@@ -78,6 +184,25 @@ export function MarketIntelClient({
     return [...owners.entries()].sort((a, b) => a[0].localeCompare(b[0]));
   }, [cupDrivers]);
 
+  const stadiumVenues = useMemo(
+    () => venues.filter((v) => !isMotoGpSport(v.sport_type) && !isF1Sport(v.sport_type)),
+    [venues]
+  );
+  const motoGpVenues = useMemo(
+    () => venues.filter((v) => isMotoGpSport(v.sport_type)),
+    [venues]
+  );
+  const f1Venues = useMemo(
+    () => venues.filter((v) => isF1Sport(v.sport_type)),
+    [venues]
+  );
+
+  const venueByKey = useMemo(() => {
+    const map = new Map<string, VenueRow>();
+    for (const venue of venues) map.set(venue.entity_key, venue);
+    return map;
+  }, [venues]);
+
   const navigateToTeam = (ownerName: string) => {
     setTab("teams");
     setExpandedOwner(ownerName);
@@ -86,7 +211,8 @@ export function MarketIntelClient({
   };
 
   const navigateToVenue = (entityKey: string) => {
-    setTab("venues");
+    const venue = venueByKey.get(entityKey);
+    setTab(tabForVenueSport(venue?.sport_type));
     setExpandedVenue(entityKey);
     setExpandedOwner(null);
     setFocusTarget({ type: "venue", entityKey });
@@ -114,14 +240,16 @@ export function MarketIntelClient({
   const tabs: { id: Tab; label: string }[] = [
     { id: "brands", label: "Brands" },
     { id: "cup", label: "Cup Series" },
-    { id: "teams", label: "NASCAR Team Sponsors" },
-    { id: "venues", label: "Stadiums & NE Teams" },
+    { id: "teams", label: "NASCAR" },
+    { id: "venues", label: "Stadiums" },
+    { id: "motogp", label: "MotoGP" },
+    { id: "f1", label: "Formula 1" },
   ];
 
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="inline-flex rounded-lg border border-white/10 bg-[#151A17] p-1">
+        <div className="inline-flex flex-wrap rounded-lg border border-white/10 bg-[#151A17] p-1">
           {tabs.map((item) => (
             <button
               key={item.id}
@@ -273,77 +401,36 @@ export function MarketIntelClient({
       )}
 
       {tab === "venues" && (
-        <section className="space-y-3">
-          {venues.map((venue) => {
-            const sponsors = sponsorsByVenue.get(venue.entity_key) ?? [];
-            const open = expandedVenue === venue.entity_key;
-            const focused =
-              focusTarget?.type === "venue" && focusTarget.entityKey === venue.entity_key;
-            return (
-              <div
-                key={venue.entity_key}
-                id={venueFocusId(venue.entity_key)}
-                className={`rounded-lg border bg-[#151A17] shadow transition ${
-                  focused
-                    ? "border-[#CEE4D4]/50 ring-2 ring-[#CEE4D4]/40"
-                    : "border-white/10"
-                }`}
-              >
-                <button
-                  type="button"
-                  onClick={() => setExpandedVenue(open ? null : venue.entity_key)}
-                  className={`flex w-full items-center justify-between px-4 py-3 text-left ${
-                    focused ? "bg-[#CEE4D4]/10" : ""
-                  }`}
-                >
-                  <div>
-                    <p className="font-medium text-[#F4F1EB]">{venue.name}</p>
-                    <p className="text-xs text-[#8E877A]">
-                      {venue.sport_type || "venue"} · {sponsors.length} sponsors ·{" "}
-                      <a
-                        href={venue.sponsor_page_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="underline"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        source
-                      </a>
-                    </p>
-                  </div>
-                  <span className="text-[#B9B2A6]">{open ? "−" : "+"}</span>
-                </button>
-                {open && (
-                  <ul className="border-t border-white/10 px-4 py-3 text-sm text-[#ECE7DF]">
-                    {sponsors.map((s) => (
-                      <li key={s.id} className="flex items-center justify-between py-1">
-                        <span>{s.company_name}</span>
-                        {s.sponsor_url ? (
-                          <a
-                            href={s.sponsor_url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-xs text-[#CEE4D4] underline"
-                          >
-                            site
-                          </a>
-                        ) : (
-                          <span className="text-xs text-[#8E877A]">—</span>
-                        )}
-                      </li>
-                    ))}
-                    {sponsors.length === 0 && (
-                      <li className="text-[#B9B2A6]">No sponsors scraped yet.</li>
-                    )}
-                  </ul>
-                )}
-              </div>
-            );
-          })}
-          {venues.length === 0 && (
-            <p className="text-sm text-[#B9B2A6]">No venues configured or synced yet.</p>
-          )}
-        </section>
+        <VenueAccordionList
+          venues={stadiumVenues}
+          sponsorsByVenue={sponsorsByVenue}
+          expandedVenue={expandedVenue}
+          setExpandedVenue={setExpandedVenue}
+          focusTarget={focusTarget}
+          emptyMessage="No stadiums configured or synced yet."
+        />
+      )}
+
+      {tab === "motogp" && (
+        <VenueAccordionList
+          venues={motoGpVenues}
+          sponsorsByVenue={sponsorsByVenue}
+          expandedVenue={expandedVenue}
+          setExpandedVenue={setExpandedVenue}
+          focusTarget={focusTarget}
+          emptyMessage="No MotoGP teams synced yet. Scrape venues with sport_type motogp, then run sync."
+        />
+      )}
+
+      {tab === "f1" && (
+        <VenueAccordionList
+          venues={f1Venues}
+          sponsorsByVenue={sponsorsByVenue}
+          expandedVenue={expandedVenue}
+          setExpandedVenue={setExpandedVenue}
+          focusTarget={focusTarget}
+          emptyMessage="No Formula 1 teams synced yet. Scrape venues with sport_type f1, then run sync."
+        />
       )}
     </div>
   );

@@ -35,7 +35,8 @@ import type { PitchType } from "@/lib/ai/pitch-spec";
 import { computeRosterAudienceSummary } from "@/lib/ai/roster-audience";
 import { APPROVED_INTEREST_CATEGORIES } from "@/lib/ai/interest-taxonomy";
 import { ilikeContains, normalizeOrIlikeFragment } from "@/lib/supabase/ilike";
-import { fetchAthleteTargetListRows } from "@/lib/crm/athlete-target-list";
+import { fetchAthleteTargetListRows } from "@/lib/crm/athlete-target-list-server";
+import { getAccessibleAthleteIds } from "@/lib/athletes/accessible";
 import { upsertConsultingTargetListRows, normalizeJsonImportRow } from "@/lib/consulting/import-target-list";
 import { requireConsultingProfileAccess, ConsultingAccessError } from "@/lib/consulting/access";
 import { expandSimilarCompanies, loadExpandSeedsFromCompanyIds } from "@/lib/apollo/expand-similar";
@@ -241,20 +242,7 @@ async function getAgentAccessibleAthleteIds(
   supabase: Awaited<ReturnType<typeof createServerClient>>,
   profile: Profile
 ): Promise<string[]> {
-  const [{ data: linked }, { data: primary }] = await Promise.all([
-    supabase.from("athlete_agents").select("athlete_id").eq("user_id", profile.user_id),
-    supabase.from("athletes").select("athlete_id").eq("current_agent_id", profile.user_id),
-  ]);
-  const ids = new Set<string>();
-  for (const r of linked ?? []) {
-    const id = (r as { athlete_id?: string })?.athlete_id;
-    if (id) ids.add(String(id));
-  }
-  for (const r of primary ?? []) {
-    const id = (r as { athlete_id?: string })?.athlete_id;
-    if (id) ids.add(String(id));
-  }
-  return [...ids];
+  return getAccessibleAthleteIds(supabase, profile);
 }
 
 /** Athletes included in Flow 7 "general roster": whole company for admin/sales; agent assignments for agents. */
@@ -262,15 +250,7 @@ async function getRosterAthleteIdsForProfile(
   supabase: Awaited<ReturnType<typeof createServerClient>>,
   profile: Profile
 ): Promise<string[]> {
-  if (profile.role === "admin" || profile.role === "sales") {
-    const { data, error } = await supabase.from("athletes").select("athlete_id");
-    if (error) throw error;
-    return (data ?? []).map((r: { athlete_id?: string }) => String(r.athlete_id ?? "")).filter(Boolean);
-  }
-  if (profile.role === "agent") {
-    return getAgentAccessibleAthleteIds(supabase, profile);
-  }
-  return [];
+  return getAccessibleAthleteIds(supabase, profile);
 }
 
 async function fetchDistinctInterestNamesOnRoster(

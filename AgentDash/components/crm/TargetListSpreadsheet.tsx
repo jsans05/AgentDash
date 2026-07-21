@@ -30,6 +30,7 @@ import { TargetListActionDialog } from "@/components/crm/TargetListActionDialog"
 import { TargetListAiPanel } from "@/components/crm/TargetListAiDock";
 import { MasterTargetListAiPanel } from "@/components/crm/MasterTargetListAiDock";
 import { TargetListCompanyContactActions } from "@/components/crm/TargetListCompanyContactActions";
+import { AssignToTeammateMenu } from "@/components/crm/AssignToTeammateMenu";
 import { isEffectivelyUncategorizedCompanyCategory } from "@/lib/crm/company-category";
 import {
   readStoredTargetListPanelCollapsed,
@@ -51,6 +52,7 @@ import {
   isTargetListDialogDismissed,
   TARGET_LIST_DELETE_CONTACTS_BULK_DISMISS_KEY,
   TARGET_LIST_FIND_CONTACTS_DISMISS_KEY,
+  TARGET_LIST_IMPORT_REPLACE_DISMISS_KEY,
   TARGET_LIST_REMOVE_COMPANY_DISMISS_KEY,
   TARGET_LIST_REMOVE_UNREVEALED_ALL_DISMISS_KEY,
 } from "@/lib/crm/target-list-prefs";
@@ -345,6 +347,8 @@ export function TargetListSpreadsheet({
   const [apolloSearchOverrides, setApolloSearchOverrides] = useState<ApolloContactSearchOverrides>({});
   const [refineSearchOpen, setRefineSearchOpen] = useState(false);
   const [activeCategoryFilter, setActiveCategoryFilter] = useState(TARGET_LIST_CATEGORY_FILTER_ALL);
+  /** Athlete mode: All | Mine | specific owner_user_id */
+  const [activeOwnerFilter, setActiveOwnerFilter] = useState<string>("all");
   const [selectedCompanyIds, setSelectedCompanyIds] = useState<Set<string>>(new Set());
   const [focusedRow, setFocusedRow] = useState<TargetListFocusedRow | null>(null);
   const [flashedPipelineIds, setFlashedPipelineIds] = useState<Set<string>>(new Set());
@@ -353,8 +357,11 @@ export function TargetListSpreadsheet({
   const [focusMode, setFocusMode] = useState(false);
   const [navOffsetPx, setNavOffsetPx] = useState(64);
   const [bulkActionsOpen, setBulkActionsOpen] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importConfirmFile, setImportConfirmFile] = useState<File | null>(null);
   const flashAfterLoadRef = useRef<Set<string> | null>(null);
   const bulkActionsRef = useRef<HTMLDivElement>(null);
+  const importFileInputRef = useRef<HTMLInputElement>(null);
 
   const bulkActionsDisabled =
     bulkFindContacts ||
@@ -534,6 +541,52 @@ export function TargetListSpreadsheet({
     );
   }, [isMaster, rows]);
 
+  const ownerFilterOptions = useMemo(() => {
+    if (!isAthlete || !rows) return [] as { user_id: string; name: string; count: number }[];
+    const byId = new Map<string, { user_id: string; name: string; count: number }>();
+    for (const r of rows) {
+      const id = r.owner_user_id || "";
+      if (!id) continue;
+      const existing = byId.get(id);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        byId.set(id, {
+          user_id: id,
+          name: r.is_own ? "You" : r.owner_name || "Unknown",
+          count: 1,
+        });
+      }
+    }
+    return [...byId.values()].sort((a, b) => {
+      if (a.name === "You") return -1;
+      if (b.name === "You") return 1;
+      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    });
+  }, [isAthlete, rows]);
+
+  const selectedOwnPipelineIds = useMemo(() => {
+    if (!rows) return [] as string[];
+    return rows
+      .filter((r) => r.is_own !== false && selectedCompanyIds.has(r.company_id))
+      .map((r) => r.pipeline_id);
+  }, [rows, selectedCompanyIds]);
+
+  /** Athlete scope for assign: single athlete page, master filter, or athletes on selected master rows. */
+  const assignAthleteIds = useMemo(() => {
+    if (isAthlete && athleteId) return [athleteId];
+    if (!isMaster || !rows) return [] as string[];
+    if (activeAthleteFilter !== "all") return [activeAthleteFilter];
+    const ids = new Set<string>();
+    for (const r of rows) {
+      if (r.is_own === false || !selectedCompanyIds.has(r.company_id)) continue;
+      for (const a of r.assigned_athletes ?? []) {
+        if (a.athlete_id) ids.add(a.athlete_id);
+      }
+    }
+    return [...ids];
+  }, [isAthlete, athleteId, isMaster, rows, activeAthleteFilter, selectedCompanyIds]);
+
   const visibleRowIndexes = useMemo(() => {
     if (!rows) return new Set<number>();
     const indexes = new Set<number>();
@@ -541,6 +594,13 @@ export function TargetListSpreadsheet({
       if (isMaster && activeAthleteFilter !== "all") {
         const assigned = r.assigned_athletes ?? [];
         if (!assigned.some((a) => a.athlete_id === activeAthleteFilter)) return;
+      }
+      if (isAthlete && activeOwnerFilter !== "all") {
+        if (activeOwnerFilter === "mine") {
+          if (r.is_own === false) return;
+        } else if (r.owner_user_id !== activeOwnerFilter) {
+          return;
+        }
       }
       if (activeCategoryFilter === TARGET_LIST_CATEGORY_FILTER_ALL) {
         indexes.add(i);
@@ -555,7 +615,7 @@ export function TargetListSpreadsheet({
       }
     });
     return indexes;
-  }, [rows, activeCategoryFilter, isMaster, activeAthleteFilter]);
+  }, [rows, activeCategoryFilter, isMaster, isAthlete, activeAthleteFilter, activeOwnerFilter]);
 
   const flat = useMemo(() => {
     if (!rows) return [];
@@ -1033,6 +1093,53 @@ export function TargetListSpreadsheet({
     }
   }
 
+  function handleImportFilePicked(file: File) {
+    if (isTargetListDialogDismissed(TARGET_LIST_IMPORT_REPLACE_DISMISS_KEY)) {
+      void importTargetListFile(file);
+      return;
+    }
+    setImportConfirmFile(file);
+  }
+
+  async function importTargetListFile(file: File) {
+    if (!athleteId) return;
+    setImporting(true);
+    setGlobalError(null);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("replace", "1");
+      const res = await fetch(`/api/athletes/${athleteId}/target-list/import`, {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Import failed");
+      const rowErrors: string[] = Array.isArray(data.row_errors) ? data.row_errors : [];
+      const parts = [
+        `Imported ${data.companies ?? 0} ${data.companies === 1 ? "company" : "companies"}`,
+        `${data.contacts_inserted ?? 0} contacts added`,
+      ];
+      if (data.cleared) parts.push(`${data.cleared} previous rows cleared`);
+      if (data.cards_archived) parts.push(`${data.cards_archived} pipeline cards archived`);
+      setUpdateToast(parts.join(" · "));
+      if (rowErrors.length > 0) {
+        setGlobalError(
+          rowErrors.length <= 3
+            ? `Some rows failed: ${rowErrors.join(" ")}`
+            : `Some rows failed: ${rowErrors.slice(0, 3).join(" ")} (+${rowErrors.length - 3} more)`
+        );
+      }
+      await load();
+    } catch (e) {
+      setGlobalError(e instanceof Error ? e.message : "Import failed");
+    } finally {
+      setImporting(false);
+      if (importFileInputRef.current) importFileInputRef.current.value = "";
+    }
+  }
+
   async function saveContactOutreachDraft(
     rowIndex: number,
     contactIndex: number,
@@ -1202,6 +1309,18 @@ export function TargetListSpreadsheet({
       )}
       style={focusMode ? { top: navOffsetPx } : undefined}
     >
+      {isAthlete && athleteId ? (
+        <input
+          ref={importFileInputRef}
+          type="file"
+          accept=".xlsx,.xls"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) handleImportFilePicked(file);
+          }}
+        />
+      ) : null}
       <header
         className={cn(
           "flex shrink-0 items-center justify-between gap-3 border-b border-white/10",
@@ -1281,6 +1400,19 @@ export function TargetListSpreadsheet({
                     >
                       {exporting ? "Exporting…" : "Export to Excel"}
                     </button>
+                    {isAthlete && athleteId ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBulkActionsOpen(false);
+                          importFileInputRef.current?.click();
+                        }}
+                        disabled={importing || loading}
+                        className="block w-full px-3 py-2 text-left text-xs text-[#D7D0C4] hover:bg-white/5 disabled:opacity-50"
+                      >
+                        {importing ? "Importing…" : "Import Excel (replace list)"}
+                      </button>
+                    ) : null}
                     {isAthlete && athleteName && athleteId ? (
                       <Link
                         href={`/ai?athlete_id=${encodeURIComponent(athleteId)}&context=target_list&athlete_name=${encodeURIComponent(athleteName)}`}
@@ -1352,7 +1484,7 @@ export function TargetListSpreadsheet({
               <p className="mt-0.5 text-xs text-[#B9B2A6]">
                 {isMaster
                   ? "Every company on your roster athletes' target lists in one view. Click any cell to edit in place; changes sync to the CRM. Rows without a contact are highlighted."
-                  : "Every company prospected and assigned to this athlete in your CRM pipeline. Click any cell to edit in place; changes sync to the CRM. Rows without a contact are highlighted."}
+                  : "Shared target list for this athlete across the team. Filter by assignee; only your rows are editable. Assign selected brands to teammates from the toolbar."}
               </p>
               {isAthlete && athleteName && athleteId ? (
                 <Link
@@ -1457,6 +1589,40 @@ export function TargetListSpreadsheet({
               >
                 {exporting ? "Exporting…" : "Export to Excel"}
               </button>
+              {isAthlete && athleteId ? (
+                <button
+                  type="button"
+                  onClick={() => importFileInputRef.current?.click()}
+                  disabled={importing || loading}
+                  className={cn(
+                    bulkActionBtnClass,
+                    "border-[#8C3A3A]/50 bg-[#2A1818] text-[#F1A2A2] hover:bg-[#3A1E1E]"
+                  )}
+                  title="Clear this athlete's full shared target list and replace it with an Excel file assigned to you"
+                >
+                  {importing ? (
+                    <>
+                      <span
+                        className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-[#F1A2A2]/25 border-t-[#F1A2A2]"
+                        aria-hidden
+                      />
+                      Importing…
+                    </>
+                  ) : (
+                    "Import Excel (replace list)"
+                  )}
+                </button>
+              ) : null}
+              {selectedOwnPipelineIds.length > 0 ? (
+                <AssignToTeammateMenu
+                  pipelineIds={selectedOwnPipelineIds}
+                  athleteIds={assignAthleteIds}
+                  onAssigned={() => {
+                    setSelectedCompanyIds(new Set());
+                    void load();
+                  }}
+                />
+              ) : null}
             </div>
           </>
         )}
@@ -1571,6 +1737,38 @@ export function TargetListSpreadsheet({
         onConfirm={() => {
           setBulkRemoveUnrevealedConfirmOpen(false);
           void bulkRemoveUnrevealedAll();
+        }}
+      />
+
+      <TargetListActionDialog
+        open={importConfirmFile != null}
+        title="Replace target list with Excel file?"
+        variant="danger"
+        description={
+          <>
+            <p>
+              This clears {athleteName ? `${athleteName}'s` : "this athlete's"} entire shared
+              target list (including teammates&apos; rows), then imports{" "}
+              <span className="font-medium text-[#E6E0D5]">{importConfirmFile?.name}</span>{" "}
+              assigned to you.
+            </p>
+            <p className="text-[#AEA79A]">
+              Old brands not in the file drop off the athlete list, master target list, and your
+              pipeline (archived when no other athletes remain). Expected columns: Category,
+              Company, Contact Name, Role/Title, Email, LinkedIn.
+            </p>
+          </>
+        }
+        confirmLabel="Clear & import"
+        dismissStorageKey={TARGET_LIST_IMPORT_REPLACE_DISMISS_KEY}
+        onCancel={() => {
+          setImportConfirmFile(null);
+          if (importFileInputRef.current) importFileInputRef.current.value = "";
+        }}
+        onConfirm={() => {
+          const file = importConfirmFile;
+          setImportConfirmFile(null);
+          if (file) void importTargetListFile(file);
         }}
       />
 
@@ -1753,6 +1951,69 @@ export function TargetListSpreadsheet({
               ))}
             </>
           ) : null}
+          {isAthlete && ownerFilterOptions.length > 0 ? (
+            <>
+              <span className="ml-2 mr-1 text-[10px] font-medium uppercase tracking-wide text-[#8E877A]">
+                Assigned to
+              </span>
+              <button
+                type="button"
+                onClick={() => setActiveOwnerFilter("all")}
+                className={cn(
+                  "rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-colors",
+                  activeOwnerFilter === "all"
+                    ? "bg-[#2E7040] text-[#F2FFF5]"
+                    : "border border-white/10 text-[#B9B2A6] hover:bg-white/5"
+                )}
+              >
+                All
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveOwnerFilter("mine")}
+                className={cn(
+                  "rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-colors",
+                  activeOwnerFilter === "mine"
+                    ? "bg-[#2E7040] text-[#F2FFF5]"
+                    : "border border-white/10 text-[#B9B2A6] hover:bg-white/5"
+                )}
+              >
+                Mine
+              </button>
+              {ownerFilterOptions
+                .filter((o) => o.name !== "You")
+                .map((owner) => (
+                  <button
+                    key={owner.user_id}
+                    type="button"
+                    onClick={() => setActiveOwnerFilter(owner.user_id)}
+                    className={cn(
+                      "rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-colors",
+                      activeOwnerFilter === owner.user_id
+                        ? "bg-[#2E7040] text-[#F2FFF5]"
+                        : "border border-white/10 text-[#B9B2A6] hover:bg-white/5"
+                    )}
+                  >
+                    {owner.name} ({owner.count})
+                  </button>
+                ))}
+            </>
+          ) : null}
+          {selectedOwnPipelineIds.length > 0 ? (
+            <div className="ml-auto flex items-center gap-2">
+              <span className="text-[11px] text-[#A7E0B6]">
+                {selectedOwnPipelineIds.length} selected
+              </span>
+              <AssignToTeammateMenu
+                pipelineIds={selectedOwnPipelineIds}
+                athleteIds={assignAthleteIds}
+                onAssigned={() => {
+                  setSelectedCompanyIds(new Set());
+                  void load();
+                }}
+              />
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -1808,6 +2069,7 @@ export function TargetListSpreadsheet({
                   fr.contactIndex != null ? row.contacts[fr.contactIndex] : null;
                 const yellow = !fr.hasContact;
                 const yellowCell = yellow ? "bg-[#3A3418]/90" : "";
+                const readOnly = row.is_own === false;
                 const fullName = contact
                   ? formatContactDisplayName(contact.first_name, contact.last_name)
                   : "";
@@ -1817,6 +2079,7 @@ export function TargetListSpreadsheet({
                     key={fr.key}
                     className={cn(
                       "border-t border-white/10 align-top hover:bg-white/[0.03] cursor-pointer",
+                      readOnly && "opacity-80",
                       focusedRow?.pipelineId === row.pipeline_id &&
                         focusedRow.contactIndex === fr.contactIndex &&
                         "ring-1 ring-inset ring-[#2E7040]/50 bg-[#2E7040]/5",
@@ -1834,6 +2097,7 @@ export function TargetListSpreadsheet({
                         <EditableCell
                           value={row.category}
                           placeholder="Category"
+                          disabled={readOnly}
                           onSave={async (next) => {
                             await savePipelinePatch(fr.rowIndex, {
                               product_category: next || null,
@@ -1860,8 +2124,10 @@ export function TargetListSpreadsheet({
                               type="checkbox"
                               className="mt-1 shrink-0 rounded border-white/20 bg-transparent"
                               checked={selectedCompanyIds.has(row.company_id)}
+                              disabled={row.is_own === false}
                               onChange={(e) => {
                                 e.stopPropagation();
+                                if (row.is_own === false) return;
                                 toggleCompanySelected(row.company_id, e.target.checked);
                               }}
                               onClick={(e) => e.stopPropagation()}
@@ -1871,6 +2137,7 @@ export function TargetListSpreadsheet({
                           <EditableCell
                             value={row.company_name}
                             placeholder="Company name"
+                            disabled={row.is_own === false}
                             onSave={async (next) => {
                               if (!next) throw new Error("Company name required");
                               await savePipelinePatch(fr.rowIndex, { company_name: next });
@@ -1888,6 +2155,8 @@ export function TargetListSpreadsheet({
                           />
                             </span>
                           </label>
+                          {row.is_own !== false ? (
+                            <>
                           <ApolloFindContactsInline
                             companyId={row.company_id}
                             companyName={row.company_name}
@@ -1933,11 +2202,32 @@ export function TargetListSpreadsheet({
                               removingPipelineId === row.pipeline_id
                             }
                           />
+                            </>
+                          ) : (
+                            <span className="text-[10px] text-[#8E877A]">Assigned to teammate (read-only)</span>
+                          )}
                         </div>
                       ) : (
                         <span aria-hidden="true"></span>
                       )}
                     </Td>
+
+                    {isAthlete ? (
+                      <Td className={yellowCell}>
+                        {fr.showCompany ? (
+                          <span
+                            className={cn(
+                              "text-[12px]",
+                              row.is_own !== false ? "font-medium text-[#A7E0B6]" : "text-[#D7D0C4]"
+                            )}
+                          >
+                            {row.is_own !== false ? "You" : row.owner_name || "—"}
+                          </span>
+                        ) : (
+                          <span aria-hidden="true"></span>
+                        )}
+                      </Td>
+                    ) : null}
 
                     {isMaster ? (
                       <Td className={yellowCell}>
@@ -1967,6 +2257,7 @@ export function TargetListSpreadsheet({
                         <EditableCell
                           value={row.website ?? ""}
                           placeholder="https://…"
+                          disabled={readOnly}
                           onSave={async (next) => {
                             await savePipelinePatch(fr.rowIndex, { company_website: next || null });
                             patchRowLocal(fr.rowIndex, { website: next || null });
@@ -2001,6 +2292,7 @@ export function TargetListSpreadsheet({
                         <EditableCell
                           value={formatMatchScore(row.match_score)}
                           placeholder="—"
+                          disabled={readOnly}
                           onSave={async (next) => {
                             const parsed = parseMatchScoreInput(next);
                             const assigned = row.assigned_athletes ?? [];

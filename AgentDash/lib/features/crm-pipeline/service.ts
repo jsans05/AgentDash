@@ -2,7 +2,7 @@ import { enrichPipelineCardsWithAthleteSports } from "@/lib/crm/enrich-pipeline-
 import { mapPipelineRow } from "@/lib/crm/map-pipeline-card";
 
 export const PIPELINE_CARD_SELECT =
-  "*, companies(name, product_category, managed_by_agency, agency_name, hq_phone, total_funding_printed, latest_funding_stage, headcount_twelve_month_growth, firmographics_enriched_at)";
+  "*, companies(name, product_category, managed_by_agency, agency_name, hq_phone, website, total_funding_printed, latest_funding_stage, headcount_twelve_month_growth, firmographics_enriched_at)";
 
 type SupabaseClientLike = {
   from: (table: string) => any;

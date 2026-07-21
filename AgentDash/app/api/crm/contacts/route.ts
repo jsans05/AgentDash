@@ -314,6 +314,10 @@ export async function POST(req: Request) {
   if (!["email", "linkedin", "other"].includes(outreach_mode)) {
     return NextResponse.json({ error: "invalid outreach_mode" }, { status: 400 });
   }
+  const timezone =
+    body.timezone == null || String(body.timezone).trim() === ""
+      ? null
+      : String(body.timezone).trim();
 
   if (!first_name || !last_name) {
     return NextResponse.json({ error: "first_name and last_name required" }, { status: 400 });
@@ -351,6 +355,7 @@ export async function POST(req: Request) {
     product_description,
     notes,
     outreach_mode,
+    timezone,
   };
 
   const normalizedFirst = normalizeText(first_name);

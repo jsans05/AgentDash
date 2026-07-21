@@ -65,6 +65,9 @@ const PATCH_KEYS = new Set([
   "next_follow_up_at",
   "next_action",
   "follow_up_log",
+  "timezone",
+  "sequence_id",
+  "sequence_started_at",
 ]);
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -162,6 +165,9 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
         current.draft_messages,
         body.draft_messages
       );
+    } else if (key === "timezone") {
+      const v = body.timezone;
+      updates.timezone = v == null || String(v).trim() === "" ? null : String(v).trim();
     } else {
       updates[key] = body[key as keyof typeof body];
     }

@@ -90,8 +90,11 @@ export function Nav() {
         { href: "/consulting", label: "Consulting" },
         { href: "/ai", label: "Mystery Machine" },
         { href: "/master-target-list", label: "Master Target List" },
+        { href: "/prospecting", label: "Prospecting" },
         { href: "/crm", label: "Pipeline" },
+        { href: "/crm/sequence", label: "Sequence" },
         { href: "/crm/analytics", label: "Analytics" },
+        { href: "/crm/variants", label: "My Variants" },
         { href: "/crm/contacts", label: "Contacts" },
         { href: "/crm/drafts", label: "Drafts" },
         { href: "/contracts", label: "Contracts" },
@@ -100,6 +103,7 @@ export function Nav() {
 
   const adminLinks = [
     { href: "/admin/users", label: "Users" },
+    { href: "/admin/assignments", label: "Assignments" },
     { href: "/admin/consulting", label: "Consulting" },
     { href: "/admin/feedback", label: "Feedback" },
     { href: "/admin/import", label: "Import" },
@@ -108,12 +112,16 @@ export function Nav() {
 
   const isActive = (href: string) => {
     if (href === "/crm") return pathname === "/crm";
+    if (href === "/crm/sequence") return pathname === "/crm/sequence" || pathname.startsWith("/crm/sequence/");
     if (href === "/crm/analytics") return pathname === "/crm/analytics";
+    if (href === "/crm/variants") return pathname === "/crm/variants" || pathname.startsWith("/crm/variants/");
     if (href === "/crm/contacts") return pathname === "/crm/contacts" || pathname.startsWith("/crm/contacts/");
     if (href === "/insights") return pathname === "/insights";
     if (href === "/market-intel") return pathname === "/market-intel";
     if (href === "/consulting") return pathname === "/consulting" || pathname.startsWith("/consulting/");
+    if (href === "/prospecting") return pathname === "/prospecting" || pathname.startsWith("/prospecting/");
     if (href === "/admin/users") return pathname === "/admin/users";
+    if (href === "/admin/assignments") return pathname === "/admin/assignments";
     if (href === "/admin/consulting") return pathname === "/admin/consulting";
     if (href === "/admin/feedback") return pathname === "/admin/feedback";
     if (href === "/admin/import") return pathname === "/admin/import";

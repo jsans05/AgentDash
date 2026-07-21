@@ -6,6 +6,7 @@ export const TARGET_LIST_AGENCY_ACTIVITY_COLUMN = "Agency Activity" as const;
 export const ATHLETE_TARGET_LIST_COLUMNS = [
   "Category",
   "Company",
+  "Assigned to",
   "Company Website",
   "Match Score",
   "Contact Name",
@@ -73,5 +74,6 @@ export function targetListColumnWidth(header: string): number {
   if (header === "Company Website") return 32;
   if (header === "Previous Partnerships" || header === "Athletes") return 36;
   if (header === "Match Score") return 12;
+  if (header === "Assigned to") return 16;
   return 22;
 }

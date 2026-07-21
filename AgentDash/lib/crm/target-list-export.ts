@@ -37,6 +37,8 @@ function cellValueForColumn(
       return showCategory ? row.category ?? UNCATEGORIZED_LABEL : "";
     case "Company":
       return showCompany ? row.company_name : "";
+    case "Assigned to":
+      return showCompany ? (row.is_own !== false ? "You" : row.owner_name || "") : "";
     case "Athletes":
       return showCompany ? formatAthletesExport(row.assigned_athletes) : "";
     case "Company Website":

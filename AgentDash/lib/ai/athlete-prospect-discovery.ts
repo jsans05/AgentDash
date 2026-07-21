@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getAthleteAudienceProfile } from "@/lib/athlete-data";
-import { fetchAthleteTargetListRows } from "@/lib/crm/athlete-target-list";
+import { fetchAthleteTargetListRows } from "@/lib/crm/athlete-target-list-server";
 import {
   fetchTaxonomyNodesForSport,
   getTaxonomyBySport,

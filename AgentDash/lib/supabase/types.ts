@@ -143,6 +143,8 @@ export type CrmContact = {
   status_tag: "none" | "green_conversation" | "yellow_authenticated" | "red_bounced";
   archived: boolean;
   outreach_mode: "email" | "linkedin" | "other";
+  /** IANA timezone for local-time outreach analytics */
+  timezone: string | null;
 
   apollo_person_id: string | null;
   apollo_reveal_status: "pending" | "revealed" | null;
@@ -186,6 +188,10 @@ export type CrmCompanyPipeline = {
   id: string;
   company_id: string;
   created_by_user_id: string;
+  /** User who last assigned this card to the current owner. */
+  assigned_by_user_id: string | null;
+  /** When the card was last assigned to the current owner. */
+  assigned_at: string | null;
   status: "in_progress" | "promoted_to_crm";
   pipeline_stage: CrmPipelineStage;
   /** @deprecated Legacy mirror — use pipeline_stage */
@@ -215,8 +221,100 @@ export type CrmCompanyPipeline = {
   outreach_email_subject: string | null;
   outreach_email: string | null;
   sent_at: string | null;
+  /** IANA timezone for the prospect company */
+  timezone: string | null;
+  /** Active outreach sequence template */
+  sequence_id: string | null;
+  /** When the multi-channel sequence was started for this card */
+  sequence_started_at: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type OutreachSequence = {
+  id: string;
+  name: string;
+  version: number;
+  is_active: boolean;
+  created_by_user_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type OutreachSequenceStep = {
+  id: string;
+  sequence_id: string;
+  step_order: number;
+  day_offset: number;
+  channel:
+    | "cold_email"
+    | "support_email"
+    | "instagram_dm"
+    | "instagram_engage"
+    | "linkedin"
+    | "cold_call";
+  action_label: string;
+  short_code: string;
+  phase: string;
+  expects_response: boolean;
+  is_optional: boolean;
+  guidance: string | null;
+  created_at: string;
+};
+
+export type CrmCardSequenceState = {
+  id: string;
+  card_id: string;
+  step_id: string;
+  touch_status: "pending" | "done" | "skipped";
+  response_status: "awaiting" | "responded" | "no_response";
+  done_at: string | null;
+  variant_id: string | null;
+  outcome: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type OutreachVariant = {
+  id: string;
+  created_by_user_id: string;
+  variant_label: "A" | "B" | "C" | "D" | "E";
+  name: string | null;
+  channel:
+    | "cold_email"
+    | "support_email"
+    | "instagram_dm"
+    | "instagram_engage"
+    | "linkedin"
+    | "cold_call";
+  sequence_step_id: string | null;
+  subject: string | null;
+  body: string;
+  is_active: boolean;
+  archived: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CrmOutreachEvent = {
+  id: string;
+  pipeline_card_id: string | null;
+  contact_id: string | null;
+  user_id: string;
+  event_type: "touch" | "response";
+  channel: string;
+  sequence_step_id: string | null;
+  variant_id: string | null;
+  product_category: string | null;
+  occurred_at: string;
+  outcome: string | null;
+  responding_to_event_id: string | null;
+  notes: string | null;
+  recipient_timezone: string | null;
+  recipient_local_hour: number | null;
+  recipient_local_dow: number | null;
+  created_at: string;
 };
 
 export type AiEmailTemplate = {

@@ -14,6 +14,7 @@ import {
   type PotentialAthleteEntry,
 } from "@/lib/crm/potential-athletes";
 import { pickContactOutreachDraft } from "@/lib/crm/target-list-outreach";
+import { canonicalizeCompanyCategory } from "@/lib/crm/company-category";
 
 export type MasterTargetListAthlete = {
   athlete_id: string;
@@ -129,10 +130,13 @@ export async function fetchMasterTargetListRows(
   const rosterSet = new Set(rosterAthleteIds.map(String).filter(Boolean));
   if (rosterSet.size === 0) return [];
 
-  const { data: pipelineRows, error: pipelineErr } = await supabase
-    .from("crm_companies_pipeline")
-    .select(
-      `
+  const PAGE = 1000;
+  const pipelineRows: Record<string, unknown>[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error: pipelineErr } = await supabase
+      .from("crm_companies_pipeline")
+      .select(
+        `
         id,
         company_id,
         potential_athletes,
@@ -144,17 +148,24 @@ export async function fetchMasterTargetListRows(
         archived,
         companies(name, website, hq_phone, product_category, notes, ${COMPANY_FIRMOGRAPHICS_DB_COLUMNS})
       `
-    )
-    .eq("created_by_user_id", createdByUserId)
-    .eq("archived", false);
-  if (pipelineErr) throw new Error(pipelineErr.message);
+      )
+      .eq("created_by_user_id", createdByUserId)
+      .eq("archived", false)
+      .range(from, from + PAGE - 1);
+    if (pipelineErr) throw new Error(pipelineErr.message);
+    const page = (data ?? []) as Record<string, unknown>[];
+    pipelineRows.push(...page);
+    if (page.length < PAGE) break;
+  }
 
-  const assigned = (pipelineRows ?? []).filter((r: { potential_athletes?: unknown }) =>
+  const assigned = pipelineRows.filter((r: { potential_athletes?: unknown }) =>
     cardMatchesRoster(r.potential_athletes, rosterSet)
   );
   if (assigned.length === 0) return [];
 
-  const companyIds = [...new Set(assigned.map((r: { company_id: string }) => r.company_id).filter(Boolean))];
+  const companyIds = [
+    ...new Set(assigned.map((r) => String(r.company_id ?? "")).filter(Boolean)),
+  ];
 
   type ContactRow = {
     contact_id: string;
@@ -243,7 +254,7 @@ export async function fetchMasterTargetListRows(
       pipeline_id: String(r.id),
       company_id: String(r.company_id),
       company_name: String((companyRecord?.name as string | undefined) ?? ""),
-      category: companyRecord?.product_category ? String(companyRecord.product_category) : null,
+      category: canonicalizeCompanyCategory(companyRecord?.product_category),
       match_score: maxMatchScoreFromAthletes(assignedAthletes),
       website: (companyRecord?.website as string | null | undefined) ?? null,
       hq_phone: (companyRecord?.hq_phone as string | null | undefined) ?? null,
@@ -254,6 +265,9 @@ export async function fetchMasterTargetListRows(
       outreach_email: (r.outreach_email as string | null | undefined) ?? null,
       contacts,
       assigned_athletes: assignedAthletes,
+      owner_user_id: createdByUserId,
+      owner_name: "You",
+      is_own: true,
       ...mapCompanyFirmographics(companyRecord),
     };
   });

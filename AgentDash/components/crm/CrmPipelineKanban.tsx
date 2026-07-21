@@ -37,6 +37,9 @@ import type { FollowUpLogEntry } from "@/lib/crm/pipeline-cadence";
 import { PipelineDueDrawer, PipelineDuePill } from "@/components/crm/PipelineDueDrawer";
 import { batchDeletePipelineCards } from "@/lib/crm/batch-delete-pipeline-cards";
 import { PipelineAddBrandModal } from "@/components/crm/PipelineAddBrandModal";
+import { AssignToTeammateMenu } from "@/components/crm/AssignToTeammateMenu";
+import { SequenceStepStrip } from "@/components/crm/SequenceStepStrip";
+import { TimezoneSelect } from "@/components/crm/TimezoneSelect";
 import { cadenceStepLabel, countDueInStage, getCadenceBadge } from "@/lib/crm/pipeline-cadence-ui";
 
 export type { PipelineStage } from "@/lib/crm/pipeline-stages";
@@ -87,6 +90,11 @@ export type PipelineCard = {
   managed_by_agency?: boolean;
   agency_name?: string | null;
   hq_phone?: string | null;
+  /** IANA timezone for recipient-local timing */
+  timezone?: string | null;
+  sequence_id?: string | null;
+  sequence_started_at?: string | null;
+  company_website?: string | null;
   total_funding_printed?: string | null;
   latest_funding_stage?: string | null;
   headcount_twelve_month_growth?: number | null;
@@ -775,6 +783,19 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
               </option>
             ))}
           </select>
+          <AssignToTeammateMenu
+            pipelineIds={[...selectedIds]}
+            disabled={bulkMoving || bulkDeleting}
+            onAssigned={(result) => {
+              const gone = new Set([...result.transferred, ...result.already_had]);
+              setCards((prev) => prev.filter((c) => !gone.has(c.id)));
+              setSelectedIds((prev) => {
+                const next = new Set(prev);
+                for (const id of gone) next.delete(id);
+                return next;
+              });
+            }}
+          />
           <Button
             type="button"
             variant="destructive"
@@ -923,6 +944,14 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
                     >
                       <div className="flex min-w-0 items-center gap-1.5">
                         <span className="truncate text-sm font-medium text-[#F4F1EB]">{card.company_name}</span>
+                        {card.sequence_started_at && !card.responded_at && (
+                          <span
+                            className="shrink-0 rounded border border-[#2E7040]/30 bg-[#1A2A20] px-1 py-0 text-[9px] font-medium text-[#A7E0B6]"
+                            title="Sequence active"
+                          >
+                            Seq
+                          </span>
+                        )}
                         {(() => {
                           const badge = getCadenceBadge(card);
                           if (!badge) return null;
@@ -2066,6 +2095,18 @@ function ResearchTab({
       {field("Website", "website_url", "https://...")}
       {field("Instagram", "instagram_handle", "@brand")}
       {field("HQ Number", "hq_phone", "+1 (555) 555-5555")}
+      <label className="block">
+        <span className="text-xs font-medium text-[#B9B2A6]">Timezone</span>
+        <div className="mt-1">
+          <TimezoneSelect
+            value={card.timezone ?? null}
+            websiteHint={card.company_website ?? card.website_url}
+            onChange={(tz) => {
+              if (tz !== (card.timezone ?? null)) void savePatch({ timezone: tz });
+            }}
+          />
+        </div>
+      </label>
       {field("Support Email", "support_email_v2", "")}
       <CompanyContactsTable companyId={card.company_id} companyName={card.company_name} />
       <CompanyDescriptionField card={card} savePatch={savePatch} />
@@ -2632,12 +2673,16 @@ function ActivityTab({
         <SavedFlash show={savedFlash} />
       </div>
 
+      <div className="space-y-2">
+        <div className="text-xs font-medium text-[#B9B2A6]">Outreach sequence</div>
+        <SequenceStepStrip cardId={card.id} />
+      </div>
+
       {(card.pipeline_stage === "outreach" || card.pipeline_stage === "follow_up") && !card.responded_at && (
         <div className="rounded-lg border border-white/10 bg-[#151A17] p-3 space-y-3">
-          <div className="text-xs font-medium text-[#B9B2A6]">Cadence actions</div>
+          <div className="text-xs font-medium text-[#B9B2A6]">Legacy quick actions</div>
           <p className="text-xs text-[#8E877A]">
-            Send → 3 weekly follow-ups → call after email 3 → FU3 → 2-week cooling → Ghost. Best window: Tue–Thu
-            mornings.
+            Prefer the sequence strip above. These buttons still update the old cadence log if needed.
           </p>
           <div className="flex flex-wrap gap-2">
             <Button size="sm" variant="secondary" onClick={() => markTouch("email")}>

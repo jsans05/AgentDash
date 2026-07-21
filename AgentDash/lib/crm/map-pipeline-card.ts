@@ -4,6 +4,7 @@ export type CompaniesEmbed = {
   managed_by_agency?: boolean | null;
   agency_name?: string | null;
   hq_phone?: string | null;
+  website?: string | null;
   total_funding_printed?: string | null;
   latest_funding_stage?: string | null;
   headcount_twelve_month_growth?: number | null;
@@ -32,6 +33,10 @@ export function mapPipelineRow(
     companies && typeof companies === "object" && companies.hq_phone != null && companies.hq_phone !== ""
       ? String(companies.hq_phone)
       : null;
+  const company_website =
+    companies && typeof companies === "object" && companies.website != null && companies.website !== ""
+      ? String(companies.website)
+      : null;
   const total_funding_printed =
     companies && typeof companies === "object" && companies.total_funding_printed != null
       ? String(companies.total_funding_printed)
@@ -57,6 +62,7 @@ export function mapPipelineRow(
     managed_by_agency,
     agency_name,
     hq_phone,
+    company_website,
     total_funding_printed,
     latest_funding_stage,
     headcount_twelve_month_growth,

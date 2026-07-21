@@ -1,6 +1,11 @@
 import { createServerClient } from "@/lib/supabase/server";
 import { requireNonAccounting } from "@/lib/auth";
 import { NextResponse } from "next/server";
+import {
+  insertOutreachEvent,
+  resolveTimezoneForCard,
+} from "@/lib/crm/outreach-events-server";
+import { mapLegacyChannel } from "@/lib/crm/outreach-sequence";
 
 export async function GET(
   _req: Request,
@@ -53,7 +58,7 @@ export async function POST(
   const outreach_at_raw = body.outreach_at != null ? String(body.outreach_at) : null;
   const outreach_at = outreach_at_raw && outreach_at_raw.trim() ? outreach_at_raw.trim() : null;
 
-  const insertPayload: any = {
+  const insertPayload: Record<string, unknown> = {
     contact_id,
     athlete_id,
     user_id: profile.user_id,
@@ -69,6 +74,24 @@ export async function POST(
     .single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // Dual-write into unified outreach events
+  try {
+    const tz = await resolveTimezoneForCard(supabase, { contactId: contact_id });
+    await insertOutreachEvent(supabase, {
+      userId: profile.user_id,
+      contactId: contact_id,
+      eventType: "touch",
+      channel: mapLegacyChannel(outreach_channel),
+      occurredAt: outreach_at,
+      notes: outreach_notes,
+      outcome: "sent",
+      variantId: body.variant_id ?? null,
+      timezone: tz,
+    });
+  } catch {
+    // Legacy log already saved — don't fail the request on event dual-write
+  }
 
   return NextResponse.json({ ok: true, log: data });
 }

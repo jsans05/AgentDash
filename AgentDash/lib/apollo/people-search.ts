@@ -46,6 +46,16 @@ function mapPerson(raw: Record<string, unknown>, organizationName: string): Apol
     title: String(raw.title ?? "").trim(),
     seniority: typeof raw.seniority === "string" ? raw.seniority : undefined,
     organization_name: String(org?.name ?? organizationName).trim() || organizationName,
+    organization_domain:
+      typeof org?.primary_domain === "string"
+        ? org.primary_domain.trim()
+        : typeof org?.website_url === "string"
+          ? org.website_url.trim()
+          : undefined,
+    organization_id: org?.id != null ? String(org.id) : undefined,
+    city: typeof raw.city === "string" ? raw.city : undefined,
+    state: typeof raw.state === "string" ? raw.state : undefined,
+    country: typeof raw.country === "string" ? raw.country : undefined,
     linkedin_url,
     email_status:
       typeof raw.email_status === "string"
@@ -54,6 +64,7 @@ function mapPerson(raw: Record<string, unknown>, organizationName: string): Apol
           ? "verified"
           : undefined,
     has_email: raw.has_email === true,
+    has_phone: raw.has_direct_phone === true || raw.has_phone === true,
   };
 }
 
@@ -148,4 +159,81 @@ export async function searchPartnershipContacts(
   overrides?: ApolloPeopleSearchOverrides
 ): Promise<ApolloSearchPerson[]> {
   return searchPeopleAtOrganization(org, { searchMode: "partnership", overrides });
+}
+
+export type GlobalPeopleSearchFilters = {
+  person_titles?: string[];
+  person_seniorities?: string[];
+  person_locations?: string[];
+  organization_locations?: string[];
+  q_keywords?: string;
+  q_organization_name?: string;
+  organization_domains?: string[];
+  page?: number;
+  per_page?: number;
+};
+
+export type GlobalPeopleSearchResponse = {
+  people: ApolloSearchPerson[];
+  pagination?: { page?: number; per_page?: number; total_entries?: number };
+};
+
+/**
+ * Free-form Apollo people search (not scoped to a resolved org).
+ * Uses the same /mixed_people/api_search endpoint as org-scoped search.
+ */
+export async function searchPeopleGlobal(
+  filters: GlobalPeopleSearchFilters
+): Promise<GlobalPeopleSearchResponse> {
+  const per_page = Math.min(
+    filters.per_page ?? apolloMaxPeoplePerRequest(),
+    apolloMaxPeoplePerRequest()
+  );
+  const page = filters.page ?? 1;
+
+  const query: Record<string, string | number | boolean | string[] | undefined> = {
+    contact_email_status: [...APOLLO_DEFAULT_CONTACT_EMAIL_STATUS],
+    page,
+    per_page,
+  };
+
+  if (filters.person_titles?.length) {
+    query.person_titles = filters.person_titles;
+    query.include_similar_titles = APOLLO_DEFAULT_INCLUDE_SIMILAR_TITLES;
+  }
+  if (filters.person_seniorities?.length) {
+    query.person_seniorities = filters.person_seniorities;
+  }
+  if (filters.person_locations?.length) {
+    query.person_locations = filters.person_locations;
+  }
+  if (filters.organization_locations?.length) {
+    query.organization_locations = filters.organization_locations;
+  }
+  if (filters.q_keywords?.trim()) {
+    query.q_keywords = filters.q_keywords.trim();
+  }
+  if (filters.q_organization_name?.trim()) {
+    query.q_organization_name = filters.q_organization_name.trim();
+  }
+  if (filters.organization_domains?.length) {
+    query.q_organization_domains_list = filters.organization_domains;
+  }
+
+  const data = await fetchApollo<PeopleSearchResponse>("/mixed_people/api_search", { query });
+  const people = Array.isArray(data.people) ? data.people : [];
+
+  const out: ApolloSearchPerson[] = [];
+  const seen = new Set<string>();
+  for (const raw of people) {
+    const mapped = mapPerson(raw, "");
+    if (!mapped || seen.has(mapped.apollo_person_id)) continue;
+    seen.add(mapped.apollo_person_id);
+    out.push(mapped);
+  }
+
+  return {
+    people: out,
+    pagination: data.pagination,
+  };
 }

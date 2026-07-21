@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { TargetListActionDialog } from "@/components/crm/TargetListActionDialog";
+import { TimezoneSelect } from "@/components/crm/TimezoneSelect";
 import { CONTACT_STATUS_OPTIONS } from "@/lib/crm/contact-filter-sort";
 import type { CrmContact } from "@/lib/supabase/types";
 import { TAXONOMY_NON_ENDEMIC_GLOBAL_SPORT } from "@/lib/taxonomy-constants";
@@ -67,6 +68,7 @@ type Props = {
     status_tag?: CrmContact["status_tag"];
     archived?: boolean;
     outreach_mode?: CrmContact["outreach_mode"];
+    timezone?: string | null;
   };
 
   taxonomyNodes: TaxonomyNode[];
@@ -83,6 +85,16 @@ const SECTION_TITLE = "text-lg font-semibold text-[#F4F1EB]";
 const OUTREACH_MODE_OPTIONS: { value: CrmContact["outreach_mode"]; label: string }[] = [
   { value: "email", label: "Email" },
   { value: "linkedin", label: "LinkedIn" },
+  { value: "other", label: "Other" },
+];
+
+const OUTREACH_CHANNEL_OPTIONS = [
+  { value: "cold_email", label: "Cold email" },
+  { value: "support_email", label: "Support email" },
+  { value: "linkedin", label: "LinkedIn" },
+  { value: "cold_call", label: "Cold call" },
+  { value: "instagram_dm", label: "Instagram DM" },
+  { value: "instagram_engage", label: "Instagram engage" },
   { value: "other", label: "Other" },
 ];
 
@@ -112,6 +124,7 @@ export function CrmContactEditor(props: Props) {
   const [outreachMode, setOutreachMode] = useState<CrmContact["outreach_mode"]>(
     props.initial.outreach_mode ?? "email"
   );
+  const [timezone, setTimezone] = useState<string | null>(props.initial.timezone ?? null);
 
   const [taxonomyId, setTaxonomyId] = useState<string | null>(props.initial.taxonomy_id);
   const [productDescription, setProductDescription] = useState(props.initial.product_description);
@@ -128,7 +141,7 @@ export function CrmContactEditor(props: Props) {
   const [bannerSuccess, setBannerSuccess] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
-  const [outreachChannel, setOutreachChannel] = useState("other");
+  const [outreachChannel, setOutreachChannel] = useState("cold_email");
   const [outreachNotes, setOutreachNotes] = useState("");
   const [outreachAthleteId, setOutreachAthleteId] = useState<string | null>(
     props.initial.selectedAthleteIds[0] ?? null
@@ -198,6 +211,7 @@ export function CrmContactEditor(props: Props) {
         product_description: productDescription || null,
         notes: notes || null,
         outreach_mode: outreachMode,
+        timezone,
         ...(mode === "edit"
           ? {
               status_tag: statusTag,
@@ -514,6 +528,13 @@ export function CrmContactEditor(props: Props) {
             </select>
           </label>
 
+          <label className={LABEL_CLASS}>
+            Timezone
+            <div className="mt-1">
+              <TimezoneSelect value={timezone} onChange={setTimezone} />
+            </div>
+          </label>
+
           {mode === "edit" ? (
             <>
               <label className={LABEL_CLASS}>
@@ -676,11 +697,17 @@ export function CrmContactEditor(props: Props) {
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <label className={LABEL_CLASS}>
               Channel
-              <input
+              <select
                 className={INPUT_CLASS}
                 value={outreachChannel}
                 onChange={(e) => setOutreachChannel(e.target.value)}
-              />
+              >
+                {OUTREACH_CHANNEL_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
             </label>
             <label className={LABEL_CLASS}>
               Athlete (optional)

@@ -118,6 +118,7 @@ export default async function EditCrmContactPage({
               status_tag: contact.status_tag ?? "none",
               archived: Boolean(contact.archived),
               outreach_mode: contact.outreach_mode ?? "email",
+              timezone: (contact as { timezone?: string | null }).timezone ?? null,
               email_drafts: Array.isArray((contact as { email_drafts?: unknown }).email_drafts)
                 ? ((contact as { email_drafts: unknown[] }).email_drafts as CrmContactEmailDraft[])
                 : [],

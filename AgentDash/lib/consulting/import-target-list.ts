@@ -68,7 +68,7 @@ export type ConsultingTargetListUpsertSummary = {
   row_errors: string[];
 };
 
-function rowsToObjects(rows: unknown[][]): Record<string, unknown>[] {
+export function rowsToObjects(rows: unknown[][]): Record<string, unknown>[] {
   if (!rows.length) return [];
   const headers = (rows[0] ?? []).map((h) => String(h ?? "").trim());
   return (rows.slice(1) as unknown[][]).map((row) => {
@@ -167,14 +167,14 @@ export function buildConsultingTargetListColumnMap(
     return null;
   }
 
-  const companyCol = getCol("Company", "Brand");
+  const companyCol = getCol("Company", "Brand", "Company Name", "Brand Name");
   if (!companyCol) {
     return { error: "Missing required column: Company or Brand" };
   }
 
   return {
     companyCol,
-    industryCategoryCol: getCol("Category", "Industry Category"),
+    industryCategoryCol: getCol("Category", "Industry Category", "Industry"),
     websiteCol: getCol("Company Website", "Website"),
     matchScoreCol: getCol("Match Score"),
     companyDescriptionCol: getCol("Company Description", "Description"),
@@ -182,11 +182,11 @@ export function buildConsultingTargetListColumnMap(
     hqPhoneCol: getCol("HQ Number", "Company Phone", "HQ Phone", "HQ"),
     firstCol: getCol("First"),
     lastCol: getCol("Last"),
-    contactCol: getCol("Contact Name", "Contact"),
-    titleCol: getCol("Role", "Title"),
+    contactCol: getCol("Contact Name", "Contact", "Name"),
+    titleCol: getCol("Role", "Title", "Job Title"),
     emailCol: getCol("Email", "E-mail", "Email Address", "Email/ Linkedin", "Email/Linkedin", "email/linkedin"),
     phoneCol: getCol("Number", "Phone", "Contact Phone", "Contact Number"),
-    linkedinCol: getCol("LinkedIn", "Linkedin", "LinkedIn URL"),
+    linkedinCol: getCol("LinkedIn", "Linkedin", "LinkedIn URL", "LinkedIn Profile"),
   };
 }
 

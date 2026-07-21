@@ -280,6 +280,13 @@ export async function PATCH(
     return NextResponse.json({ error: "invalid outreach_mode" }, { status: 400 });
   }
 
+  const timezone =
+    Object.prototype.hasOwnProperty.call(body, "timezone")
+      ? body.timezone == null || String(body.timezone).trim() === ""
+        ? null
+        : String(body.timezone).trim()
+      : existing.timezone ?? null;
+
   let status_tag = existing.status_tag;
   if (body.status_tag != null) {
     const nextStatus = String(body.status_tag);
@@ -337,6 +344,7 @@ export async function PATCH(
       product_description,
       notes,
       outreach_mode,
+      timezone,
       status_tag,
       archived,
       ...(body.email_drafts !== undefined ? { email_drafts: sanitizeEmailDrafts(body.email_drafts) } : {}),

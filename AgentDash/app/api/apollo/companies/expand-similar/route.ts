@@ -47,7 +47,7 @@ export async function POST(req: Request) {
       : [];
 
     if (body.athlete_id) {
-      const { fetchAthleteTargetListRows } = await import("@/lib/crm/athlete-target-list");
+      const { fetchAthleteTargetListRows } = await import("@/lib/crm/athlete-target-list-server");
       const targetRows = await fetchAthleteTargetListRows(
         supabaseAdmin,
         profile.user_id,
