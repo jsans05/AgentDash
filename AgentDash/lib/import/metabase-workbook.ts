@@ -16,8 +16,8 @@ import {
   toStringOrNull,
 } from "@/lib/import/social-audience";
 import { normalizeForNameMatch, splitName } from "@/lib/import/name-match";
+import { readXlsxSheetTables } from "@/lib/import/read-xlsx-sheets";
 import Papa from "papaparse";
-import readXlsxFile, { readSheet } from "read-excel-file/node";
 
 export type MetabaseSheetKind = "Roster" | "Social" | "Audience";
 
@@ -51,14 +51,19 @@ export type MetabaseUploadPart = {
 const IGNORED_ROSTER_HEADERS = new Set([
   "in salesforce?",
   "in salesforce",
+  "in_salesforce",
   "in w3?",
   "in w3",
+  "in_w3",
 ]);
 
 const ROSTER_HEADER_MAP: Record<string, string> = {
   name: "name",
   agent: "agent",
   agents: "agent",
+  agent_emails: "agent",
+  "agent emails": "agent",
+  "agent email": "agent",
   sport: "sport",
 };
 
@@ -69,7 +74,15 @@ export function metabaseCreateKey(displayName: string): string {
 export function detectMetabaseRosterHeader(cells: string[]): boolean {
   return (
     cells.some((c) => c === "name") &&
-    (cells.some((c) => c === "sport") || cells.some((c) => c === "agent" || c === "agents"))
+    (cells.some((c) => c === "sport") ||
+      cells.some(
+        (c) =>
+          c === "agent" ||
+          c === "agents" ||
+          c === "agent_emails" ||
+          c === "agent emails" ||
+          c === "agent email"
+      ))
   );
 }
 
@@ -336,6 +349,14 @@ function sheetPartFromKind(
 function formatInvalidSignatureHint(buffer: Buffer, fileName: string): string {
   const hex = buffer.subarray(0, 4).toString("hex");
   const sample = buffer.subarray(0, 40).toString("utf8").replace(/\s+/g, " ").trim();
+  const looksZip = buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b;
+  if (looksZip) {
+    return (
+      `Could not parse "${fileName}" as Excel (.xlsx) even though it looks like a ZIP/xlsx ` +
+      `(signature 0x${hex}). Try re-downloading from Metabase, or export as .csv instead. ` +
+      `(preview: "${sample.slice(0, 60)}${sample.length > 60 ? "…" : ""}")`
+    );
+  }
   return (
     `Could not read "${fileName}" as Excel (.xlsx). File signature: 0x${hex}. ` +
     `Metabase "Download" is often CSV — re-download as .csv, or combine sheets into a real .xlsx workbook. ` +
@@ -344,8 +365,9 @@ function formatInvalidSignatureHint(buffer: Buffer, fileName: string): string {
 }
 
 async function parseXlsxMultiSheet(buffer: Buffer): Promise<MetabaseParsedWorkbook> {
-  const workbook = await readXlsxFile(buffer);
-  const sheetNames = workbook.map((sheet) => String(sheet.sheet ?? ""));
+  const tables = await readXlsxSheetTables(buffer);
+  const sheetNames = tables.map((t) => t.name);
+  const rowsByName = new Map(tables.map((t) => [t.name, t.rows] as const));
 
   const rosterSheetName = findSheetName(
     sheetNames,
@@ -371,21 +393,18 @@ async function parseXlsxMultiSheet(buffer: Buffer): Promise<MetabaseParsedWorkbo
   out.sheetNames = sheetNames;
 
   if (rosterSheetName) {
-    const rows = (await readSheet(buffer, rosterSheetName)) as unknown[][];
-    out = mergeParsed(out, sheetPartFromKind("Roster", rows));
+    out = mergeParsed(out, sheetPartFromKind("Roster", rowsByName.get(rosterSheetName) ?? []));
   }
   if (socialSheetName) {
-    const rows = (await readSheet(buffer, socialSheetName)) as unknown[][];
-    out = mergeParsed(out, sheetPartFromKind("Social", rows));
+    out = mergeParsed(out, sheetPartFromKind("Social", rowsByName.get(socialSheetName) ?? []));
   }
   if (audienceSheetName) {
-    const rows = (await readSheet(buffer, audienceSheetName)) as unknown[][];
-    out = mergeParsed(out, sheetPartFromKind("Audience", rows));
+    out = mergeParsed(out, sheetPartFromKind("Audience", rowsByName.get(audienceSheetName) ?? []));
   }
 
   // Single-sheet xlsx with no matching names: infer from headers
   if (!out.sheets.roster && !out.sheets.social && !out.sheets.audience && sheetNames.length === 1) {
-    const rows = (await readSheet(buffer, sheetNames[0]!)) as unknown[][];
+    const rows = rowsByName.get(sheetNames[0]!) ?? [];
     const headerIdx = findHeaderRowIndex(rows, () => true);
     const headerCells = (rows[headerIdx] ?? []).map((c) =>
       String(c ?? "")
@@ -441,17 +460,23 @@ async function parseOneUploadPart(part: MetabaseUploadPart): Promise<MetabasePar
     }
     // Explicit hint for single-sheet xlsx
     if (kindHint) {
-      const workbook = await readXlsxFile(buffer);
-      const sheetName = String(workbook[0]?.sheet ?? "Sheet1");
-      const rows = (await readSheet(buffer, sheetName)) as unknown[][];
+      const tables = await readXlsxSheetTables(buffer);
+      const rows = tables[0]?.rows ?? [];
       return sheetPartFromKind(kindHint, rows);
+    }
+    // Filename hint for Metabase single-table downloads (sheet often named "Query result")
+    const fromName = inferKindFromFileName(fileName);
+    if (fromName && multi.sheetNames.length === 1) {
+      const tables = await readXlsxSheetTables(buffer);
+      const rows = tables[0]?.rows ?? [];
+      return sheetPartFromKind(fromName, rows);
     }
     throw new Error(
       `No Roster / Social / Audience sheets found in "${fileName}". Sheet names: ${multi.sheetNames.join(", ") || "(none)"}.`
     );
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (/invalid signature/i.test(msg)) {
+    if (/invalid signature/i.test(msg) || /Could not parse Excel workbook/i.test(msg)) {
       if (looksLikeCsvText(buffer)) {
         const rows = parseCsvToRows(buffer);
         const kind =

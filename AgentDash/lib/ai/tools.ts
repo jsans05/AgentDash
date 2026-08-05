@@ -42,6 +42,7 @@ import { requireConsultingProfileAccess, ConsultingAccessError } from "@/lib/con
 import { expandSimilarCompanies, loadExpandSeedsFromCompanyIds } from "@/lib/apollo/expand-similar";
 import { getConsultingTargetListDomains, fetchConsultingTargetListRows } from "@/lib/crm/consulting-target-list";
 import { getOrCreateCompanyByName } from "@/lib/consulting/companies";
+import { assertNotBlockedCompanyName } from "@/lib/import/blocked-company-names";
 import { domainFromWebsite, normalizeDomainForCompare } from "@/lib/apollo/org-search-utils";
 import { isEffectivelyUncategorizedCompanyCategory } from "@/lib/crm/company-category";
 import { discoverAthleteProspectsWithClaude } from "@/lib/ai/claude-prospect-discovery";
@@ -419,6 +420,7 @@ export async function createAITools(profile: Profile) {
   }): Promise<string> => {
     const name = String(input.name ?? "").trim();
     if (!name) throw new Error("company name required");
+    assertNotBlockedCompanyName(name);
     const website = String(input.website ?? "").trim() || null;
     const category = String(input.category ?? "").trim() || null;
 
@@ -2070,6 +2072,7 @@ export async function createAITools(profile: Profile) {
         }
 
         try {
+          assertNotBlockedCompanyName(company_name);
           // Match companies by name case-insensitively, prefer exact casing.
           const { data: coRows, error: coErr } = await supabase
             .from("companies")

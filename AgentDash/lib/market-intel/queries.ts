@@ -343,12 +343,15 @@ export type EnrichmentFilter = "all" | "enriched" | "not_enriched";
 
 export type PlacementSourceFilter = "all" | "teams_only" | "venues_only" | "both";
 
+export type PlacementCountBucket = "1" | "2_3" | "4_9" | "10_plus";
+
 export type BrandFilters = {
   enrichment: EnrichmentFilter;
   revenueBuckets: RevenueBucket[];
   employeeBuckets: EmployeeBucket[];
   fundingStages: string[];
   placementSource: PlacementSourceFilter;
+  placementCountBuckets: PlacementCountBucket[];
   sportTypes: string[];
   teamOwners: string[];
   venueKeys: string[];
@@ -360,6 +363,7 @@ export const DEFAULT_BRAND_FILTERS: BrandFilters = {
   employeeBuckets: [],
   fundingStages: [],
   placementSource: "all",
+  placementCountBuckets: [],
   sportTypes: [],
   teamOwners: [],
   venueKeys: [],
@@ -389,7 +393,10 @@ export function employeeBucketForBrand(
   return "over_5k";
 }
 
-function brandSportTypes(brand: AggregatedBrand, venueSportByKey: Map<string, string | null>): string[] {
+export function brandSportTypes(
+  brand: AggregatedBrand,
+  venueSportByKey: Map<string, string | null>
+): string[] {
   const sports = new Set<string>();
   if (brand.teamPlacements.length > 0) sports.add("nascar");
   for (const placement of brand.venuePlacements) {
@@ -397,6 +404,45 @@ function brandSportTypes(brand: AggregatedBrand, venueSportByKey: Map<string, st
     if (sport) sports.add(sport.toLowerCase());
   }
   return [...sports];
+}
+
+export function brandQualifiesForAutoFirmographics(
+  brand: AggregatedBrand,
+  venueSportByKey: Map<string, string | null>
+): boolean {
+  return (
+    brandPlacementCount(brand) > 3 ||
+    brandSportTypes(brand, venueSportByKey).length >= 2
+  );
+}
+
+export function hasBrandApolloFirmographics(
+  enrichment: BrandEnrichmentRow | undefined
+): boolean {
+  if (!enrichment) return false;
+  return (
+    Boolean(enrichment.apollo_organization_id) ||
+    enrichment.annual_revenue != null ||
+    enrichment.estimated_num_employees != null
+  );
+}
+
+function placementCountMatchesBucket(
+  count: number,
+  bucket: PlacementCountBucket
+): boolean {
+  switch (bucket) {
+    case "1":
+      return count === 1;
+    case "2_3":
+      return count >= 2 && count <= 3;
+    case "4_9":
+      return count >= 4 && count <= 9;
+    case "10_plus":
+      return count >= 10;
+    default:
+      return false;
+  }
 }
 
 function numericOrNegInfinity(value: number | null | undefined): number {
@@ -583,6 +629,17 @@ export function filterBrands(
       if (!filters.venueKeys.some((key) => keys.has(key))) return false;
     }
 
+    if (filters.placementCountBuckets.length > 0) {
+      const count = brandPlacementCount(brand);
+      if (
+        !filters.placementCountBuckets.some((bucket) =>
+          placementCountMatchesBucket(count, bucket)
+        )
+      ) {
+        return false;
+      }
+    }
+
     if (!q) return true;
 
     if (brand.displayName.toLowerCase().includes(q) || brand.key.includes(q)) {
@@ -620,6 +677,7 @@ export function countActiveBrandFilters(filters: BrandFilters): number {
   count += filters.employeeBuckets.length;
   count += filters.fundingStages.length;
   if (filters.placementSource !== "all") count += 1;
+  count += filters.placementCountBuckets.length;
   count += filters.sportTypes.length;
   count += filters.teamOwners.length;
   count += filters.venueKeys.length;

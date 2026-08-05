@@ -6,6 +6,7 @@ import {
   PIPELINE_CARD_SELECT,
 } from "@/lib/features/crm-pipeline/service";
 import { resolveCompanyWebsiteForTargetList } from "@/lib/crm/resolve-company-website-for-target-list";
+import { assertNotBlockedCompanyName } from "@/lib/import/blocked-company-names";
 import { NextResponse } from "next/server";
 
 async function getOrCreateCompanyByNameCaseInsensitive(
@@ -14,6 +15,7 @@ async function getOrCreateCompanyByNameCaseInsensitive(
 ): Promise<{ company_id: string; name: string }> {
   const trimmed = companyName.trim();
   if (!trimmed) throw new Error("company_name required");
+  assertNotBlockedCompanyName(trimmed);
 
   const { data: existing, error: existingError } = await supabaseAdmin
     .from("companies")

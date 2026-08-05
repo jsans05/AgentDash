@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import fs from "node:fs";
+import path from "node:path";
 import { parseMetabaseUploads } from "@/lib/import/metabase-workbook";
+import { readXlsxSheetTables } from "@/lib/import/read-xlsx-sheets";
 
 describe("Metabase CSV / mislabeled xlsx", () => {
   it("parses Metabase CSV even when filename ends with .xlsx", async () => {
@@ -53,5 +56,27 @@ describe("Metabase CSV / mislabeled xlsx", () => {
       social: true,
       audience: true,
     });
+  });
+
+  it("reads Metabase ZIP64/data-descriptor xlsx via ExcelJS fallback", async () => {
+    const rosterPath = path.join(
+      process.env.HOME ?? "",
+      "Downloads/action_sports_roster_2026-08-05T21_43_59.557568904Z.xlsx"
+    );
+    if (!fs.existsSync(rosterPath)) {
+      // Local fixture only — skip in CI
+      return;
+    }
+    const buffer = fs.readFileSync(rosterPath);
+    const tables = await readXlsxSheetTables(buffer);
+    assert.equal(tables.length, 1);
+    assert.ok((tables[0]?.rows.length ?? 0) > 1);
+
+    const parsed = await parseMetabaseUploads([
+      { buffer, fileName: path.basename(rosterPath) },
+    ]);
+    assert.equal(parsed.sheets.roster, true);
+    assert.ok(parsed.roster.length > 100);
+    assert.equal(parsed.roster[0]?.file_agent, "cwallace@the.team");
   });
 });

@@ -13,6 +13,7 @@ import {
 } from "@/lib/crm/contact-filter-sort";
 import { mapContactApiRow } from "@/lib/crm/map-contact-api-row";
 import { CONTACTS_PAGE_SIZE } from "@/lib/crm/contacts-list-query";
+import { assertNotBlockedCompanyName } from "@/lib/import/blocked-company-names";
 
 function normalizeText(value: unknown): string {
   return String(value ?? "").trim().toLowerCase();
@@ -27,6 +28,7 @@ async function getOrCreateCompanyByName(
   companyName: string
 ): Promise<string> {
   const name = companyName.trim();
+  assertNotBlockedCompanyName(name);
   const { data: existing, error: existingError } = await supabaseAdmin
     .from("companies")
     .select("company_id")

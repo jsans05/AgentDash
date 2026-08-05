@@ -335,8 +335,8 @@ export function MetabaseMonthlyImport() {
             and <strong>action_sports_audience_…</strong> are sorted automatically.
           </li>
           <li>
-            Or combine sheets into one real Excel workbook — do not rename a CSV to .xlsx (that
-            causes “invalid signature”).
+            Real Metabase <strong>.xlsx</strong> downloads also work (including newer ZIP64 exports).
+            Do not rename a CSV to .xlsx.
           </li>
           <li>
             Columns: Roster = Name, Agent, Sport · Social = Name, Total Followers, Avg. ER (20p),

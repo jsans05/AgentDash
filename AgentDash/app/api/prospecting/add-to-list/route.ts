@@ -6,6 +6,7 @@ import { upsertApolloPendingContacts } from "@/lib/apollo/sync-contacts";
 import { isApolloEnabled } from "@/lib/apollo/config";
 import { persistApolloMetadataForCompany } from "@/lib/apollo/persist-company";
 import type { ApolloSearchPerson } from "@/lib/apollo/types";
+import { assertNotBlockedCompanyName } from "@/lib/import/blocked-company-names";
 import { NextResponse } from "next/server";
 
 const MAX_ITEMS = 25;
@@ -48,6 +49,7 @@ async function getOrCreateCompany(
   }
 ): Promise<string> {
   const name = opts.name.trim();
+  assertNotBlockedCompanyName(name);
   const { data: existing, error: existingError } = await supabaseAdmin
     .from("companies")
     .select("company_id, website, apollo_organization_id")

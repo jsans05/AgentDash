@@ -11,6 +11,7 @@ import { TargetListActionDialog } from "@/components/crm/TargetListActionDialog"
 import { BrandFiltersBar } from "@/components/market-intel/BrandFiltersBar";
 import {
   firmographicsFromBrandEnrichment,
+  formatMetaAdsDisplay,
   isFirmographicsStale,
 } from "@/lib/crm/company-firmographics";
 import {
@@ -37,6 +38,7 @@ import {
   countUniqueTeamOwners,
   DEFAULT_BRAND_FILTERS,
   filterBrands,
+  hasBrandApolloFirmographics,
   sortBrands,
 } from "@/lib/market-intel/queries";
 
@@ -200,22 +202,92 @@ function FirmographicsSummary({
   enrichment: BrandEnrichmentRow | undefined;
   brandName?: string;
 }) {
-  if (!enrichment) {
+  if (!hasBrandApolloFirmographics(enrichment)) {
     return <span className="text-xs text-[#8E877A]">Not enriched</span>;
   }
 
   return (
     <div className="space-y-1">
       <FirmographicsCell
-        firmographics={brandEnrichmentFirmographics(enrichment)}
+        firmographics={brandEnrichmentFirmographics(enrichment!)}
         compact
         brandName={brandName}
       />
-      {isFirmographicsStale(enrichment.enriched_at) && (
+      {isFirmographicsStale(enrichment!.enriched_at, 14) && (
         <p className="text-[10px] text-[#D4C48A]">Stale — consider re-investigating</p>
       )}
     </div>
   );
+}
+
+function InstagramCell({ enrichment }: { enrichment: BrandEnrichmentRow | undefined }) {
+  const handle = enrichment?.instagram_handle?.trim();
+  if (!handle) {
+    return <span className="text-xs text-[#8E877A]">—</span>;
+  }
+  const url = handle.startsWith("http")
+    ? handle
+    : `https://instagram.com/${handle.replace(/^@/, "")}`;
+  const label = handle.replace(/^@/, "");
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noreferrer"
+      className="text-xs text-[#CEE4D4] underline"
+      onClick={(e) => e.stopPropagation()}
+    >
+      @{label}
+    </a>
+  );
+}
+
+function MetaAdsCell({
+  enrichment,
+  brandName,
+}: {
+  enrichment: BrandEnrichmentRow | undefined;
+  brandName: string;
+}) {
+  if (!enrichment) {
+    return <span className="text-xs text-[#8E877A]">—</span>;
+  }
+  const firmographics = brandEnrichmentFirmographics(enrichment);
+  const label = formatMetaAdsDisplay(firmographics, brandName);
+  const url = enrichment.meta_ads_library_url;
+  if (label && url) {
+    return (
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        className="text-xs text-[#CEE4D4] underline"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {label}
+      </a>
+    );
+  }
+  if (label) {
+    return <span className="text-xs text-[#B9B2A6]">{label}</span>;
+  }
+  if (url) {
+    return (
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        className="text-xs text-[#CEE4D4] underline"
+        onClick={(e) => e.stopPropagation()}
+      >
+        Ads Library
+      </a>
+    );
+  }
+  if (enrichment.meta_ads_status === "not_found") {
+    return <span className="text-xs text-[#8E877A]">None found</span>;
+  }
+  return <span className="text-xs text-[#8E877A]">—</span>;
 }
 
 function BrandDetailPanel({
@@ -233,7 +305,7 @@ function BrandDetailPanel({
 }) {
   return (
     <div className="border-t border-white/10 bg-[#121614] px-4 py-4">
-      {enrichment && (
+      {enrichment && hasBrandApolloFirmographics(enrichment) && (
         <>
           <div className="mb-4">
             <p className="mb-2 text-xs font-medium uppercase tracking-wide text-[#8E877A]">
@@ -438,7 +510,7 @@ export function BrandsView({
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<BrandSortKey>("placements-desc");
   const [filters, setFilters] = useState<BrandFilters>(DEFAULT_BRAND_FILTERS);
-  const [showFilters, setShowFilters] = useState(true);
+  const [showFilters, setShowFilters] = useState(false);
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [enrichmentByKey, setEnrichmentByKey] = useState(initialEnrichmentByKey);
   const [consultingProfiles, setConsultingProfiles] = useState<ConsultingProfile[]>([]);
@@ -853,6 +925,8 @@ export function BrandsView({
               <tr>
                 <th className="px-4 py-3">Brand</th>
                 <th className="px-4 py-3">Placements</th>
+                <th className="px-4 py-3">Instagram</th>
+                <th className="px-4 py-3">Meta ads</th>
                 <th className="px-4 py-3">Firmographics</th>
                 <th className="px-4 py-3">Shows up in</th>
                 <th className="px-4 py-3">Actions</th>
@@ -877,6 +951,12 @@ export function BrandsView({
                         {brand.displayName}
                       </td>
                       <td className="px-4 py-3 tabular-nums text-[#B9B2A6]">{count}</td>
+                      <td className="px-4 py-3">
+                        <InstagramCell enrichment={enrichment} />
+                      </td>
+                      <td className="px-4 py-3">
+                        <MetaAdsCell enrichment={enrichment} brandName={brand.displayName} />
+                      </td>
                       <td className="px-4 py-3">
                         <FirmographicsSummary enrichment={enrichment} brandName={brand.displayName} />
                       </td>
@@ -924,7 +1004,7 @@ export function BrandsView({
                     </tr>
                     {open && (
                       <tr>
-                        <td colSpan={6} className="p-0">
+                        <td colSpan={8} className="p-0">
                           <BrandDetailPanel
                             brand={brand}
                             enrichment={enrichment}

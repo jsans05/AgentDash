@@ -1,6 +1,7 @@
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { requireNonAccounting } from "@/lib/auth";
 import { quarantineEmail } from "@/lib/crm/email-quarantine";
+import { assertNotBlockedCompanyName } from "@/lib/import/blocked-company-names";
 import { NextResponse } from "next/server";
 
 function normalizeEmail(v: unknown): string | null {
@@ -64,6 +65,7 @@ async function getOrCreateCompanyByName(
   companyName: string
 ): Promise<string> {
   const name = companyName.trim();
+  assertNotBlockedCompanyName(name);
   const { data: existing, error: existingError } = await supabaseAdmin
     .from("companies")
     .select("company_id")

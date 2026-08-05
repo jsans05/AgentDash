@@ -25,6 +25,7 @@ import { AthleteRosterCache } from "@/lib/import/athlete-roster-cache";
 import { commitMetabaseMonthlyImport } from "@/lib/import/metabase-roster";
 import { metabaseCreateKey } from "@/lib/import/metabase-workbook";
 import { metabasePartsFromFormData } from "@/lib/import/metabase-form";
+import { isBlockedCompanyName } from "@/lib/import/blocked-company-names";
 
 function rowsToObjects(rows: unknown[][]): Record<string, unknown>[] {
   if (rows.length === 0) return [];
@@ -713,6 +714,17 @@ export async function POST(req: Request) {
         }
 
         // Get or create company (sponsor)
+        if (isBlockedCompanyName(sponsorName)) {
+          importErrors.push({
+            row: rowIndex + 1,
+            athleteName,
+            sponsorName,
+            category: rawCategory || "(empty)",
+            reason: "Blocked company name",
+          });
+          continue;
+        }
+
         let companyId: string;
         const { data: existingCompany } = await supabase
           .from("companies")

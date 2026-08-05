@@ -4,6 +4,7 @@ import { isApolloEnabled } from "@/lib/apollo/config";
 import { persistApolloMetadataForCompany } from "@/lib/apollo/persist-company";
 import { resolveCompanyWebsiteForTargetList } from "@/lib/crm/resolve-company-website-for-target-list";
 import { normalizePipelineStage, pipelineStageToFunnel, resolvePipelineStageFromBody } from "@/lib/crm/stage-map";
+import { assertNotBlockedCompanyName } from "@/lib/import/blocked-company-names";
 import { NextResponse } from "next/server";
 
 const PIPELINE_UPDATE_SELECT =
@@ -38,6 +39,7 @@ async function getOrCreateCompanyByName(
   companyName: string
 ): Promise<string> {
   const name = companyName.trim();
+  assertNotBlockedCompanyName(name);
   const { data: existing, error: existingError } = await supabaseAdmin
     .from("companies")
     .select("company_id")

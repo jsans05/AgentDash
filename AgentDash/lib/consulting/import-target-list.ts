@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import readXlsxFile from "read-excel-file/node";
 import { splitName } from "@/lib/import/name-match";
 import { getOrCreateCompanyByName } from "@/lib/consulting/companies";
+import { isBlockedCompanyName } from "@/lib/import/blocked-company-names";
 import {
   firmographicsPatchFromImportRow,
   mapCompanyFirmographics,
@@ -449,6 +450,11 @@ export async function upsertConsultingTargetListRows(
     const companyName = row.company_name.trim();
     if (!companyName) {
       summary.skipped++;
+      continue;
+    }
+    if (isBlockedCompanyName(companyName)) {
+      summary.skipped++;
+      summary.row_errors.push(`${companyName}: blocked company name`);
       continue;
     }
 

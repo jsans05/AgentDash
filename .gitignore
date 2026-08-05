@@ -23,6 +23,11 @@ venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+market_sponsor_intel/.venv/
+market_sponsor_intel/data/
+market_sponsor_intel/state/
+market_sponsor_intel/.env
+market_sponsor_intel/.env.local
 # Accidental venv / env dirs (often created in repo root)
 /yet/
 /created/

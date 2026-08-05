@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { assertNotBlockedCompanyName } from "@/lib/import/blocked-company-names";
 
 export async function getOrCreateCompanyByName(
   supabase: SupabaseClient,
@@ -6,6 +7,7 @@ export async function getOrCreateCompanyByName(
 ): Promise<string> {
   const name = companyName.trim();
   if (!name) throw new Error("company_name required");
+  assertNotBlockedCompanyName(name);
 
   const { data: existing, error: existingError } = await supabase
     .from("companies")

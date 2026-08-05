@@ -25,6 +25,7 @@ import {
   type SheetImportSummary,
 } from "@/lib/import/social-audience";
 import { processTalentInfoRows } from "@/lib/import/talent-info";
+import { isBlockedCompanyName } from "@/lib/import/blocked-company-names";
 
 export class ImportHttpError extends Error {
   constructor(
@@ -448,6 +449,17 @@ export async function runAdminImport(input: RunAdminImportInput): Promise<Record
         }
 
         // Get or create company (sponsor)
+        if (isBlockedCompanyName(sponsorName)) {
+          importErrors.push({
+            row: rowIndex + 1,
+            athleteName,
+            sponsorName,
+            category: rawCategory || "(empty)",
+            reason: "Blocked company name",
+          });
+          continue;
+        }
+
         let companyId: string;
         const { data: existingCompany } = await supabase
           .from("companies")

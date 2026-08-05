@@ -370,6 +370,13 @@ export function TargetListSpreadsheet({
   const [bulkActionsOpen, setBulkActionsOpen] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importConfirmFile, setImportConfirmFile] = useState<File | null>(null);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [addName, setAddName] = useState("");
+  const [addWebsite, setAddWebsite] = useState("");
+  const [addCategory, setAddCategory] = useState("");
+  const [addAthleteId, setAddAthleteId] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [addAthletes, setAddAthletes] = useState<Array<{ athlete_id: string; name: string }>>([]);
   const flashAfterLoadRef = useRef<Set<string> | null>(null);
   const bulkActionsRef = useRef<HTMLDivElement>(null);
   const importFileInputRef = useRef<HTMLInputElement>(null);
@@ -472,6 +479,46 @@ export function TargetListSpreadsheet({
     void load();
   }, [load]);
 
+  useEffect(() => {
+    if (!isMaster || !showAddForm) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/my-athletes", { credentials: "include" });
+        const data = await res.json().catch(() => ({}));
+        if (cancelled || !res.ok) return;
+        const list = Array.isArray(data.athletes)
+          ? (data.athletes as Array<{ athlete_id?: string; name?: string }>).map((a) => ({
+              athlete_id: String(a.athlete_id ?? ""),
+              name: String(a.name ?? "").trim() || "Unknown",
+            }))
+          : [];
+        setAddAthletes(list.filter((a) => a.athlete_id));
+      } catch {
+        // ignore — form still works if roster chips already populated
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isMaster, showAddForm]);
+
+  const prevShowAddFormRef = useRef(false);
+  useEffect(() => {
+    const justOpened = showAddForm && !prevShowAddFormRef.current;
+    prevShowAddFormRef.current = showAddForm;
+    if (!justOpened) return;
+    if (isMaster && activeAthleteFilter !== "all") {
+      setAddAthleteId(activeAthleteFilter);
+    }
+    if (
+      activeCategoryFilter !== TARGET_LIST_CATEGORY_FILTER_ALL &&
+      activeCategoryFilter !== TARGET_LIST_CATEGORY_FILTER_UNCATEGORIZED
+    ) {
+      setAddCategory(activeCategoryFilter);
+    }
+  }, [showAddForm, isMaster, activeAthleteFilter, activeCategoryFilter]);
+
   const pendingPhoneContactIds = useMemo(() => {
     const ids = new Set<string>();
     for (const row of rows ?? []) {
@@ -551,6 +598,19 @@ export function TargetListSpreadsheet({
       a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
     );
   }, [isMaster, rows]);
+
+  const masterAddAthleteOptions = useMemo(() => {
+    const byId = new Map<string, { athlete_id: string; name: string }>();
+    for (const a of masterRosterAthletes) {
+      byId.set(a.athlete_id, { athlete_id: a.athlete_id, name: a.name });
+    }
+    for (const a of addAthletes) {
+      if (!byId.has(a.athlete_id)) byId.set(a.athlete_id, a);
+    }
+    return [...byId.values()].sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+    );
+  }, [masterRosterAthletes, addAthletes]);
 
   const ownerFilterOptions = useMemo(() => {
     if (!isAthlete || !rows) return [] as { user_id: string; name: string; count: number }[];
@@ -1097,6 +1157,51 @@ export function TargetListSpreadsheet({
     }
   }
 
+  async function addCompany() {
+    if (!addName.trim()) return;
+    const targetAthleteId = isAthlete ? athleteId : isMaster ? addAthleteId : null;
+    if ((isAthlete || isMaster) && !targetAthleteId) {
+      setGlobalError(isMaster ? "Select an athlete for this company" : "Missing athlete context");
+      return;
+    }
+    if (isCrmList && !listId) {
+      setGlobalError("Missing list context");
+      return;
+    }
+
+    setAdding(true);
+    setGlobalError(null);
+    try {
+      const url = isCrmList
+        ? `/api/crm/lists/${listId}/target-list`
+        : `/api/athletes/${targetAthleteId}/target-list`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          company_name: addName.trim(),
+          website: addWebsite.trim() || null,
+          industry_category: addCategory.trim() || null,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Add failed");
+      const addedName = addName.trim();
+      await load();
+      setAddName("");
+      setAddWebsite("");
+      setAddCategory("");
+      setShowAddForm(false);
+      setUpdateToast(`Added ${addedName}`);
+      window.setTimeout(() => setUpdateToast(null), 3000);
+    } catch (e) {
+      setGlobalError(e instanceof Error ? e.message : "Add failed");
+    } finally {
+      setAdding(false);
+    }
+  }
+
   async function handleExport() {
     if (!rows || rows.length === 0) return;
     setExporting(true);
@@ -1366,6 +1471,16 @@ export function TargetListSpreadsheet({
               ) : null}
             </div>
             <div className="flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowAddForm((v) => !v)}
+                className={cn(
+                  bulkActionBtnClass,
+                  "border-[#2E7040]/60 bg-[#1B2F21] text-[#DBEEE0] hover:bg-[#23452E]"
+                )}
+              >
+                Add company
+              </button>
               <div ref={bulkActionsRef} className="relative">
                 <button
                   type="button"
@@ -1549,6 +1664,16 @@ export function TargetListSpreadsheet({
                   {rows.length} {rows.length === 1 ? "company" : "companies"}
                 </span>
               ) : null}
+              <button
+                type="button"
+                onClick={() => setShowAddForm((v) => !v)}
+                className={cn(
+                  bulkActionBtnClass,
+                  "border-[#2E7040]/60 bg-[#1B2F21] text-[#DBEEE0] hover:bg-[#23452E]"
+                )}
+              >
+                Add company
+              </button>
               {isAthlete || isMaster ? (
                 <button
                   type="button"
@@ -1921,6 +2046,102 @@ export function TargetListSpreadsheet({
         <div className="border-b border-[#2E7040]/40 bg-[#1B2F21] px-4 py-2 text-xs text-[#DBEEE0]">{updateToast}</div>
       ) : null}
 
+      {showAddForm ? (
+        <div className={cn("border-b border-white/10 bg-[#121614] py-3", focusMode ? "px-3" : "px-4")}>
+          <div
+            className={cn(
+              "grid gap-2",
+              isMaster ? "sm:grid-cols-2 lg:grid-cols-4" : "sm:grid-cols-3"
+            )}
+          >
+            <input
+              value={addName}
+              onChange={(e) => setAddName(e.target.value)}
+              placeholder="Company name"
+              className="rounded border border-white/15 bg-[#0B0E0D] px-2 py-1.5 text-sm text-[#F4F1EB]"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void addCompany();
+                }
+              }}
+            />
+            <input
+              value={addWebsite}
+              onChange={(e) => setAddWebsite(e.target.value)}
+              placeholder="Website"
+              className="rounded border border-white/15 bg-[#0B0E0D] px-2 py-1.5 text-sm text-[#F4F1EB]"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void addCompany();
+                }
+              }}
+            />
+            <input
+              value={addCategory}
+              onChange={(e) => setAddCategory(e.target.value)}
+              placeholder="Category"
+              list="target-list-add-category-options"
+              className="rounded border border-white/15 bg-[#0B0E0D] px-2 py-1.5 text-sm text-[#F4F1EB]"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void addCompany();
+                }
+              }}
+            />
+            <datalist id="target-list-add-category-options">
+              {categorySummary.sorted.map(([cat]) => (
+                <option key={cat} value={cat} />
+              ))}
+            </datalist>
+            {isMaster ? (
+              <select
+                value={addAthleteId}
+                onChange={(e) => setAddAthleteId(e.target.value)}
+                className="rounded border border-white/15 bg-[#0B0E0D] px-2 py-1.5 text-sm text-[#F4F1EB]"
+              >
+                <option value="">Select athlete…</option>
+                {masterAddAthleteOptions.map((a) => (
+                  <option key={a.athlete_id} value={a.athlete_id}>
+                    {a.name}
+                  </option>
+                ))}
+              </select>
+            ) : null}
+          </div>
+          <p className="mt-1.5 text-[11px] text-[#8E877A]">
+            {isMaster
+              ? "Adds the company to the selected athlete’s target list under the category you enter (new or existing)."
+              : isCrmList
+                ? "Adds the company to this list under the category you enter (new or existing)."
+                : "Adds the company to this athlete’s target list under the category you enter (new or existing)."}
+          </p>
+          <div className="mt-2 flex gap-2">
+            <button
+              type="button"
+              disabled={
+                adding ||
+                !addName.trim() ||
+                (isMaster && !addAthleteId)
+              }
+              onClick={() => void addCompany()}
+              className="rounded bg-[#2E7040] px-3 py-1 text-xs text-[#F2FFF5] disabled:opacity-50"
+            >
+              {adding ? "Saving…" : "Save"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowAddForm(false)}
+              className="rounded border border-white/15 px-3 py-1 text-xs text-[#B9B2A6]"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {rows && rows.length > 0 ? (
         <div
           className={cn(
@@ -2080,19 +2301,47 @@ export function TargetListSpreadsheet({
         <div className="p-4 text-sm text-[#B9B2A6]">
           {isMaster ? (
             <>
-              No companies on your roster athletes&apos; target lists yet. Assign athletes on pipeline cards in{" "}
+              No companies on your roster athletes&apos; target lists yet. Use{" "}
+              <button
+                type="button"
+                onClick={() => setShowAddForm(true)}
+                className="text-[#CEE4D4] underline hover:text-[#E8F6ED]"
+              >
+                Add company
+              </button>{" "}
+              to add a brand under a category, or assign athletes on pipeline cards in{" "}
               <Link href="/crm" className="text-[#CEE4D4] underline hover:text-[#E8F6ED]">
                 the CRM
               </Link>
               .
             </>
+          ) : isCrmList ? (
+            <>
+              No companies on this list yet. Use{" "}
+              <button
+                type="button"
+                onClick={() => setShowAddForm(true)}
+                className="text-[#CEE4D4] underline hover:text-[#E8F6ED]"
+              >
+                Add company
+              </button>{" "}
+              to add a brand and category, or import from Excel.
+            </>
           ) : (
             <>
-              No target companies yet. Open{" "}
+              No target companies yet. Use{" "}
+              <button
+                type="button"
+                onClick={() => setShowAddForm(true)}
+                className="text-[#CEE4D4] underline hover:text-[#E8F6ED]"
+              >
+                Add company
+              </button>{" "}
+              to add a brand under a category, or assign this athlete on a pipeline card in{" "}
               <Link href="/crm" className="text-[#CEE4D4] underline hover:text-[#E8F6ED]">
                 the CRM
-              </Link>{" "}
-              and assign this athlete on a pipeline card to populate this list.
+              </Link>
+              .
             </>
           )}
         </div>

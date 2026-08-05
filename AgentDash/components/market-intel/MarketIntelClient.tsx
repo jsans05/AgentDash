@@ -169,6 +169,8 @@ export function MarketIntelClient({
   const [expandedOwner, setExpandedOwner] = useState<string | null>(null);
   const [expandedVenue, setExpandedVenue] = useState<string | null>(null);
   const [focusTarget, setFocusTarget] = useState<FocusTarget | null>(null);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
 
   const sponsorsByOwner = useMemo(
     () => groupTeamSponsorsByOwner(teamSponsors),
@@ -281,7 +283,44 @@ export function MarketIntelClient({
             </button>
           ))}
         </div>
-        <p className="text-xs text-[#8E877A]">Last sync: {fmtDate(lastSyncAt)}</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-xs text-[#8E877A]">Last sync: {fmtDate(lastSyncAt)}</p>
+          <button
+            type="button"
+            disabled={syncBusy}
+            onClick={() => {
+              setSyncBusy(true);
+              setSyncMessage(null);
+              void (async () => {
+                try {
+                  const res = await fetch("/api/market-intel/sync", {
+                    method: "POST",
+                    credentials: "include",
+                  });
+                  const data = await res.json();
+                  if (!res.ok) {
+                    throw new Error(data?.error || "Sync failed");
+                  }
+                  setSyncMessage(
+                    data.message ?? "Scrape started — refresh in a few minutes."
+                  );
+                } catch (e) {
+                  setSyncMessage(e instanceof Error ? e.message : "Sync failed");
+                } finally {
+                  setSyncBusy(false);
+                }
+              })();
+            }}
+            className="rounded-md border border-white/10 bg-[#151A17] px-2.5 py-1 text-xs text-[#CEE4D4] transition hover:bg-[#1A211D] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {syncBusy ? "Starting…" : "Sync"}
+          </button>
+          {syncMessage && (
+            <p className="text-xs text-[#CEE4D4]" role="status">
+              {syncMessage}
+            </p>
+          )}
+        </div>
       </div>
 
       {tab === "brands" && (

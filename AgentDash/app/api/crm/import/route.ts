@@ -1,6 +1,7 @@
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { requireNonAccounting } from "@/lib/auth";
 import { enforceContentLengthLimit, enforceFileSizeLimit, MAX_API_PAYLOAD_BYTES } from "@/lib/api/request-limits";
+import { assertNotBlockedCompanyName } from "@/lib/import/blocked-company-names";
 import { NextResponse } from "next/server";
 import readXlsxFile from "read-excel-file/node";
 
@@ -86,6 +87,7 @@ async function getOrCreateCompanyByName(
   companyName: string
 ): Promise<string> {
   const name = companyName.trim();
+  assertNotBlockedCompanyName(name);
   const { data: existing, error: existingError } = await supabaseAdmin
     .from("companies")
     .select("company_id")

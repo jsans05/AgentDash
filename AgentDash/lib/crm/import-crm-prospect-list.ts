@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import readXlsxFile from "read-excel-file/node";
+import { assertNotBlockedCompanyName } from "@/lib/import/blocked-company-names";
 import { splitName } from "@/lib/import/name-match";
 import {
   buildConsultingTargetListColumnMap,
@@ -123,6 +124,7 @@ async function findOrCreateCompany(
   group: CompanyGroup
 ): Promise<{ companyId: string; company: Record<string, unknown> }> {
   const name = group.company_name;
+  assertNotBlockedCompanyName(name);
   const { data: matches, error } = await supabaseAdmin
     .from("companies")
     .select("company_id, name, website, hq_phone, product_category")

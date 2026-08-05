@@ -4,6 +4,14 @@
     {
       "path": "/api/cron/pipeline-cadence",
       "schedule": "0 14 * * *"
+    },
+    {
+      "path": "/api/cron/market-intel-social",
+      "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/cron/market-intel-firmographics",
+      "schedule": "0 4 * * *"
     }
   ]
 }
