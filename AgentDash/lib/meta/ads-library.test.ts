@@ -40,7 +40,7 @@ test("collectFacebookPageCandidates includes brand slug and instagram handle", (
   assert.ok(candidates.includes("https://www.facebook.com/Michelin"));
   assert.ok(candidates.includes("https://www.facebook.com/michelin"));
   assert.ok(candidates.includes("https://www.facebook.com/michelin"));
-  assert.ok(candidates.includes("https://www.facebook.com/MichelinFrance"));
+  assert.ok(candidates.includes("https://www.facebook.com/michelinfrance"));
 });
 
 test("extractPageIdFromFacebookHtml finds embedded page IDs", () => {

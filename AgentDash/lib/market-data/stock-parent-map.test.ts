@@ -13,5 +13,5 @@ test("resolveStockParentLookup leaves standalone public brands unchanged", () =>
   const lookup = resolveStockParentLookup("Toyota", "toyota.com");
   assert.equal(lookup.searchName, "Toyota");
   assert.equal(lookup.explicitTicker, null);
-  assert.equal(lookup.parentCompanyName, undefined);
+  assert.equal(lookup.parentCompanyName, null);
 });

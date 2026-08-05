@@ -13,7 +13,7 @@ export async function POST(
   req: Request,
   { params }: { params: Promise<{ companyId: string }> }
 ) {
-  await requireNonAccounting();
+  const profile = await requireNonAccounting();
   if (!isApolloEnabled()) {
     return NextResponse.json({ error: "Apollo API is not configured" }, { status: 503 });
   }
@@ -21,14 +21,25 @@ export async function POST(
   const { companyId } = await params;
   const body = await req.json().catch(() => ({}));
   const force = body.force !== false;
+  const apollo_organization_id =
+    body.apollo_organization_id != null ? String(body.apollo_organization_id).trim() : undefined;
 
   const supabaseAdmin = await createServiceRoleClient();
 
   try {
-    const result = await persistApolloMetadataForCompany(supabaseAdmin, companyId, { force });
+    const result = await persistApolloMetadataForCompany(supabaseAdmin, companyId, {
+      force,
+      apollo_organization_id,
+      userId: profile.user_id,
+    });
 
     if ("needsConfirmation" in result && result.needsConfirmation) {
-      return NextResponse.json(result);
+      return NextResponse.json({
+        needsConfirmation: true,
+        candidates: result.candidates,
+        current: result.current,
+        match_notes: result.match_notes,
+      });
     }
 
     const { data: company } = await supabaseAdmin
@@ -38,8 +49,11 @@ export async function POST(
       .single();
 
     return NextResponse.json({
+      needsConfirmation: false,
       apollo_organization_id: result.apollo_organization_id,
-      patched: result.patched,
+      patched: "patched" in result ? result.patched : [],
+      match_confidence: "match_confidence" in result ? result.match_confidence : null,
+      match_notes: "match_notes" in result ? result.match_notes : null,
       firmographics: mapCompanyFirmographics(company ?? null),
     });
   } catch (e) {

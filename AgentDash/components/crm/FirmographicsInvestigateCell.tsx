@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { ApolloOrgPickerDialog } from "@/components/crm/ApolloOrgPickerDialog";
 import { CompanyRecentNewsButton } from "@/components/crm/CompanyRecentNewsPanel";
 import { FirmographicsCell } from "@/components/crm/FirmographicsCell";
 import { TargetListActionDialog } from "@/components/crm/TargetListActionDialog";
@@ -32,11 +33,13 @@ export function FirmographicsInvestigateCell({
 }: FirmographicsInvestigateCellProps) {
   const [busy, setBusy] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [orgPickerOpen, setOrgPickerOpen] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const [matchNote, setMatchNote] = useState<string | null>(firmographics.match_notes);
 
   const label = companyName || "this company";
 
-  async function run() {
+  async function run(apollo_organization_id?: string) {
     setBusy(true);
     setNote(null);
     try {
@@ -44,9 +47,11 @@ export function FirmographicsInvestigateCell({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ force: true }),
+        body: JSON.stringify({ force: true, apollo_organization_id }),
       });
       const data = (await res.json().catch(() => ({}))) as {
+        needsConfirmation?: boolean;
+        match_notes?: string | null;
         firmographics?: Record<string, unknown> | null;
         patched?: string[];
         error?: string;
@@ -54,7 +59,15 @@ export function FirmographicsInvestigateCell({
       if (!res.ok) {
         throw new Error(data?.error || `Investigate failed (${res.status})`);
       }
+
+      if (data.needsConfirmation) {
+        setMatchNote(data.match_notes ?? "Confirm the correct Apollo company.");
+        setOrgPickerOpen(true);
+        return;
+      }
+
       onInvestigated(mapCompanyFirmographics(data.firmographics ?? null));
+      setMatchNote(data.match_notes ?? null);
       if (!data.patched || data.patched.length === 0) {
         setNote("No new firmographics found");
       }
@@ -84,10 +97,12 @@ export function FirmographicsInvestigateCell({
         description={
           <>
             <p>
-              Fetches revenue, funding, employee count, and headcount growth from Apollo for{" "}
-              {label}.
+              Fetches revenue, funding, employee count, headcount growth, stock, hiring, and Meta
+              ads signals for {label}.
             </p>
-            <p className="text-[#AEA79A]">Uses the company website to match the Apollo org.</p>
+            <p className="text-[#AEA79A]">
+              Uses trusted Apollo org matching — you may be asked to confirm the company.
+            </p>
           </>
         }
         confirmLabel="Investigate"
@@ -99,23 +114,49 @@ export function FirmographicsInvestigateCell({
         }}
       />
 
-      <FirmographicsCell firmographics={firmographics} />
-
-      <button
-        type="button"
-        className="block w-full rounded border border-[#2E7040]/50 bg-[#1B2F21] px-1.5 py-0.5 text-[10px] font-medium text-[#DBEEE0] hover:bg-[#23452E] disabled:cursor-not-allowed disabled:opacity-50"
-        disabled={disabled || busy}
-        title="Fetch firmographics from Apollo"
-        onClick={request}
-      >
-        {busy ? "Investigating…" : "Investigate"}
-      </button>
-
-      <CompanyRecentNewsButton
+      <ApolloOrgPickerDialog
+        open={orgPickerOpen}
         companyId={companyId}
         companyName={companyName}
-        disabled={disabled}
+        onClose={() => setOrgPickerOpen(false)}
+        onSelected={({ apollo_organization_id }) => {
+          setOrgPickerOpen(false);
+          void run(apollo_organization_id);
+        }}
       />
+
+      <FirmographicsCell
+        brandName={companyName}
+        firmographics={{ ...firmographics, match_notes: matchNote ?? firmographics.match_notes }}
+        stockCorrection={{
+          companyId,
+          companyName,
+          domain: firmographics.domain,
+          onCorrected: (updated) => onInvestigated(updated),
+        }}
+      />
+
+      <div className="flex flex-wrap gap-1">
+        <button
+          type="button"
+          className="rounded border border-[#2E7040]/50 bg-[#1B2F21] px-1.5 py-0.5 text-[10px] font-medium text-[#DBEEE0] hover:bg-[#23452E] disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={disabled || busy}
+          title="Fetch firmographics from Apollo"
+          onClick={request}
+        >
+          {busy ? "Investigating…" : "Investigate"}
+        </button>
+        <button
+          type="button"
+          className="rounded border border-white/15 bg-[#1A211D] px-1.5 py-0.5 text-[10px] text-[#CEE4D4] hover:bg-[#243028] disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={disabled || busy}
+          onClick={() => setOrgPickerOpen(true)}
+        >
+          Wrong company?
+        </button>
+      </div>
+
+      <CompanyRecentNewsButton companyId={companyId} companyName={companyName} disabled={disabled} />
 
       {note ? (
         <span className="block text-[10px] leading-snug text-[#F1A2A2]">{note}</span>

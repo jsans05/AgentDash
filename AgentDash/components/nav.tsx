@@ -218,6 +218,7 @@ export function Nav() {
     items: [
       { href: "/roster", label: "Athletes & Properties" },
       { href: "/contracts", label: "Contracts" },
+      ...(showInsightsLink ? [{ href: "/insights", label: "Insights" }] : []),
     ],
   };
 
@@ -238,7 +239,6 @@ export function Nav() {
       { href: "/prospecting", label: "Prospecting" },
       { href: "/crm", label: "Pipeline" },
       { href: "/crm/sequence", label: "Sequence" },
-      ...(showInsightsLink ? [{ href: "/insights", label: "Insights" }] : []),
       { href: "/crm/analytics", label: "Analytics" },
       { href: "/crm/variants", label: "My Variants" },
       { href: "/crm/contacts", label: "Contacts" },

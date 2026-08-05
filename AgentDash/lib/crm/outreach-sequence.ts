@@ -45,6 +45,35 @@ export type SequenceCardFields = {
   pipeline_stage?: string | null;
 };
 
+/** Main outreach chain — each step waits for the prior one. LI1–LI3 run in parallel. */
+export const MAIN_SEQUENCE_CHAIN = [
+  "E1",
+  "E2",
+  "C1",
+  "IG1",
+  "LI4",
+  "SE1",
+  "C2",
+  "IG2",
+  "BK1",
+] as const;
+
+/** Column order on the sequence board (includes parallel LinkedIn warm-up steps). */
+export const SEQUENCE_DISPLAY_ORDER = [
+  "LI1",
+  "LI2",
+  "LI3",
+  "E1",
+  "E2",
+  "C1",
+  "IG1",
+  "LI4",
+  "SE1",
+  "C2",
+  "IG2",
+  "BK1",
+] as const;
+
 const CHANNEL_TO_NEXT_ACTION: Partial<
   Record<OutreachChannel, "email" | "linkedin" | "call" | "cool">
 > = {
@@ -55,6 +84,16 @@ const CHANNEL_TO_NEXT_ACTION: Partial<
   instagram_dm: "email",
   instagram_engage: "email",
 };
+
+export function sortSequenceSteps(steps: SequenceStepDef[]): SequenceStepDef[] {
+  const order = new Map(SEQUENCE_DISPLAY_ORDER.map((code, index) => [code, index]));
+  return [...steps].sort((a, b) => {
+    const ai = order.get(a.short_code as (typeof SEQUENCE_DISPLAY_ORDER)[number]) ?? 999;
+    const bi = order.get(b.short_code as (typeof SEQUENCE_DISPLAY_ORDER)[number]) ?? 999;
+    if (ai !== bi) return ai - bi;
+    return a.step_order - b.step_order;
+  });
+}
 
 export function cycleTouchStatus(current: TouchStatus): TouchStatus {
   if (current === "pending") return "done";
@@ -77,15 +116,82 @@ export function stepDueAt(sequenceStartedAt: string, dayOffset: number): Date {
   return due;
 }
 
+export function getDependencyPredecessor(
+  step: SequenceStepDef,
+  steps: SequenceStepDef[]
+): SequenceStepDef | null {
+  if (step.short_code === "LI2") {
+    return steps.find((s) => s.short_code === "LI1") ?? null;
+  }
+  if (step.short_code === "LI3") {
+    return steps.find((s) => s.short_code === "LI2") ?? null;
+  }
+  const idx = MAIN_SEQUENCE_CHAIN.indexOf(
+    step.short_code as (typeof MAIN_SEQUENCE_CHAIN)[number]
+  );
+  if (idx <= 0) return null;
+  return steps.find((s) => s.short_code === MAIN_SEQUENCE_CHAIN[idx - 1]) ?? null;
+}
+
+export function isPredecessorSatisfied(
+  states: CardStepState[],
+  predecessorStepId: string
+): boolean {
+  const st = getStepState(states, predecessorStepId);
+  const touch = st?.touch_status ?? "pending";
+  return touch === "done" || touch === "skipped";
+}
+
+/**
+ * When a step has a predecessor, due date = predecessor done_at + gap days
+ * (gap = difference in day_offset). Calls wait until prior emails were sent.
+ */
+export function effectiveStepDueAt(
+  step: SequenceStepDef,
+  steps: SequenceStepDef[],
+  states: CardStepState[],
+  sequenceStartedAt: string | null
+): Date | null {
+  if (!sequenceStartedAt) return null;
+
+  const pred = getDependencyPredecessor(step, steps);
+  if (!pred) {
+    return stepDueAt(sequenceStartedAt, step.day_offset);
+  }
+
+  if (!isPredecessorSatisfied(states, pred.id)) {
+    return null;
+  }
+
+  const predState = getStepState(states, pred.id);
+  const gapDays = Math.max(0, step.day_offset - pred.day_offset);
+  const anchor = predState?.done_at ?? sequenceStartedAt;
+  const base = new Date(anchor);
+  return new Date(
+    Date.UTC(
+      base.getUTCFullYear(),
+      base.getUTCMonth(),
+      base.getUTCDate() + gapDays,
+      10,
+      0,
+      0
+    )
+  );
+}
+
 export function isStepDue(
+  step: SequenceStepDef,
+  steps: SequenceStepDef[],
+  states: CardStepState[],
   sequenceStartedAt: string | null,
-  dayOffset: number,
   touchStatus: TouchStatus,
   now = new Date()
 ): boolean {
   if (!sequenceStartedAt) return false;
   if (touchStatus !== "pending") return false;
-  return stepDueAt(sequenceStartedAt, dayOffset).getTime() <= now.getTime();
+  const dueAt = effectiveStepDueAt(step, steps, states, sequenceStartedAt);
+  if (!dueAt) return false;
+  return dueAt.getTime() <= now.getTime();
 }
 
 export function getStepState(
@@ -116,7 +222,7 @@ export function ensureStepState(
 
 /**
  * Next pending step that is due (or the earliest pending by order if none due yet).
- * Skips optional steps that are already skipped. Pauses when card has responded.
+ * Skips blocked steps. Pauses when card has responded.
  */
 export function findNextPendingStep(
   steps: SequenceStepDef[],
@@ -131,12 +237,14 @@ export function findNextPendingStep(
   const pending = ordered.filter((step) => {
     const st = getStepState(states, step.id);
     const touch = st?.touch_status ?? "pending";
-    return touch === "pending";
+    if (touch !== "pending") return false;
+    if (isStepBlocked(step, steps, states).blocked) return false;
+    return true;
   });
   if (pending.length === 0) return null;
 
   const due = pending.filter((step) =>
-    isStepDue(card.sequence_started_at, step.day_offset, "pending", now)
+    isStepDue(step, steps, states, card.sequence_started_at, "pending", now)
   );
   if (due.length > 0) return due[0]!;
   return pending[0]!;
@@ -160,7 +268,9 @@ export function cadenceFieldsFromSequence(
   if (!next || !card.sequence_started_at) {
     return { next_follow_up_at: null, next_action: null };
   }
-  const due = stepDueAt(card.sequence_started_at, next.day_offset);
+  const due =
+    effectiveStepDueAt(next, steps, states, card.sequence_started_at) ??
+    stepDueAt(card.sequence_started_at, next.day_offset);
   return {
     next_follow_up_at: due.toISOString(),
     next_action: CHANNEL_TO_NEXT_ACTION[next.channel] ?? "email",
@@ -189,46 +299,7 @@ export function isSequenceExhausted(
   });
 }
 
-/** Main outreach chain — each step waits for the prior one. LI1–LI3 run in parallel. */
-export const MAIN_SEQUENCE_CHAIN = [
-  "E1",
-  "E2",
-  "C1",
-  "IG1",
-  "LI4",
-  "SE1",
-  "C2",
-  "IG2",
-  "BK1",
-] as const;
-
-/** Column order on the sequence board (includes parallel LinkedIn warm-up steps). */
-export const SEQUENCE_DISPLAY_ORDER = [
-  "LI1",
-  "LI2",
-  "LI3",
-  "E1",
-  "E2",
-  "C1",
-  "IG1",
-  "LI4",
-  "SE1",
-  "C2",
-  "IG2",
-  "BK1",
-] as const;
-
-export function sortSequenceSteps(steps: SequenceStepDef[]): SequenceStepDef[] {
-  const order = new Map(SEQUENCE_DISPLAY_ORDER.map((code, index) => [code, index]));
-  return [...steps].sort((a, b) => {
-    const ai = order.get(a.short_code as (typeof SEQUENCE_DISPLAY_ORDER)[number]) ?? 999;
-    const bi = order.get(b.short_code as (typeof SEQUENCE_DISPLAY_ORDER)[number]) ?? 999;
-    if (ai !== bi) return ai - bi;
-    return a.step_order - b.step_order;
-  });
-}
-
-/** Day-13 LI message is gated on day-4 connection acceptance. */
+/** LI4 is gated on LI3 connection acceptance; main-chain steps wait on their predecessor. */
 export function isStepBlocked(
   step: SequenceStepDef,
   steps: SequenceStepDef[],
@@ -249,6 +320,12 @@ export function isStepBlocked(
       }
     }
   }
+
+  const pred = getDependencyPredecessor(step, steps);
+  if (pred && !isPredecessorSatisfied(states, pred.id)) {
+    return { blocked: true, reason: `Complete ${pred.short_code} first` };
+  }
+
   return { blocked: false, reason: null };
 }
 

@@ -43,6 +43,13 @@ export type MyAthlete = {
   sport: string | null;
 };
 
+function athleteDisplayName(row: {
+  first_name?: string | null;
+  last_name?: string | null;
+}): string {
+  return [row.first_name, row.last_name].filter(Boolean).join(" ").trim() || "Unknown";
+}
+
 export async function fetchMyAthletes(
   supabase: SupabaseClient,
   profile: Profile
@@ -52,15 +59,16 @@ export async function fetchMyAthletes(
 
   const { data, error } = await supabase
     .from("athletes")
-    .select("athlete_id, name, sport")
+    .select("athlete_id, first_name, last_name, sport")
     .in("athlete_id", ids)
-    .order("name", { ascending: true });
+    .order("last_name", { ascending: true })
+    .order("first_name", { ascending: true });
 
   if (error) throw new Error(error.message);
 
   return (data ?? []).map((r) => ({
     athlete_id: String(r.athlete_id),
-    name: String(r.name ?? "").trim() || "Unknown",
+    name: athleteDisplayName(r),
     sport: r.sport != null ? String(r.sport) : null,
   }));
 }

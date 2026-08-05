@@ -14,7 +14,7 @@ import {
   groupVenueSponsorsByVenue,
 } from "@/lib/market-intel/queries";
 
-type Tab = "brands" | "cup" | "teams" | "venues" | "motogp" | "f1";
+type Tab = "brands" | "cup" | "teams" | "venues" | "motogp" | "f1" | "score";
 
 type FocusTarget =
   | { type: "team"; ownerName: string }
@@ -58,9 +58,14 @@ function isF1Sport(sportType: string | null | undefined) {
   return sportKey(sportType) === "f1";
 }
 
+function isScoreSport(sportType: string | null | undefined) {
+  return sportKey(sportType) === "score";
+}
+
 function tabForVenueSport(sportType: string | null | undefined): Tab {
   if (isMotoGpSport(sportType)) return "motogp";
   if (isF1Sport(sportType)) return "f1";
+  if (isScoreSport(sportType)) return "score";
   return "venues";
 }
 
@@ -185,7 +190,13 @@ export function MarketIntelClient({
   }, [cupDrivers]);
 
   const stadiumVenues = useMemo(
-    () => venues.filter((v) => !isMotoGpSport(v.sport_type) && !isF1Sport(v.sport_type)),
+    () =>
+      venues.filter(
+        (v) =>
+          !isMotoGpSport(v.sport_type) &&
+          !isF1Sport(v.sport_type) &&
+          !isScoreSport(v.sport_type)
+      ),
     [venues]
   );
   const motoGpVenues = useMemo(
@@ -194,6 +205,10 @@ export function MarketIntelClient({
   );
   const f1Venues = useMemo(
     () => venues.filter((v) => isF1Sport(v.sport_type)),
+    [venues]
+  );
+  const scoreVenues = useMemo(
+    () => venues.filter((v) => isScoreSport(v.sport_type)),
     [venues]
   );
 
@@ -244,6 +259,7 @@ export function MarketIntelClient({
     { id: "venues", label: "Stadiums" },
     { id: "motogp", label: "MotoGP" },
     { id: "f1", label: "Formula 1" },
+    { id: "score", label: "SCORE" },
   ];
 
   return (
@@ -430,6 +446,17 @@ export function MarketIntelClient({
           setExpandedVenue={setExpandedVenue}
           focusTarget={focusTarget}
           emptyMessage="No Formula 1 teams synced yet. Scrape venues with sport_type f1, then run sync."
+        />
+      )}
+
+      {tab === "score" && (
+        <VenueAccordionList
+          venues={scoreVenues}
+          sponsorsByVenue={sponsorsByVenue}
+          expandedVenue={expandedVenue}
+          setExpandedVenue={setExpandedVenue}
+          focusTarget={focusTarget}
+          emptyMessage="No SCORE teams synced yet. Scrape venues with sport_type score, then run sync."
         />
       )}
     </div>

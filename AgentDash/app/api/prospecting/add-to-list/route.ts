@@ -134,7 +134,7 @@ export async function POST(req: Request) {
 
   const { data: athlete, error: athleteErr } = await supabase
     .from("athletes")
-    .select("athlete_id, name, sport")
+    .select("athlete_id, first_name, last_name, sport")
     .eq("athlete_id", athleteId)
     .maybeSingle();
   if (athleteErr || !athlete) {
@@ -143,7 +143,7 @@ export async function POST(req: Request) {
 
   const athleteEntry = {
     athlete_id: athleteId,
-    name: String(athlete.name ?? "").trim() || "Unknown",
+    name: [athlete.first_name, athlete.last_name].filter(Boolean).join(" ").trim() || "Unknown",
     sport: athlete.sport != null ? String(athlete.sport) : null,
   };
 

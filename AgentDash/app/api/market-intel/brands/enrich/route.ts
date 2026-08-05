@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireMarketIntelAccess } from "@/lib/auth";
-import { enrichBrand } from "@/lib/market-intel/enrich-brand";
-import { aggregateBrands, getMarketIntelData } from "@/lib/market-intel/queries";
+import { prepareBrandEnrich, type BrandEnrichResult } from "@/lib/market-intel/enrich-brand-flow";
+import { aggregateBrands, getMarketIntelData, type BrandEnrichmentRow } from "@/lib/market-intel/queries";
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 
 export async function POST(req: Request) {
@@ -10,6 +10,9 @@ export async function POST(req: Request) {
   const brandKeys = Array.isArray(body.brand_keys)
     ? body.brand_keys.map((k: unknown) => String(k).trim()).filter(Boolean)
     : [];
+  const apollo_organization_id =
+    body.apollo_organization_id != null ? String(body.apollo_organization_id).trim() : undefined;
+  const force = body.force === true;
 
   if (brandKeys.length === 0) {
     return NextResponse.json({ error: "brand_keys required" }, { status: 400 });
@@ -25,14 +28,37 @@ export async function POST(req: Request) {
   const results: Array<{
     key: string;
     ok: boolean;
-    enrichment?: Awaited<ReturnType<typeof enrichBrand>>;
+    needsConfirmation?: boolean;
+    candidates?: unknown[];
+    current?: unknown;
+    match_notes?: string | null;
+    enrichment?: BrandEnrichmentRow;
     error?: string;
   }> = [];
 
   for (const brand of brands) {
     try {
-      const enrichment = await enrichBrand(supabaseAdmin, brand, profile.user_id);
-      results.push({ key: brand.key, ok: true, enrichment });
+      const result: BrandEnrichResult = await prepareBrandEnrich(
+        supabaseAdmin,
+        brand,
+        profile.user_id,
+        {
+          apollo_organization_id,
+          force,
+        }
+      );
+      if (result.needsConfirmation) {
+        results.push({
+          key: brand.key,
+          ok: false,
+          needsConfirmation: true,
+          candidates: result.candidates,
+          current: result.current,
+          match_notes: result.match_notes,
+        });
+      } else {
+        results.push({ key: brand.key, ok: true, enrichment: result.enrichment });
+      }
     } catch (e) {
       results.push({
         key: brand.key,

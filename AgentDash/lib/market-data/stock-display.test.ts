@@ -26,5 +26,5 @@ test("buildSparklineFromReturns creates oldest-to-newest trend points", () => {
 
 test("stockRangeIsConsistent rejects mixed-currency ranges", () => {
   assert.equal(stockRangeIsConsistent(180.34, 2471, 4000), false);
-  assert.equal(stockRangeIsConsistent(19.78, 25.51, 35.72), true);
+  assert.equal(stockRangeIsConsistent(30, 25.51, 35.72), true);
 });

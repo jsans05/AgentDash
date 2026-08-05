@@ -8,6 +8,7 @@ import {
   isStepBlocked,
   isStepDue,
   phaseLabel,
+  sortSequenceSteps,
   type CardStepState,
   type SequenceStepDef,
   type TouchStatus,
@@ -73,7 +74,11 @@ export function SequenceStepStrip({
     });
     const json = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(json.error ?? "Failed to load sequence");
-    setData(json as SequenceApiPayload);
+    const payload = json as SequenceApiPayload;
+    setData({
+      ...payload,
+      steps: sortSequenceSteps(payload.steps ?? []),
+    });
   }, [cardId]);
 
   const loadVariants = useCallback(async () => {
@@ -250,8 +255,10 @@ export function SequenceStepStrip({
           const touch = (st?.touch_status ?? "pending") as TouchStatus;
           const resp = (st?.response_status ?? "awaiting") as ResponseStatus;
           const due = isStepDue(
+            step,
+            steps,
+            states,
             data.card?.sequence_started_at ?? null,
-            step.day_offset,
             touch
           );
           const blocked = isStepBlocked(step, steps, states);
