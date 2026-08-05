@@ -285,6 +285,8 @@ export type TargetListSpreadsheetProps = {
   mode: TargetListVariant;
   athleteId?: string;
   athleteName?: string;
+  listId?: string;
+  listName?: string;
   className?: string;
 };
 
@@ -292,19 +294,28 @@ export function TargetListSpreadsheet({
   mode,
   athleteId,
   athleteName,
+  listId,
+  listName,
   className,
 }: TargetListSpreadsheetProps) {
   const isMaster = mode === "master";
   const isAthlete = mode === "athlete";
+  const isCrmList = mode === "crm_list";
   const columns = useMemo(() => getTargetListColumns(mode), [mode]);
   const loadUrl = isMaster
     ? "/api/master-target-list"
-    : `/api/athletes/${athleteId}/target-list`;
+    : isCrmList
+      ? `/api/crm/lists/${listId}/target-list`
+      : `/api/athletes/${athleteId}/target-list`;
   const pageTitle = isMaster
     ? "Master Target List"
-    : athleteName
-      ? `${athleteName} — Target List`
-      : "Target List";
+    : isCrmList
+      ? listName
+        ? `${listName} — CRM List`
+        : "CRM List"
+      : athleteName
+        ? `${athleteName} — Target List`
+        : "Target List";
 
   const [rows, setRows] = useState<SpreadsheetRow[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -893,7 +904,7 @@ export function TargetListSpreadsheet({
 
   async function savePipelinePatch(rowIndex: number, patch: Record<string, unknown>) {
     const row = rows?.[rowIndex];
-    if (!row) return;
+    if (!row || row.pipeline_id.startsWith("list-member:")) return;
     const res = await fetch(`/api/crm/pipeline/${row.pipeline_id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -983,6 +994,19 @@ export function TargetListSpreadsheet({
     setRemovingPipelineId(pipelineId);
     setGlobalError(null);
     try {
+      if (isCrmList && listId) {
+        const row = rows?.find((r) => r.pipeline_id === pipelineId);
+        const companyId = row?.company_id;
+        if (!companyId) throw new Error("Company not found");
+        const res = await fetch(
+          `/api/crm/lists/${listId}/target-list?company_id=${encodeURIComponent(companyId)}`,
+          { method: "DELETE", credentials: "include" }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "Remove failed");
+        setRows((prev) => prev?.filter((r) => r.company_id !== companyId) ?? prev);
+        return;
+      }
       if (isMaster && athleteIdsToRemove && athleteIdsToRemove.length > 0) {
         for (const aid of athleteIdsToRemove) {
           const res = await fetch(`/api/athletes/${aid}/target-list`, {
@@ -1102,14 +1126,17 @@ export function TargetListSpreadsheet({
   }
 
   async function importTargetListFile(file: File) {
-    if (!athleteId) return;
+    if (!isCrmList && !athleteId) return;
     setImporting(true);
     setGlobalError(null);
     try {
       const formData = new FormData();
       formData.append("file", file);
-      formData.append("replace", "1");
-      const res = await fetch(`/api/athletes/${athleteId}/target-list/import`, {
+      const importUrl = isCrmList
+        ? `/api/crm/lists/${listId}/import`
+        : `/api/athletes/${athleteId}/target-list/import`;
+      if (!isCrmList) formData.append("replace", "1");
+      const res = await fetch(importUrl, {
         method: "POST",
         body: formData,
         credentials: "include",
@@ -1121,8 +1148,9 @@ export function TargetListSpreadsheet({
         `Imported ${data.companies ?? 0} ${data.companies === 1 ? "company" : "companies"}`,
         `${data.contacts_inserted ?? 0} contacts added`,
       ];
-      if (data.cleared) parts.push(`${data.cleared} previous rows cleared`);
-      if (data.cards_archived) parts.push(`${data.cards_archived} pipeline cards archived`);
+      if (!isCrmList && data.cleared) parts.push(`${data.cleared} previous rows cleared`);
+      if (!isCrmList && data.cards_archived) parts.push(`${data.cards_archived} pipeline cards archived`);
+      if (isCrmList && data.members_added) parts.push(`${data.members_added} added to list`);
       setUpdateToast(parts.join(" · "));
       if (rowErrors.length > 0) {
         setGlobalError(
@@ -1412,6 +1440,18 @@ export function TargetListSpreadsheet({
                       >
                         {importing ? "Importing…" : "Import Excel (replace list)"}
                       </button>
+                    ) : isCrmList && listId ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBulkActionsOpen(false);
+                          importFileInputRef.current?.click();
+                        }}
+                        disabled={importing || loading}
+                        className="block w-full px-3 py-2 text-left text-xs text-[#D7D0C4] hover:bg-white/5 disabled:opacity-50"
+                      >
+                        {importing ? "Importing…" : "Import Excel (merge into list)"}
+                      </button>
                     ) : null}
                     {isAthlete && athleteName && athleteId ? (
                       <Link
@@ -1611,6 +1651,19 @@ export function TargetListSpreadsheet({
                   ) : (
                     "Import Excel (replace list)"
                   )}
+                </button>
+              ) : isCrmList && listId ? (
+                <button
+                  type="button"
+                  onClick={() => importFileInputRef.current?.click()}
+                  disabled={importing || loading}
+                  className={cn(
+                    bulkActionBtnClass,
+                    "border-white/15 bg-[#1A211D] text-[#D7D0C4] hover:bg-white/5"
+                  )}
+                  title="Import brands and merge them into this list"
+                >
+                  {importing ? "Importing…" : "Import Excel (merge into list)"}
                 </button>
               ) : null}
               {selectedOwnPipelineIds.length > 0 ? (

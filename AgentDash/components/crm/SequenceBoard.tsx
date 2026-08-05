@@ -32,6 +32,7 @@ type PotentialAthlete = {
 
 type BoardRow = {
   id: string;
+  company_id: string;
   company_name: string;
   product_category: string | null;
   pipeline_stage: string;
@@ -60,19 +61,19 @@ function categoryKey(category: string | null | undefined): string {
 
 function parsePotentialAthletes(raw: unknown): PotentialAthlete[] {
   if (!Array.isArray(raw)) return [];
-  return raw
-    .map((p) => {
-      if (!p || typeof p !== "object") return null;
-      const rec = p as Record<string, unknown>;
-      const athlete_id = String(rec.athlete_id ?? "").trim();
-      if (!athlete_id) return null;
-      return {
-        athlete_id,
-        name: rec.name != null ? String(rec.name) : undefined,
-        sport: rec.sport != null ? String(rec.sport) : null,
-      };
-    })
-    .filter((p): p is PotentialAthlete => p != null);
+  const out: PotentialAthlete[] = [];
+  for (const p of raw) {
+    if (!p || typeof p !== "object") continue;
+    const rec = p as Record<string, unknown>;
+    const athlete_id = String(rec.athlete_id ?? "").trim();
+    if (!athlete_id) continue;
+    out.push({
+      athlete_id,
+      name: rec.name != null ? String(rec.name) : undefined,
+      sport: rec.sport != null ? String(rec.sport) : null,
+    });
+  }
+  return out;
 }
 
 function touchClass(status: TouchStatus, due: boolean, blocked: boolean): string {
@@ -152,6 +153,7 @@ export function SequenceBoard() {
 
           rows.push({
             id,
+            company_id: String(c.company_id ?? ""),
             company_name: String(c.company_name ?? "Company"),
             product_category: canonicalizeCompanyCategory(c.product_category),
             pipeline_stage: String(c.pipeline_stage ?? ""),

@@ -4,6 +4,7 @@ import type { OutreachChannel } from "@/lib/crm/outreach-sequence";
 import {
   cadenceFieldsFromSequence,
   type CardStepState,
+  sortSequenceSteps,
   type SequenceStepDef,
 } from "@/lib/crm/outreach-sequence";
 import { pickRoundRobinVariant, type OutreachVariant } from "@/lib/crm/outreach-variants";
@@ -106,7 +107,7 @@ export async function getActiveSequence(
 
   return {
     sequence: seq as { id: string; name: string; version: number },
-    steps: (steps ?? []) as SequenceStepDef[],
+    steps: sortSequenceSteps((steps ?? []) as SequenceStepDef[]),
   };
 }
 

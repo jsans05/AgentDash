@@ -27,6 +27,10 @@ export async function POST(
   try {
     const result = await persistApolloMetadataForCompany(supabaseAdmin, companyId, { force });
 
+    if ("needsConfirmation" in result && result.needsConfirmation) {
+      return NextResponse.json(result);
+    }
+
     const { data: company } = await supabaseAdmin
       .from("companies")
       .select(COMPANY_FIRMOGRAPHICS_DB_COLUMNS)

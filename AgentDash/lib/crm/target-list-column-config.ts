@@ -1,4 +1,4 @@
-export type TargetListVariant = "athlete" | "consulting" | "master";
+export type TargetListVariant = "athlete" | "consulting" | "master" | "crm_list";
 
 export const TARGET_LIST_FIRMOGRAPHICS_COLUMN = "Firmographics" as const;
 export const TARGET_LIST_AGENCY_ACTIVITY_COLUMN = "Agency Activity" as const;
@@ -63,7 +63,7 @@ export const CONSULTING_TARGET_LIST_COLUMNS = [
 
 export function getTargetListColumns(variant: TargetListVariant): readonly string[] {
   if (variant === "consulting") return CONSULTING_TARGET_LIST_COLUMNS;
-  if (variant === "master") return MASTER_TARGET_LIST_COLUMNS;
+  if (variant === "master" || variant === "crm_list") return MASTER_TARGET_LIST_COLUMNS;
   return ATHLETE_TARGET_LIST_COLUMNS;
 }
 

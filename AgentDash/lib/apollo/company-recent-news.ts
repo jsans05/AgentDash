@@ -22,6 +22,9 @@ export async function fetchCompanyRecentNews(
 
   if (!apolloOrgId) {
     const result = await persistApolloMetadataForCompany(supabaseAdmin, companyId);
+    if ("needsConfirmation" in result && result.needsConfirmation) {
+      return { articles: [], apollo_organization_id: null };
+    }
     apolloOrgId = result.apollo_organization_id;
   }
 

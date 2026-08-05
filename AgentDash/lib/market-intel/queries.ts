@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import type { StockChartPayload } from "@/lib/market-data/stock-display";
 
 export type CupDriverRow = {
   id: string;
@@ -96,6 +97,37 @@ export type BrandEnrichmentRow = {
   headcount_twelve_month_growth: number | null;
   headcount_twenty_four_month_growth: number | null;
   departmental_head_count: Record<string, number> | null;
+  match_confidence: string | null;
+  match_notes: string | null;
+  ticker: string | null;
+  stock_symbol: string | null;
+  stock_symbol_override: string | null;
+  exchange: string | null;
+  stock_currency: string | null;
+  market_cap: number | null;
+  share_price: number | null;
+  share_price_change_pct: number | null;
+  stock_change_5d_pct: number | null;
+  stock_change_3m_pct: number | null;
+  stock_change_12m_pct: number | null;
+  stock_52w_high: number | null;
+  stock_52w_low: number | null;
+  stock_beta: number | null;
+  stock_sparkline: StockChartPayload | null;
+  market_data_as_of: string | null;
+  open_jobs_count: number | null;
+  open_jobs_source: string | null;
+  open_jobs_as_of: string | null;
+  instagram_handle: string | null;
+  facebook_page_url: string | null;
+  meta_page_id: string | null;
+  meta_ads_library_url: string | null;
+  meta_ads_latest_start: string | null;
+  meta_ads_active_count: number | null;
+  meta_ads_status: string | null;
+  meta_ads_as_of: string | null;
+  spend_readiness_score: number | null;
+  spend_readiness_label: string | null;
   news_articles: Array<{
     id: string;
     title: string;
@@ -273,19 +305,108 @@ export function aggregateBrands(
     .sort((a, b) => a.displayName.localeCompare(b.displayName));
 }
 
-export type BrandSortKey =
-  | "brand-asc"
-  | "brand-desc"
-  | "placements-asc"
-  | "placements-desc";
-
 export function brandPlacementCount(brand: AggregatedBrand): number {
   return brand.teamPlacements.length + brand.venuePlacements.length;
 }
 
+export type BrandSortKey =
+  | "brand-asc"
+  | "brand-desc"
+  | "placements-asc"
+  | "placements-desc"
+  | "revenue-desc"
+  | "revenue-asc"
+  | "employees-desc"
+  | "employees-asc"
+  | "funding-desc"
+  | "funding-asc"
+  | "growth12-desc"
+  | "growth12-asc";
+
+export type RevenueBucket =
+  | "unknown"
+  | "under_10m"
+  | "10m_50m"
+  | "50m_250m"
+  | "250m_1b"
+  | "over_1b";
+
+export type EmployeeBucket =
+  | "unknown"
+  | "under_50"
+  | "50_200"
+  | "200_1k"
+  | "1k_5k"
+  | "over_5k";
+
+export type EnrichmentFilter = "all" | "enriched" | "not_enriched";
+
+export type PlacementSourceFilter = "all" | "teams_only" | "venues_only" | "both";
+
+export type BrandFilters = {
+  enrichment: EnrichmentFilter;
+  revenueBuckets: RevenueBucket[];
+  employeeBuckets: EmployeeBucket[];
+  fundingStages: string[];
+  placementSource: PlacementSourceFilter;
+  sportTypes: string[];
+  teamOwners: string[];
+  venueKeys: string[];
+};
+
+export const DEFAULT_BRAND_FILTERS: BrandFilters = {
+  enrichment: "all",
+  revenueBuckets: [],
+  employeeBuckets: [],
+  fundingStages: [],
+  placementSource: "all",
+  sportTypes: [],
+  teamOwners: [],
+  venueKeys: [],
+};
+
+export function revenueBucketForBrand(
+  enrichment: BrandEnrichmentRow | undefined
+): RevenueBucket {
+  const rev = enrichment?.annual_revenue;
+  if (rev == null) return "unknown";
+  if (rev < 10_000_000) return "under_10m";
+  if (rev < 50_000_000) return "10m_50m";
+  if (rev < 250_000_000) return "50m_250m";
+  if (rev < 1_000_000_000) return "250m_1b";
+  return "over_1b";
+}
+
+export function employeeBucketForBrand(
+  enrichment: BrandEnrichmentRow | undefined
+): EmployeeBucket {
+  const employees = enrichment?.estimated_num_employees;
+  if (employees == null) return "unknown";
+  if (employees < 50) return "under_50";
+  if (employees < 200) return "50_200";
+  if (employees < 1000) return "200_1k";
+  if (employees < 5000) return "1k_5k";
+  return "over_5k";
+}
+
+function brandSportTypes(brand: AggregatedBrand, venueSportByKey: Map<string, string | null>): string[] {
+  const sports = new Set<string>();
+  if (brand.teamPlacements.length > 0) sports.add("nascar");
+  for (const placement of brand.venuePlacements) {
+    const sport = venueSportByKey.get(placement.entity_key);
+    if (sport) sports.add(sport.toLowerCase());
+  }
+  return [...sports];
+}
+
+function numericOrNegInfinity(value: number | null | undefined): number {
+  return value == null || Number.isNaN(value) ? Number.NEGATIVE_INFINITY : value;
+}
+
 export function sortBrands(
   brands: AggregatedBrand[],
-  sort: BrandSortKey
+  sort: BrandSortKey,
+  enrichmentByKey: Record<string, BrandEnrichmentRow> = {}
 ): AggregatedBrand[] {
   const sorted = [...brands];
   switch (sort) {
@@ -309,6 +430,70 @@ export function sortBrands(
           a.displayName.localeCompare(b.displayName)
       );
       break;
+    case "revenue-desc":
+      sorted.sort(
+        (a, b) =>
+          numericOrNegInfinity(enrichmentByKey[b.key]?.annual_revenue) -
+            numericOrNegInfinity(enrichmentByKey[a.key]?.annual_revenue) ||
+          a.displayName.localeCompare(b.displayName)
+      );
+      break;
+    case "revenue-asc":
+      sorted.sort(
+        (a, b) =>
+          numericOrNegInfinity(enrichmentByKey[a.key]?.annual_revenue) -
+            numericOrNegInfinity(enrichmentByKey[b.key]?.annual_revenue) ||
+          a.displayName.localeCompare(b.displayName)
+      );
+      break;
+    case "employees-desc":
+      sorted.sort(
+        (a, b) =>
+          numericOrNegInfinity(enrichmentByKey[b.key]?.estimated_num_employees) -
+            numericOrNegInfinity(enrichmentByKey[a.key]?.estimated_num_employees) ||
+          a.displayName.localeCompare(b.displayName)
+      );
+      break;
+    case "employees-asc":
+      sorted.sort(
+        (a, b) =>
+          numericOrNegInfinity(enrichmentByKey[a.key]?.estimated_num_employees) -
+            numericOrNegInfinity(enrichmentByKey[b.key]?.estimated_num_employees) ||
+          a.displayName.localeCompare(b.displayName)
+      );
+      break;
+    case "funding-desc":
+      sorted.sort(
+        (a, b) =>
+          numericOrNegInfinity(enrichmentByKey[b.key]?.total_funding) -
+            numericOrNegInfinity(enrichmentByKey[a.key]?.total_funding) ||
+          a.displayName.localeCompare(b.displayName)
+      );
+      break;
+    case "funding-asc":
+      sorted.sort(
+        (a, b) =>
+          numericOrNegInfinity(enrichmentByKey[a.key]?.total_funding) -
+            numericOrNegInfinity(enrichmentByKey[b.key]?.total_funding) ||
+          a.displayName.localeCompare(b.displayName)
+      );
+      break;
+    case "growth12-desc":
+      sorted.sort(
+        (a, b) =>
+          numericOrNegInfinity(enrichmentByKey[b.key]?.headcount_twelve_month_growth) -
+            numericOrNegInfinity(enrichmentByKey[a.key]?.headcount_twelve_month_growth) ||
+          a.displayName.localeCompare(b.displayName)
+      );
+      break;
+    case "growth12-asc":
+      sorted.sort(
+        (a, b) =>
+          numericOrNegInfinity(enrichmentByKey[a.key]?.headcount_twelve_month_growth) -
+            numericOrNegInfinity(enrichmentByKey[b.key]?.headcount_twelve_month_growth) ||
+          a.displayName.localeCompare(b.displayName)
+      );
+      break;
   }
   return sorted;
 }
@@ -316,28 +501,91 @@ export function sortBrands(
 export function filterBrands(
   brands: AggregatedBrand[],
   query: string,
-  cupDrivers: CupDriverRow[]
+  cupDrivers: CupDriverRow[],
+  filters: BrandFilters = DEFAULT_BRAND_FILTERS,
+  enrichmentByKey: Record<string, BrandEnrichmentRow> = {},
+  venueSportByKey: Map<string, string | null> = new Map()
 ): AggregatedBrand[] {
   const q = query.trim().toLowerCase();
-  if (!q) return brands;
 
   const matchingOwnerNames = new Set<string>();
-  for (const driver of cupDrivers) {
-    const owner = driver.owner_name?.trim();
-    if (
-      driver.driver_name.toLowerCase().includes(q) ||
-      driver.car_no.toLowerCase().includes(q) ||
-      (owner?.toLowerCase().includes(q) ?? false)
-    ) {
-      if (owner) matchingOwnerNames.add(owner.toLowerCase());
+  if (q) {
+    for (const driver of cupDrivers) {
+      const owner = driver.owner_name?.trim();
+      if (
+        driver.driver_name.toLowerCase().includes(q) ||
+        driver.car_no.toLowerCase().includes(q) ||
+        (owner?.toLowerCase().includes(q) ?? false)
+      ) {
+        if (owner) matchingOwnerNames.add(owner.toLowerCase());
+      }
     }
   }
 
   return brands.filter((brand) => {
-    if (
-      brand.displayName.toLowerCase().includes(q) ||
-      brand.key.includes(q)
-    ) {
+    const enrichment = enrichmentByKey[brand.key];
+
+    if (filters.enrichment === "enriched" && !enrichment) return false;
+    if (filters.enrichment === "not_enriched" && enrichment) return false;
+
+    if (filters.revenueBuckets.length > 0) {
+      const bucket = revenueBucketForBrand(enrichment);
+      if (!filters.revenueBuckets.includes(bucket)) return false;
+    }
+
+    if (filters.employeeBuckets.length > 0) {
+      const bucket = employeeBucketForBrand(enrichment);
+      if (!filters.employeeBuckets.includes(bucket)) return false;
+    }
+
+    if (filters.fundingStages.length > 0) {
+      const stage = enrichment?.latest_funding_stage?.trim().toLowerCase() ?? "";
+      const hasFunding = enrichment?.total_funding != null || Boolean(stage);
+      const matches = filters.fundingStages.some((filterStage) => {
+        const normalized = filterStage.toLowerCase();
+        if (normalized === "has_funding") return hasFunding;
+        if (normalized === "no_funding_data") return !hasFunding;
+        return stage.includes(normalized);
+      });
+      if (!matches) return false;
+    }
+
+    const teamCount = brand.teamPlacements.length;
+    const venueCount = brand.venuePlacements.length;
+    switch (filters.placementSource) {
+      case "teams_only":
+        if (teamCount === 0 || venueCount > 0) return false;
+        break;
+      case "venues_only":
+        if (venueCount === 0 || teamCount > 0) return false;
+        break;
+      case "both":
+        if (teamCount === 0 || venueCount === 0) return false;
+        break;
+      default:
+        break;
+    }
+
+    if (filters.sportTypes.length > 0) {
+      const sports = brandSportTypes(brand, venueSportByKey);
+      if (!filters.sportTypes.some((sport) => sports.includes(sport.toLowerCase()))) {
+        return false;
+      }
+    }
+
+    if (filters.teamOwners.length > 0) {
+      const owners = new Set(brand.teamPlacements.map((p) => p.owner_name));
+      if (!filters.teamOwners.some((owner) => owners.has(owner))) return false;
+    }
+
+    if (filters.venueKeys.length > 0) {
+      const keys = new Set(brand.venuePlacements.map((p) => p.entity_key));
+      if (!filters.venueKeys.some((key) => keys.has(key))) return false;
+    }
+
+    if (!q) return true;
+
+    if (brand.displayName.toLowerCase().includes(q) || brand.key.includes(q)) {
       return true;
     }
 
@@ -352,6 +600,30 @@ export function filterBrands(
 
     return false;
   });
+}
+
+export function collectFundingStages(
+  enrichmentByKey: Record<string, BrandEnrichmentRow>
+): string[] {
+  const stages = new Set<string>();
+  for (const row of Object.values(enrichmentByKey)) {
+    const stage = row.latest_funding_stage?.trim();
+    if (stage) stages.add(stage);
+  }
+  return [...stages].sort((a, b) => a.localeCompare(b));
+}
+
+export function countActiveBrandFilters(filters: BrandFilters): number {
+  let count = 0;
+  if (filters.enrichment !== "all") count += 1;
+  count += filters.revenueBuckets.length;
+  count += filters.employeeBuckets.length;
+  count += filters.fundingStages.length;
+  if (filters.placementSource !== "all") count += 1;
+  count += filters.sportTypes.length;
+  count += filters.teamOwners.length;
+  count += filters.venueKeys.length;
+  return count;
 }
 
 export function countUniqueTeamOwners(teamSponsors: TeamSponsorRow[]): number {

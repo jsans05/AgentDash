@@ -227,6 +227,10 @@ export type CrmCompanyPipeline = {
   sequence_id: string | null;
   /** When the multi-channel sequence was started for this card */
   sequence_started_at: string | null;
+  /** Primary CRM contact for this company card */
+  contact_of_record_id: string | null;
+  /** CRM contact currently being sequenced; falls back to contact_of_record_id */
+  sequence_contact_id: string | null;
   created_at: string;
   updated_at: string;
 };

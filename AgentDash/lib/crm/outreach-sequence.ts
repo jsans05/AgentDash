@@ -171,6 +171,63 @@ export function anyStepResponded(states: CardStepState[]): boolean {
   return states.some((s) => s.response_status === "responded");
 }
 
+/**
+ * True when the sequence has been started, the card has not responded, and every
+ * non-optional step is done or skipped (optional steps may still be pending).
+ */
+export function isSequenceExhausted(
+  steps: SequenceStepDef[],
+  states: CardStepState[],
+  card: SequenceCardFields
+): boolean {
+  if (!card.sequence_started_at || card.responded_at) return false;
+  const required = steps.filter((s) => !s.is_optional);
+  if (required.length === 0) return false;
+  return required.every((step) => {
+    const touch = getStepState(states, step.id)?.touch_status ?? "pending";
+    return touch === "done" || touch === "skipped";
+  });
+}
+
+/** Main outreach chain — each step waits for the prior one. LI1–LI3 run in parallel. */
+export const MAIN_SEQUENCE_CHAIN = [
+  "E1",
+  "E2",
+  "C1",
+  "IG1",
+  "LI4",
+  "SE1",
+  "C2",
+  "IG2",
+  "BK1",
+] as const;
+
+/** Column order on the sequence board (includes parallel LinkedIn warm-up steps). */
+export const SEQUENCE_DISPLAY_ORDER = [
+  "LI1",
+  "LI2",
+  "LI3",
+  "E1",
+  "E2",
+  "C1",
+  "IG1",
+  "LI4",
+  "SE1",
+  "C2",
+  "IG2",
+  "BK1",
+] as const;
+
+export function sortSequenceSteps(steps: SequenceStepDef[]): SequenceStepDef[] {
+  const order = new Map(SEQUENCE_DISPLAY_ORDER.map((code, index) => [code, index]));
+  return [...steps].sort((a, b) => {
+    const ai = order.get(a.short_code as (typeof SEQUENCE_DISPLAY_ORDER)[number]) ?? 999;
+    const bi = order.get(b.short_code as (typeof SEQUENCE_DISPLAY_ORDER)[number]) ?? 999;
+    if (ai !== bi) return ai - bi;
+    return a.step_order - b.step_order;
+  });
+}
+
 /** Day-13 LI message is gated on day-4 connection acceptance. */
 export function isStepBlocked(
   step: SequenceStepDef,

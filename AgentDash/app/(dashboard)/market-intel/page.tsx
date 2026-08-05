@@ -14,8 +14,8 @@ export default async function MarketIntelPage() {
       <div className="mb-6">
         <h1 className="text-2xl font-semibold text-[#F4F1EB]">Market intel</h1>
         <p className="mt-1 text-sm text-[#B9B2A6]">
-          NASCAR Cup standings and sponsors, stadium partners, MotoGP, and Formula 1 — refreshed
-          by the market sponsor scraper.
+          NASCAR Cup standings and sponsors, stadium partners, MotoGP, Formula 1, and SCORE —
+          refreshed by the market sponsor scraper.
         </p>
       </div>
 

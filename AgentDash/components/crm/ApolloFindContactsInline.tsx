@@ -324,7 +324,7 @@ export function ApolloFindContactsInline({
         onClose={() => setOrgPickerOpen(false)}
         onSelected={({ apollo_organization_name, match_notes, pending_contacts_cleared }) => {
           const cleared =
-            pending_contacts_cleared > 0
+            (pending_contacts_cleared ?? 0) > 0
               ? ` Cleared ${pending_contacts_cleared} pending contact(s).`
               : "";
           const base =

@@ -24,18 +24,21 @@ type OrgCandidatesResponse = {
   } | null;
   candidates?: OrgCandidate[];
   company_name?: string;
+  brand_name?: string;
   error?: string;
 };
 
 type ApolloOrgPickerDialogProps = {
   open: boolean;
-  companyId: string;
+  companyId?: string;
+  brandKey?: string;
   companyName?: string;
   onClose: () => void;
   onSelected: (payload: {
+    apollo_organization_id: string;
     apollo_organization_name: string;
     match_notes?: string;
-    pending_contacts_cleared: number;
+    pending_contacts_cleared?: number;
   }) => void;
 };
 
@@ -48,6 +51,7 @@ function confidenceBadge(conf: string) {
 export function ApolloOrgPickerDialog({
   open,
   companyId,
+  brandKey,
   companyName,
   onClose,
   onSelected,
@@ -62,9 +66,10 @@ export function ApolloOrgPickerDialog({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/apollo/companies/${companyId}/org-candidates`, {
-        credentials: "include",
-      });
+      const url = brandKey
+        ? `/api/market-intel/brands/org-candidates?brand_key=${encodeURIComponent(brandKey)}`
+        : `/api/apollo/companies/${companyId}/org-candidates`;
+      const res = await fetch(url, { credentials: "include" });
       const json = (await res.json().catch(() => ({}))) as OrgCandidatesResponse;
       if (!res.ok) throw new Error(json.error || `Failed to load organizations (${res.status})`);
       setData(json);
@@ -74,7 +79,7 @@ export function ApolloOrgPickerDialog({
     } finally {
       setLoading(false);
     }
-  }, [companyId]);
+  }, [brandKey, companyId]);
 
   useEffect(() => {
     if (open) void load();
@@ -84,29 +89,46 @@ export function ApolloOrgPickerDialog({
     setSelectingId(apollo_organization_id);
     setError(null);
     try {
-      const res = await fetch(`/api/apollo/companies/${companyId}/select-organization`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ apollo_organization_id }),
-      });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json.error || `Failed to update company (${res.status})`);
-      onSelected({
-        apollo_organization_name: json.organization?.apollo_organization_name ?? "",
-        match_notes: json.organization?.match_notes,
-        pending_contacts_cleared: json.pending_contacts_cleared ?? 0,
-      });
+      if (brandKey) {
+        const res = await fetch("/api/market-intel/brands/select-organization", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ brand_key: brandKey, apollo_organization_id }),
+        });
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(json.error || `Failed to update brand (${res.status})`);
+        onSelected({
+          apollo_organization_id,
+          apollo_organization_name: json.organization?.match_notes?.replace(/^Using Apollo org "/, "").split('"')[0] ?? "",
+          match_notes: json.organization?.match_notes,
+        });
+      } else if (companyId) {
+        const res = await fetch(`/api/apollo/companies/${companyId}/select-organization`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ apollo_organization_id }),
+        });
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(json.error || `Failed to update company (${res.status})`);
+        onSelected({
+          apollo_organization_id,
+          apollo_organization_name: json.organization?.apollo_organization_name ?? "",
+          match_notes: json.organization?.match_notes,
+          pending_contacts_cleared: json.pending_contacts_cleared ?? 0,
+        });
+      }
       onClose();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to update company");
+      setError(e instanceof Error ? e.message : "Failed to update organization");
     } finally {
       setSelectingId(null);
       setConfirmId(null);
     }
   }
 
-  const label = companyName || data?.company_name || "this company";
+  const label = companyName || data?.brand_name || data?.company_name || "this company";
   const confirmCandidate = data?.candidates?.find((c) => c.apollo_organization_id === confirmId);
 
   if (!open) return null;
@@ -126,13 +148,11 @@ export function ApolloOrgPickerDialog({
         >
           <h2 className="text-sm font-semibold text-[#DBEEE0]">Choose Apollo company</h2>
           <p className="mt-1 text-xs text-[#AEA79A]">
-            Pick the correct organization for {label}. Pending Apollo contacts from a wrong match
-            will be removed.
+            Pick the correct organization for {label}.
+            {companyId ? " Pending Apollo contacts from a wrong match will be removed." : null}
           </p>
 
-          {loading ? (
-            <p className="mt-4 text-xs text-[#B9B2A6]">Loading Apollo matches…</p>
-          ) : null}
+          {loading ? <p className="mt-4 text-xs text-[#B9B2A6]">Loading Apollo matches…</p> : null}
           {error ? <p className="mt-3 text-xs text-[#E8A8A8]">{error}</p> : null}
 
           {!loading && data?.candidates?.length ? (
@@ -218,10 +238,14 @@ export function ApolloOrgPickerDialog({
                 Set <span className="text-[#DBEEE0]">{confirmCandidate.name}</span> as the Apollo
                 record for {label}.
               </p>
-              <p className="text-[#AEA79A]">
-                Unrevealed Apollo contacts found for the previous match will be removed. Re-run Find
-                contacts after saving.
-              </p>
+              {companyId ? (
+                <p className="text-[#AEA79A]">
+                  Unrevealed Apollo contacts found for the previous match will be removed. Re-run
+                  Find contacts after saving.
+                </p>
+              ) : (
+                <p className="text-[#AEA79A]">Firmographics will be fetched for this organization.</p>
+              )}
             </>
           ) : (
             <p>Confirm organization selection.</p>

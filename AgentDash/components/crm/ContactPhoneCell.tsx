@@ -18,6 +18,8 @@ type Props = {
   firstName?: string | null;
   lastName?: string | null;
   onRevealed?: (contact: Record<string, unknown>) => void;
+  /** When set, empty non-Apollo phones can be typed and saved. */
+  onManualSave?: (phone: string | null) => Promise<void> | void;
   compact?: boolean;
 };
 
@@ -31,11 +33,14 @@ export function ContactPhoneCell({
   firstName,
   lastName,
   onRevealed,
+  onManualSave,
   compact,
 }: Props) {
   const [revealing, setRevealing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [draft, setDraft] = useState(phone ?? "");
+  const [saving, setSaving] = useState(false);
 
   const canEnrich = canEnrichContactViaApollo({
     apollo_person_id: apolloPersonId,
@@ -81,16 +86,28 @@ export function ContactPhoneCell({
     setConfirmOpen(true);
   }
 
+  async function saveManual() {
+    if (!onManualSave) return;
+    const next = draft.trim() || null;
+    if (next === (phone?.trim() || null)) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await onManualSave(next);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save phone");
+      setDraft(phone ?? "");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   if (phone) {
     return (
       <a href={`tel:${phone.replace(/\s/g, "")}`} className="break-all text-[#CEE4D4] hover:underline">
         {phone}
       </a>
     );
-  }
-
-  if (!canEnrich) {
-    return <span className="text-[#8E877A]">—</span>;
   }
 
   const btn =
@@ -130,6 +147,23 @@ export function ContactPhoneCell({
         >
           {revealing ? "…" : "Reveal phone"}
         </button>
+      ) : onManualSave ? (
+        <input
+          type="tel"
+          value={draft}
+          disabled={saving}
+          placeholder="Add phone"
+          className="w-full min-w-[7rem] rounded border border-white/15 bg-[#101513] px-1.5 py-0.5 text-[11px] text-[#ECE7DF] placeholder:text-[#5E574C]"
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => void saveManual()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.currentTarget.blur();
+            }
+          }}
+        />
+      ) : !canEnrich ? (
+        <span className="text-[#8E877A]">—</span>
       ) : null}
       {error ? <span className="block text-[10px] text-[#F1A2A2]">{error}</span> : null}
     </div>

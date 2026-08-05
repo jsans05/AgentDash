@@ -68,6 +68,8 @@ const PATCH_KEYS = new Set([
   "timezone",
   "sequence_id",
   "sequence_started_at",
+  "contact_of_record_id",
+  "sequence_contact_id",
 ]);
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -168,9 +170,43 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     } else if (key === "timezone") {
       const v = body.timezone;
       updates.timezone = v == null || String(v).trim() === "" ? null : String(v).trim();
+    } else if (key === "contact_of_record_id" || key === "sequence_contact_id") {
+      const v = body[key as keyof typeof body];
+      updates[key] = v == null || String(v).trim() === "" ? null : String(v).trim();
     } else {
       updates[key] = body[key as keyof typeof body];
     }
+  }
+
+  for (const key of ["contact_of_record_id", "sequence_contact_id"] as const) {
+    const contactId = updates[key];
+    if (contactId == null || contactId === undefined) continue;
+    const { data: contact, error: contactErr } = await supabase
+      .from("crm_contacts")
+      .select("contact_id, company_id")
+      .eq("contact_id", contactId)
+      .eq("created_by_user_id", profile.user_id)
+      .eq("archived", false)
+      .maybeSingle();
+    if (contactErr) {
+      return NextResponse.json({ error: contactErr.message }, { status: 500 });
+    }
+    if (!contact || contact.company_id !== current.company_id) {
+      return NextResponse.json(
+        { error: `${key} must be a contact on this company` },
+        { status: 400 }
+      );
+    }
+  }
+
+  // If of-record is set and talking-to is empty, default talking-to to of-record.
+  if (
+    Object.prototype.hasOwnProperty.call(updates, "contact_of_record_id") &&
+    updates.contact_of_record_id &&
+    !Object.prototype.hasOwnProperty.call(updates, "sequence_contact_id") &&
+    !current.sequence_contact_id
+  ) {
+    updates.sequence_contact_id = updates.contact_of_record_id;
   }
 
   if (markDraftSentAt) {

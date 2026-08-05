@@ -29,7 +29,7 @@ export async function POST(req: Request) {
     return NextResponse.json(
       {
         error:
-          "Phone reveal requires APOLLO_WEBHOOK_BASE_URL (public HTTPS app URL) to receive Apollo callbacks",
+          "Phone reveal needs a public HTTPS app URL for Apollo callbacks. Set APOLLO_WEBHOOK_BASE_URL (recommended) or NEXT_PUBLIC_APP_URL / APP_URL to your deployed domain (e.g. https://agentdash-ten.vercel.app). localhost cannot receive Apollo webhooks.",
       },
       { status: 503 }
     );

@@ -1,6 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 
 async function parseJsonResponse(res: Response): Promise<Record<string, unknown>> {
   const text = await res.text();
@@ -12,11 +19,32 @@ async function parseJsonResponse(res: Response): Promise<Record<string, unknown>
   }
 }
 
-export function FeedbackWidget() {
+type FeedbackContextValue = {
+  openFeedback: () => void;
+};
+
+const FeedbackContext = createContext<FeedbackContextValue>({
+  openFeedback: () => {},
+});
+
+export function useFeedback() {
+  return useContext(FeedbackContext);
+}
+
+export function FeedbackProvider({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [status, setStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [status, setStatus] = useState<{ type: "success" | "error"; message: string } | null>(
+    null
+  );
+
+  const openFeedback = useCallback(() => {
+    setStatus(null);
+    setOpen(true);
+  }, []);
+
+  const value = useMemo(() => ({ openFeedback }), [openFeedback]);
 
   async function submitFeedback(e: React.FormEvent) {
     e.preventDefault();
@@ -54,10 +82,12 @@ export function FeedbackWidget() {
   }
 
   return (
-    <>
+    <FeedbackContext.Provider value={value}>
+      {children}
+
       {status && (
         <div
-          className={`fixed bottom-24 right-6 z-40 max-w-sm rounded-md border px-3 py-2 text-sm shadow ${
+          className={`fixed bottom-6 right-6 z-40 max-w-sm rounded-md border px-3 py-2 text-sm shadow ${
             status.type === "success"
               ? "border-[#2E7040]/50 bg-[#1B2F21] text-[#DBEEE0]"
               : "border-[#8C3A3A]/50 bg-[#3A1E1E] text-[#F1A2A2]"
@@ -68,7 +98,7 @@ export function FeedbackWidget() {
       )}
 
       {open && (
-        <div className="fixed inset-0 z-50 flex items-end justify-end bg-black/35 p-4 sm:items-center sm:justify-center">
+        <div className="fixed inset-0 z-[70] flex items-end justify-end bg-black/35 p-4 sm:items-center sm:justify-center">
           <div className="w-full max-w-lg rounded-lg border border-white/15 bg-[#151A17] p-5 shadow-xl">
             <div className="flex items-start justify-between gap-4">
               <h2 className="text-lg font-semibold text-[#F4F1EB]">Share feedback</h2>
@@ -108,14 +138,11 @@ export function FeedbackWidget() {
           </div>
         </div>
       )}
-
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="fixed bottom-6 right-6 z-40 rounded-full bg-[#2E7040] px-4 py-3 text-sm font-semibold text-white shadow-lg transition hover:bg-[#285F36]"
-      >
-        Feedback
-      </button>
-    </>
+    </FeedbackContext.Provider>
   );
+}
+
+/** @deprecated Use FeedbackProvider — kept as alias for any stray imports */
+export function FeedbackWidget({ children }: { children?: ReactNode }) {
+  return <FeedbackProvider>{children ?? null}</FeedbackProvider>;
 }
