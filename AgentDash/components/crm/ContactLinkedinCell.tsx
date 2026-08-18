@@ -18,6 +18,7 @@ type Props = {
   apolloPersonId?: string | null;
   onRevealed?: (contact: Record<string, unknown>) => void;
   compact?: boolean;
+  disabled?: boolean;
 };
 
 export function ContactLinkedinCell({
@@ -29,6 +30,7 @@ export function ContactLinkedinCell({
   apolloPersonId,
   onRevealed,
   compact,
+  disabled,
 }: Props) {
   const [revealing, setRevealing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,6 +39,7 @@ export function ContactLinkedinCell({
   const safe = linkedinUrl ? safeHttpUrl(linkedinUrl) : null;
   const canEnrich =
     Boolean(contactId) &&
+    !disabled &&
     canEnrichContactViaApollo({
       apollo_person_id: apolloPersonId,
       email,

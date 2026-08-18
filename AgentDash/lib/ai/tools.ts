@@ -3114,7 +3114,7 @@ export async function createAITools(profile: Profile) {
             role: c.role,
             apollo_reveal_status: c.apollo_reveal_status,
           })),
-          note: "Contacts are pending until the user clicks Reveal in the Target List or pipeline (uses Apollo credits). Default search uses Brand Design + Business Development + Partnerships with verified email, then any verified contact if no matches. Do not auto-reveal.",
+          note: "Contacts are pending until the user clicks Reveal in the Target List or pipeline (uses Apollo credits). Default search uses Marketing + Sales (Business Development, Partnerships) with verified email, then any verified contact if no matches. Do not auto-reveal.",
         };
       } catch (e: any) {
         return { ok: false as const, error: e?.message ?? "Apollo find contacts failed" };

@@ -14,7 +14,7 @@ import {
   groupVenueSponsorsByVenue,
 } from "@/lib/market-intel/queries";
 
-type Tab = "brands" | "cup" | "teams" | "venues" | "motogp" | "f1" | "score";
+type Tab = "brands" | "cup" | "teams" | "venues" | "motogp" | "f1";
 
 type FocusTarget =
   | { type: "team"; ownerName: string }
@@ -58,14 +58,9 @@ function isF1Sport(sportType: string | null | undefined) {
   return sportKey(sportType) === "f1";
 }
 
-function isScoreSport(sportType: string | null | undefined) {
-  return sportKey(sportType) === "score";
-}
-
 function tabForVenueSport(sportType: string | null | undefined): Tab {
   if (isMotoGpSport(sportType)) return "motogp";
   if (isF1Sport(sportType)) return "f1";
-  if (isScoreSport(sportType)) return "score";
   return "venues";
 }
 
@@ -169,8 +164,6 @@ export function MarketIntelClient({
   const [expandedOwner, setExpandedOwner] = useState<string | null>(null);
   const [expandedVenue, setExpandedVenue] = useState<string | null>(null);
   const [focusTarget, setFocusTarget] = useState<FocusTarget | null>(null);
-  const [syncBusy, setSyncBusy] = useState(false);
-  const [syncMessage, setSyncMessage] = useState<string | null>(null);
 
   const sponsorsByOwner = useMemo(
     () => groupTeamSponsorsByOwner(teamSponsors),
@@ -192,13 +185,7 @@ export function MarketIntelClient({
   }, [cupDrivers]);
 
   const stadiumVenues = useMemo(
-    () =>
-      venues.filter(
-        (v) =>
-          !isMotoGpSport(v.sport_type) &&
-          !isF1Sport(v.sport_type) &&
-          !isScoreSport(v.sport_type)
-      ),
+    () => venues.filter((v) => !isMotoGpSport(v.sport_type) && !isF1Sport(v.sport_type)),
     [venues]
   );
   const motoGpVenues = useMemo(
@@ -207,10 +194,6 @@ export function MarketIntelClient({
   );
   const f1Venues = useMemo(
     () => venues.filter((v) => isF1Sport(v.sport_type)),
-    [venues]
-  );
-  const scoreVenues = useMemo(
-    () => venues.filter((v) => isScoreSport(v.sport_type)),
     [venues]
   );
 
@@ -261,7 +244,6 @@ export function MarketIntelClient({
     { id: "venues", label: "Stadiums" },
     { id: "motogp", label: "MotoGP" },
     { id: "f1", label: "Formula 1" },
-    { id: "score", label: "SCORE" },
   ];
 
   return (
@@ -283,44 +265,7 @@ export function MarketIntelClient({
             </button>
           ))}
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <p className="text-xs text-[#8E877A]">Last sync: {fmtDate(lastSyncAt)}</p>
-          <button
-            type="button"
-            disabled={syncBusy}
-            onClick={() => {
-              setSyncBusy(true);
-              setSyncMessage(null);
-              void (async () => {
-                try {
-                  const res = await fetch("/api/market-intel/sync", {
-                    method: "POST",
-                    credentials: "include",
-                  });
-                  const data = await res.json();
-                  if (!res.ok) {
-                    throw new Error(data?.error || "Sync failed");
-                  }
-                  setSyncMessage(
-                    data.message ?? "Scrape started — refresh in a few minutes."
-                  );
-                } catch (e) {
-                  setSyncMessage(e instanceof Error ? e.message : "Sync failed");
-                } finally {
-                  setSyncBusy(false);
-                }
-              })();
-            }}
-            className="rounded-md border border-white/10 bg-[#151A17] px-2.5 py-1 text-xs text-[#CEE4D4] transition hover:bg-[#1A211D] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {syncBusy ? "Starting…" : "Sync"}
-          </button>
-          {syncMessage && (
-            <p className="text-xs text-[#CEE4D4]" role="status">
-              {syncMessage}
-            </p>
-          )}
-        </div>
+        <p className="text-xs text-[#8E877A]">Last sync: {fmtDate(lastSyncAt)}</p>
       </div>
 
       {tab === "brands" && (
@@ -485,17 +430,6 @@ export function MarketIntelClient({
           setExpandedVenue={setExpandedVenue}
           focusTarget={focusTarget}
           emptyMessage="No Formula 1 teams synced yet. Scrape venues with sport_type f1, then run sync."
-        />
-      )}
-
-      {tab === "score" && (
-        <VenueAccordionList
-          venues={scoreVenues}
-          sponsorsByVenue={sponsorsByVenue}
-          expandedVenue={expandedVenue}
-          setExpandedVenue={setExpandedVenue}
-          focusTarget={focusTarget}
-          emptyMessage="No SCORE teams synced yet. Scrape venues with sport_type score, then run sync."
         />
       )}
     </div>

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { requireNonAccounting } from "@/lib/auth";
 import { fetchAthleteTargetListRows } from "@/lib/crm/athlete-target-list-server";
+import { canManageAssignedCrmRows } from "@/lib/crm/assigned-row-access";
 import type { TargetListContact, TargetListRow } from "@/lib/crm/athlete-target-list";
 import { enrichTargetListRowsWithAgencyActivity } from "@/lib/crm/company-cross-agent-activity-server";
 import { removeAthleteFromTargetListCard } from "@/lib/crm/remove-athlete-from-target-list";
@@ -47,7 +48,10 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   try {
     const rows = await fetchAthleteTargetListRows(supabase, profile.user_id, athleteId);
     const enriched = await enrichTargetListRowsWithAgencyActivity(rows, profile.user_id);
-    return NextResponse.json({ rows: enriched });
+    return NextResponse.json({
+      rows: enriched,
+      can_manage_assigned_rows: canManageAssignedCrmRows(profile.role),
+    });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? "Failed to load target list" }, { status: 500 });
   }

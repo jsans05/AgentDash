@@ -6,6 +6,7 @@ import { findContactsForCompany } from "@/lib/apollo/find-company-contacts";
 import { ApolloApiError } from "@/lib/apollo/client";
 import { parseContactSearchOverridesFromBody } from "@/lib/apollo/contact-search-api-body";
 import { apolloContactOverridesToPeopleSearch } from "@/lib/apollo/search-defaults";
+import { resolveCrmWriteOwnerUserId } from "@/lib/crm/assigned-row-access";
 
 export async function POST(req: Request) {
   const profile = await requireNonAccounting();
@@ -30,6 +31,10 @@ export async function POST(req: Request) {
   );
   const consultingProfileId =
     body.consulting_profile_id != null ? String(body.consulting_profile_id).trim() || null : null;
+  const rawOwners =
+    body.company_owners && typeof body.company_owners === "object" && !Array.isArray(body.company_owners)
+      ? (body.company_owners as Record<string, unknown>)
+      : {};
 
   const supabaseAdmin = await createServiceRoleClient();
   const results: Array<{
@@ -45,8 +50,14 @@ export async function POST(req: Request) {
 
   for (const companyId of companyIds) {
     try {
+      const writeOwnerUserId = await resolveCrmWriteOwnerUserId(
+        supabaseAdmin,
+        profile,
+        companyId,
+        rawOwners[companyId] != null ? String(rawOwners[companyId]) : null
+      );
       const result = await findContactsForCompany(supabaseAdmin, {
-        userId: profile.user_id,
+        userId: writeOwnerUserId,
         companyId,
         overrides,
         consultingProfileId: consultingProfileId ?? undefined,

@@ -19,11 +19,12 @@ export const APOLLO_DEFAULT_PERSON_SENIORITIES = [
 ] as const;
 
 /**
- * Apollo person_department_or_subdepartments values for default Find contacts:
- * Marketing & Design → Brand Design; Sales → Business Development + Partnerships.
+ * Apollo person_department_or_subdepartments for default Find contacts:
+ * Marketing (full parent) + Sales sub-depts Business Development & Partnerships only.
+ * Verified email is applied separately via APOLLO_DEFAULT_CONTACT_EMAIL_STATUS.
  */
 export const APOLLO_DEFAULT_PERSON_DEPARTMENTS = [
-  "brand_design",
+  "master_marketing",
   "business_development",
   "partnerships",
 ] as const;
@@ -37,9 +38,8 @@ export type ApolloContactSearchMode = "partnership" | "all_verified";
 
 export function formatApolloPartnershipSearchSummary(): string {
   return (
-    "Departments & job function: Marketing & Design (Brand Design only) and " +
-    "Sales (Business Development, Partnerships). Verified email only. " +
-    "If no matches, automatically searches any verified contact at the company."
+    "Departments & job function: Marketing (all) and Sales (Business Development, Partnerships only). " +
+    "Verified email only. If no matches, automatically searches any verified contact at the company."
   );
 }
 

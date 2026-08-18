@@ -85,7 +85,7 @@ export async function POST(req: Request) {
     if (matched.last_name && matched.last_name !== "—") patch.last_name = matched.last_name;
     if (matched.title) patch.role = matched.title;
 
-    const { data: updated, error: updateErr } = await supabase
+    const { data: updated, error: updateErr } = await supabaseAdmin
       .from("crm_contacts")
       .update(patch)
       .eq("contact_id", contact_id)

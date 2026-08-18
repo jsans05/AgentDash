@@ -13,6 +13,11 @@ import {
   type TargetListRow,
 } from "@/lib/crm/athlete-target-list";
 import { canonicalizeCompanyCategory } from "@/lib/crm/company-category";
+import {
+  applyLeftoverContactsToEmptyOwners,
+  leftoverContactIdsToAdopt,
+  ownerCompanyKey,
+} from "@/lib/crm/attach-target-list-contacts";
 
 function normalizeText(value: unknown): string {
   return String(value ?? "").trim().toLowerCase();
@@ -72,7 +77,9 @@ function dedupeContactsForCompany(contacts: TargetListContact[]): TargetListCont
 /**
  * Shared athlete target list: every non-archived pipeline card (any teammate)
  * where `potential_athletes` includes `athleteId`. Contacts are scoped per
- * card owner so outreach drafts do not cross-pollinate.
+ * card owner so outreach drafts do not cross-pollinate. Contacts left on a
+ * previous owner after assignment are adopted by the unique current owner
+ * (and still displayed on empty assignee rows if more than one owner exists).
  *
  * Server-only — do not import from client components.
  */
@@ -128,7 +135,6 @@ export async function fetchAthleteTargetListRows(
     company_id: String(r.company_id ?? ""),
   }));
   const companyIds = [...new Set(ownerCompanyPairs.map((p) => p.company_id).filter(Boolean))];
-  const ownerIds = [...new Set(ownerCompanyPairs.map((p) => p.owner_id).filter(Boolean))];
 
   const { data: contactRows, error: contactErr } = await supabaseAdmin
     .from("crm_contacts")
@@ -136,15 +142,35 @@ export async function fetchAthleteTargetListRows(
       "contact_id, company_id, created_by_user_id, first_name, last_name, role, email, phone, notes, linkedin_url, apollo_person_id, apollo_reveal_status, apollo_phone_reveal_status, email_drafts, archived"
     )
     .in("company_id", companyIds)
-    .in("created_by_user_id", ownerIds)
     .eq("archived", false);
   if (contactErr) {
     throw new Error(contactErr.message);
   }
 
+  const adoptByOwner = leftoverContactIdsToAdopt(
+    ownerCompanyPairs,
+    (contactRows ?? []).map((c) => ({
+      contact_id: String(c.contact_id),
+      company_id: String(c.company_id),
+      created_by_user_id: String(c.created_by_user_id ?? ""),
+    }))
+  );
+  const adoptedOwnerByContactId = new Map<string, string>();
+  for (const [ownerId, ids] of adoptByOwner) {
+    if (ids.length === 0) continue;
+    const { error: adoptErr } = await supabaseAdmin
+      .from("crm_contacts")
+      .update({ created_by_user_id: ownerId })
+      .in("contact_id", ids);
+    if (adoptErr) throw new Error(adoptErr.message);
+    for (const id of ids) adoptedOwnerByContactId.set(id, ownerId);
+  }
+
   const contactsByOwnerCompany = new Map<string, TargetListContact[]>();
   for (const c of contactRows ?? []) {
-    const key = `${c.created_by_user_id}::${c.company_id}`;
+    const ownerId =
+      adoptedOwnerByContactId.get(String(c.contact_id)) ?? String(c.created_by_user_id ?? "");
+    const key = ownerCompanyKey(ownerId, String(c.company_id));
     const outreach = pickContactOutreachDraft(c.email_drafts, athleteId);
     const list = contactsByOwnerCompany.get(key) ?? [];
     list.push({
@@ -172,13 +198,15 @@ export async function fetchAthleteTargetListRows(
     contactsByOwnerCompany.set(key, list);
   }
 
+  applyLeftoverContactsToEmptyOwners(ownerCompanyPairs, contactsByOwnerCompany);
+
   const rows: TargetListRow[] = assigned.map((r: Record<string, unknown>) => {
     const company = Array.isArray(r.companies) ? r.companies[0] : r.companies;
     const companyRec = company as Record<string, unknown> | null | undefined;
     const profile = Array.isArray(r.profiles) ? r.profiles[0] : r.profiles;
     const ownerUserId = String(r.created_by_user_id ?? "");
     const category = canonicalizeCompanyCategory(companyRec?.product_category);
-    const contactKey = `${ownerUserId}::${r.company_id}`;
+    const contactKey = ownerCompanyKey(ownerUserId, String(r.company_id));
     const contacts = dedupeContactsForCompany(contactsByOwnerCompany.get(contactKey) ?? []);
     return {
       pipeline_id: String(r.id),

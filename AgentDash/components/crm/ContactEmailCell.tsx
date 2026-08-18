@@ -43,6 +43,7 @@ type Props = {
   onDeleted: () => void;
   onSaveEmail?: (email: string) => Promise<void>;
   hideDelete?: boolean;
+  disabled?: boolean;
 };
 
 export function ContactEmailCell({
@@ -53,21 +54,28 @@ export function ContactEmailCell({
   onDeleted,
   onSaveEmail,
   hideDelete,
+  disabled,
 }: Props) {
   const isApollo = apolloRevealStatus === "pending" || apolloRevealStatus === "revealed";
+
+  if (disabled && !email) {
+    return <span className="text-[#8E877A]">—</span>;
+  }
 
   if (apolloRevealStatus === "pending" && email) {
     return (
       <div className="flex flex-col gap-1">
         <EmailWithCopy email={email} />
-        <ApolloContactActions
-          contactId={contactId}
-          apolloRevealStatus={apolloRevealStatus}
-          onRevealed={onRevealed}
-          onDeleted={onDeleted}
-          hideDelete={hideDelete}
-          compact
-        />
+        {disabled ? null : (
+          <ApolloContactActions
+            contactId={contactId}
+            apolloRevealStatus={apolloRevealStatus}
+            onRevealed={onRevealed}
+            onDeleted={onDeleted}
+            hideDelete={hideDelete}
+            compact
+          />
+        )}
       </div>
     );
   }
@@ -79,7 +87,8 @@ export function ContactEmailCell({
         apolloRevealStatus={apolloRevealStatus}
         onRevealed={onRevealed}
         onDeleted={onDeleted}
-        hideDelete={hideDelete}
+        hideDelete={hideDelete || disabled}
+        disabled={disabled}
         compact
       />
     );
@@ -89,13 +98,14 @@ export function ContactEmailCell({
     return (
       <div className="flex flex-col gap-1">
         <EmailWithCopy email={email} />
-        {hideDelete ? null : (
+        {hideDelete || disabled ? null : (
           <ApolloContactActions
             contactId={contactId}
             apolloRevealStatus={apolloRevealStatus}
             onRevealed={onRevealed}
             onDeleted={onDeleted}
             hideDelete={hideDelete}
+            disabled={disabled}
             compact
           />
         )}
@@ -110,7 +120,8 @@ export function ContactEmailCell({
         apolloRevealStatus={apolloRevealStatus}
         onRevealed={onRevealed}
         onDeleted={onDeleted}
-        hideDelete={hideDelete}
+        hideDelete={hideDelete || disabled}
+        disabled={disabled}
         compact
       />
     );

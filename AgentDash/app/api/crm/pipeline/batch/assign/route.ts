@@ -1,5 +1,6 @@
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { requireNonAccounting } from "@/lib/auth";
+import { transferPipelineContacts } from "@/lib/crm/transfer-pipeline-contacts";
 import { NextResponse } from "next/server";
 
 const MAX_BATCH_SIZE = 50;
@@ -152,6 +153,17 @@ export async function POST(req: Request) {
     if (archiveErr) {
       return NextResponse.json({ error: archiveErr.message }, { status: 500 });
     }
+  }
+
+  try {
+    await transferPipelineContacts(supabaseAdmin, {
+      fromUserId: profile.user_id,
+      toUserId: assigneeUserId,
+      companyIds,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Failed to transfer contacts";
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 
   const assigneeName =

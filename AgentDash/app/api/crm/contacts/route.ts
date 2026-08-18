@@ -14,6 +14,7 @@ import {
 import { mapContactApiRow } from "@/lib/crm/map-contact-api-row";
 import { CONTACTS_PAGE_SIZE } from "@/lib/crm/contacts-list-query";
 import { assertNotBlockedCompanyName } from "@/lib/import/blocked-company-names";
+import { resolveCrmWriteOwnerUserId } from "@/lib/crm/assigned-row-access";
 
 function normalizeText(value: unknown): string {
   return String(value ?? "").trim().toLowerCase();
@@ -330,6 +331,19 @@ export async function POST(req: Request) {
 
   const company_id = await getOrCreateCompanyByName(supabaseAdmin, company_name);
 
+  let writeOwnerUserId = profile.user_id;
+  try {
+    writeOwnerUserId = await resolveCrmWriteOwnerUserId(
+      supabaseAdmin,
+      profile,
+      company_id,
+      body.owner_user_id != null ? String(body.owner_user_id) : null
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Invalid owner";
+    return NextResponse.json({ error: msg }, { status: 400 });
+  }
+
   let category: string | null = null;
   if (taxonomy_id) {
     const { data: taxonomyRow, error: taxonomyError } = await supabaseAdmin
@@ -343,7 +357,7 @@ export async function POST(req: Request) {
 
   const insertPayload = {
     company_id,
-    created_by_user_id: profile.user_id,
+    created_by_user_id: writeOwnerUserId,
     consulting_profile_id,
     first_name,
     last_name,
@@ -374,7 +388,7 @@ export async function POST(req: Request) {
   if (consulting_profile_id) {
     existingQuery = existingQuery.eq("consulting_profile_id", consulting_profile_id);
   } else {
-    existingQuery = existingQuery.eq("created_by_user_id", profile.user_id);
+    existingQuery = existingQuery.eq("created_by_user_id", writeOwnerUserId);
   }
   const { data: existingRows, error: existingError } = await existingQuery.limit(200);
   if (existingError) return internalServerError(existingError, "crm-contacts:post:existing-lookup");

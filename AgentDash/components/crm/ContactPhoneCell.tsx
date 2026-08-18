@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { TargetListActionDialog } from "@/components/crm/TargetListActionDialog";
+import { readJsonResponse } from "@/lib/api/read-json-response";
 import { canEnrichContactViaApollo } from "@/lib/apollo/contact-enrichment";
 import {
   isTargetListDialogDismissed,
@@ -21,6 +22,7 @@ type Props = {
   /** When set, empty non-Apollo phones can be typed and saved. */
   onManualSave?: (phone: string | null) => Promise<void> | void;
   compact?: boolean;
+  disabled?: boolean;
 };
 
 export function ContactPhoneCell({
@@ -35,6 +37,7 @@ export function ContactPhoneCell({
   onRevealed,
   onManualSave,
   compact,
+  disabled,
 }: Props) {
   const [revealing, setRevealing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -49,7 +52,7 @@ export function ContactPhoneCell({
     first_name: firstName,
     last_name: lastName,
   });
-  const canReveal = canEnrich && !phone && apolloPhoneRevealStatus !== "pending";
+  const canReveal = !disabled && canEnrich && !phone && apolloPhoneRevealStatus !== "pending";
   const isPending = apolloPhoneRevealStatus === "pending" && !phone;
 
   async function runReveal() {
@@ -62,8 +65,11 @@ export function ContactPhoneCell({
         credentials: "include",
         body: JSON.stringify({ contact_id: contactId }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Phone reveal failed");
+      const data = await readJsonResponse<{
+        contact?: Record<string, unknown>;
+        error?: string;
+      }>(res);
+      if (!res.ok) throw new Error(data.error || "Phone reveal failed");
       onRevealed?.(
         data.contact ?? {
           contact_id: contactId,
@@ -147,7 +153,7 @@ export function ContactPhoneCell({
         >
           {revealing ? "…" : "Reveal phone"}
         </button>
-      ) : onManualSave ? (
+      ) : onManualSave && !disabled ? (
         <input
           type="tel"
           value={draft}
@@ -162,9 +168,9 @@ export function ContactPhoneCell({
             }
           }}
         />
-      ) : !canEnrich ? (
+      ) : (
         <span className="text-[#8E877A]">—</span>
-      ) : null}
+      )}
       {error ? <span className="block text-[10px] text-[#F1A2A2]">{error}</span> : null}
     </div>
   );

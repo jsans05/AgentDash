@@ -49,6 +49,7 @@ type ApolloFindContactsInlineProps = {
   companyId: string;
   companyName?: string;
   consultingProfileId?: string;
+  ownerUserId?: string;
   disabled?: boolean;
   searchOverrides?: ApolloContactSearchOverrides;
   onRefineSearchClick?: () => void;
@@ -60,6 +61,7 @@ export function ApolloFindContactsInline({
   companyId,
   companyName,
   consultingProfileId,
+  ownerUserId,
   disabled,
   searchOverrides,
   onRefineSearchClick,
@@ -100,6 +102,9 @@ export function ApolloFindContactsInline({
       };
       if (consultingProfileId) {
         body.consulting_profile_id = consultingProfileId;
+      }
+      if (ownerUserId) {
+        body.owner_user_id = ownerUserId;
       }
       const res = await fetch(`/api/apollo/companies/${companyId}/find-contacts`, {
         method: "POST",
@@ -255,8 +260,7 @@ export function ApolloFindContactsInline({
       ) : null}
       {partnershipNoMatch && !allVerifiedNoMatch ? (
         <p className="text-[10px] text-[#D4C48A]">
-          No brand design / business development / partnerships contacts with verified email for{" "}
-          {label}. Try{" "}
+          No marketing / business development / partnerships contacts with verified email for {label}. Try{" "}
           <span className="text-[#E8D9A8]">Any verified email</span> to search all titles, or{" "}
           {onRefineSearchClick ? (
             <button

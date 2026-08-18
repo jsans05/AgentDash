@@ -20,6 +20,8 @@ type Props = {
   compact?: boolean;
   /** Hide remove-from-CRM (e.g. after outreach draft exists on target list). */
   hideDelete?: boolean;
+  /** Show existing values without reveal/delete actions. */
+  disabled?: boolean;
 };
 
 export function ApolloContactActions({
@@ -29,6 +31,7 @@ export function ApolloContactActions({
   onDeleted,
   compact,
   hideDelete,
+  disabled,
 }: Props) {
   const [revealing, setRevealing] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -36,7 +39,7 @@ export function ApolloContactActions({
   const [confirmMode, setConfirmMode] = useState<ConfirmMode | null>(null);
 
   const isApollo = apolloRevealStatus === "pending" || apolloRevealStatus === "revealed";
-  const canReveal = apolloRevealStatus === "pending";
+  const canReveal = apolloRevealStatus === "pending" && !disabled;
 
   async function runReveal() {
     setRevealing(true);
@@ -167,7 +170,7 @@ export function ApolloContactActions({
           {revealing ? "…" : "Reveal"}
         </button>
       ) : null}
-      {!hideDelete && (isApollo || contactId) ? (
+      {!hideDelete && !disabled && (isApollo || contactId) ? (
         <button
           type="button"
           disabled={revealing || deleting}

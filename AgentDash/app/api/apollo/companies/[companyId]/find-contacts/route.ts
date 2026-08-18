@@ -9,6 +9,7 @@ import {
   apolloContactOverridesToPeopleSearch,
   type ApolloContactSearchMode,
 } from "@/lib/apollo/search-defaults";
+import { resolveCrmWriteOwnerUserId } from "@/lib/crm/assigned-row-access";
 
 export async function POST(
   req: Request,
@@ -31,6 +32,8 @@ export async function POST(
 
   const consultingProfileId =
     body.consulting_profile_id != null ? String(body.consulting_profile_id).trim() || null : null;
+  const requestedOwnerUserId =
+    body.owner_user_id != null ? String(body.owner_user_id).trim() || null : null;
 
   const supabaseAdmin = await createServiceRoleClient();
 
@@ -40,8 +43,14 @@ export async function POST(
   }
 
   try {
+    const writeOwnerUserId = await resolveCrmWriteOwnerUserId(
+      supabaseAdmin,
+      profile,
+      companyId,
+      requestedOwnerUserId
+    );
     const result = await findContactsForCompany(supabaseAdmin, {
-      userId: profile.user_id,
+      userId: writeOwnerUserId,
       companyId,
       overrides,
       searchMode,

@@ -1,7 +1,5 @@
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { requireNonAccounting } from "@/lib/auth";
-import { quarantineEmail } from "@/lib/crm/email-quarantine";
-import { assertNotBlockedCompanyName } from "@/lib/import/blocked-company-names";
 import { NextResponse } from "next/server";
 
 function normalizeEmail(v: unknown): string | null {
@@ -65,7 +63,6 @@ async function getOrCreateCompanyByName(
   companyName: string
 ): Promise<string> {
   const name = companyName.trim();
-  assertNotBlockedCompanyName(name);
   const { data: existing, error: existingError } = await supabaseAdmin
     .from("companies")
     .select("company_id")
@@ -163,20 +160,6 @@ export async function PATCH(
         .select("*")
         .single();
       if (updateError) return NextResponse.json({ error: updateError.message }, { status: 500 });
-      if (status_tag === "red_bounced" && existing.email) {
-        try {
-          await quarantineEmail({
-            supabaseAdmin,
-            email: String(existing.email),
-            reason: "contact_red_bounced",
-            userId: String(existing.created_by_user_id),
-            companyId: existing.company_id ?? null,
-            contactId: contact_id,
-          });
-        } catch {
-          // Non-fatal
-        }
-      }
       return NextResponse.json({ contact: updated });
     }
 
@@ -188,20 +171,6 @@ export async function PATCH(
         .select("*")
         .single();
       if (updateError) return NextResponse.json({ error: updateError.message }, { status: 500 });
-      if (existing.email) {
-        try {
-          await quarantineEmail({
-            supabaseAdmin,
-            email: String(existing.email),
-            reason: "contact_red_bounced",
-            userId: String(existing.created_by_user_id),
-            companyId: existing.company_id ?? null,
-            contactId: contact_id,
-          });
-        } catch {
-          // Non-fatal
-        }
-      }
       return NextResponse.json({ contact: updated });
     }
 
@@ -282,31 +251,6 @@ export async function PATCH(
     return NextResponse.json({ error: "invalid outreach_mode" }, { status: 400 });
   }
 
-  const timezone =
-    Object.prototype.hasOwnProperty.call(body, "timezone")
-      ? body.timezone == null || String(body.timezone).trim() === ""
-        ? null
-        : String(body.timezone).trim()
-      : existing.timezone ?? null;
-
-  let status_tag = existing.status_tag;
-  if (body.status_tag != null) {
-    const nextStatus = String(body.status_tag);
-    const allowed = new Set(["none", "green_conversation", "yellow_authenticated", "red_bounced"]);
-    if (!allowed.has(nextStatus)) {
-      return NextResponse.json({ error: "invalid status_tag" }, { status: 400 });
-    }
-    status_tag = nextStatus as typeof status_tag;
-  }
-
-  let archived = existing.archived;
-  if (body.archived !== undefined) {
-    archived = Boolean(body.archived);
-  }
-  if (status_tag === "red_bounced") {
-    archived = true;
-  }
-
   if (!first_name || !last_name) {
     return NextResponse.json({ error: "first_name and last_name required" }, { status: 400 });
   }
@@ -330,7 +274,7 @@ export async function PATCH(
     category = null;
   }
 
-  const { data: updated, error: updateError } = await supabase
+  const { data: updated, error: updateError } = await supabaseAdmin
     .from("crm_contacts")
     .update({
       company_id,
@@ -346,9 +290,6 @@ export async function PATCH(
       product_description,
       notes,
       outreach_mode,
-      timezone,
-      status_tag,
-      archived,
       ...(body.email_drafts !== undefined ? { email_drafts: sanitizeEmailDrafts(body.email_drafts) } : {}),
     })
     .eq("contact_id", contact_id)

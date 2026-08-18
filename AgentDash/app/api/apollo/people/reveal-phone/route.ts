@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireNonAccounting } from "@/lib/auth";
+import { isNextRedirectError, unauthorizedResponse } from "@/lib/api/http-errors";
 import { createServerClient, createServiceRoleClient } from "@/lib/supabase/server";
 import { isApolloEnabled, isApolloPhoneRevealAllowed } from "@/lib/apollo/config";
 import { resolveOrganizationForCompany } from "@/lib/apollo/resolve-organization";
@@ -9,87 +10,94 @@ import { buildApolloPhoneWebhookUrl } from "@/lib/apollo/webhook-url";
 import { logApolloUsage } from "@/lib/apollo/usage";
 import { ApolloApiError } from "@/lib/apollo/client";
 
+/** Apollo match + org resolve can exceed the default serverless limit. */
+export const maxDuration = 60;
+
 export async function POST(req: Request) {
-  const profile = await requireNonAccounting();
-  if (!isApolloEnabled()) {
-    return NextResponse.json({ error: "Apollo API is not configured" }, { status: 503 });
-  }
-  if (!isApolloPhoneRevealAllowed()) {
-    return NextResponse.json({ error: "Apollo phone reveal is disabled" }, { status: 403 });
-  }
-
-  const body = await req.json().catch(() => ({}));
-  const contact_id = String(body.contact_id ?? "").trim();
-  if (!contact_id) {
-    return NextResponse.json({ error: "contact_id required" }, { status: 400 });
-  }
-
-  const webhookUrl = buildApolloPhoneWebhookUrl(contact_id);
-  if (!webhookUrl) {
-    return NextResponse.json(
-      {
-        error:
-          "Phone reveal needs a public HTTPS app URL for Apollo callbacks. Set APOLLO_WEBHOOK_BASE_URL (recommended) or NEXT_PUBLIC_APP_URL / APP_URL to your deployed domain (e.g. https://agentdash-ten.vercel.app). localhost cannot receive Apollo webhooks.",
-      },
-      { status: 503 }
-    );
-  }
-
-  const supabase = await createServerClient();
-  const { data: contact, error: loadErr } = await supabase
-    .from("crm_contacts")
-    .select(
-      "contact_id, company_id, created_by_user_id, first_name, last_name, role, email, phone, linkedin_url, apollo_person_id, apollo_phone_reveal_status, companies(name, website)"
-    )
-    .eq("contact_id", contact_id)
-    .single();
-
-  if (loadErr || !contact) {
-    return NextResponse.json({ error: "Contact not found" }, { status: 404 });
-  }
-  if (contact.created_by_user_id !== profile.user_id && profile.role !== "admin" && profile.role !== "sales") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
-  if (!canEnrichContactViaApollo(contact)) {
-    return NextResponse.json(
-      { error: "Add an email, LinkedIn URL, or full name to reveal phone via Apollo" },
-      { status: 400 }
-    );
-  }
-  if (contact.phone && contact.apollo_phone_reveal_status === "revealed") {
-    return NextResponse.json({
-      contact: {
-        contact_id: contact.contact_id,
-        phone: contact.phone,
-        apollo_phone_reveal_status: "revealed",
-      },
-      already_revealed: true,
-    });
-  }
-  if (contact.apollo_phone_reveal_status === "pending") {
-    return NextResponse.json({
-      contact: {
-        contact_id: contact.contact_id,
-        phone: contact.phone,
-        apollo_phone_reveal_status: "pending",
-      },
-      already_pending: true,
-    });
-  }
-
-  const company = Array.isArray(contact.companies) ? contact.companies[0] : contact.companies;
-  const companyName = String(company?.name ?? "").trim();
-
-  const supabaseAdmin = await createServiceRoleClient();
-  let domain: string | null = null;
   try {
-    const org = await resolveOrganizationForCompany(supabaseAdmin, contact.company_id);
-    domain = org.domain;
-  } catch {
-    domain = null;
-  }
+    const profile = await requireNonAccounting();
+    if (!isApolloEnabled()) {
+      return NextResponse.json({ error: "Apollo API is not configured" }, { status: 503 });
+    }
+    if (!isApolloPhoneRevealAllowed()) {
+      return NextResponse.json({ error: "Apollo phone reveal is disabled" }, { status: 403 });
+    }
 
-  try {
+    const body = await req.json().catch(() => ({}));
+    const contact_id = String(body.contact_id ?? "").trim();
+    if (!contact_id) {
+      return NextResponse.json({ error: "contact_id required" }, { status: 400 });
+    }
+
+    const webhookUrl = buildApolloPhoneWebhookUrl(contact_id);
+    if (!webhookUrl) {
+      return NextResponse.json(
+        {
+          error:
+            "Phone reveal needs a public HTTPS app URL for Apollo callbacks. Set APOLLO_WEBHOOK_BASE_URL (recommended) or NEXT_PUBLIC_APP_URL / APP_URL to your deployed domain (e.g. https://agentdash-ten.vercel.app). localhost cannot receive Apollo webhooks.",
+        },
+        { status: 503 }
+      );
+    }
+
+    const supabase = await createServerClient();
+    const { data: contact, error: loadErr } = await supabase
+      .from("crm_contacts")
+      .select(
+        "contact_id, company_id, created_by_user_id, first_name, last_name, role, email, phone, linkedin_url, apollo_person_id, apollo_phone_reveal_status, companies(name, website)"
+      )
+      .eq("contact_id", contact_id)
+      .single();
+
+    if (loadErr || !contact) {
+      return NextResponse.json({ error: "Contact not found" }, { status: 404 });
+    }
+    if (
+      contact.created_by_user_id !== profile.user_id &&
+      profile.role !== "admin" &&
+      profile.role !== "sales"
+    ) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+    if (!canEnrichContactViaApollo(contact)) {
+      return NextResponse.json(
+        { error: "Add an email, LinkedIn URL, or full name to reveal phone via Apollo" },
+        { status: 400 }
+      );
+    }
+    if (contact.phone && contact.apollo_phone_reveal_status === "revealed") {
+      return NextResponse.json({
+        contact: {
+          contact_id: contact.contact_id,
+          phone: contact.phone,
+          apollo_phone_reveal_status: "revealed",
+        },
+        already_revealed: true,
+      });
+    }
+    if (contact.apollo_phone_reveal_status === "pending") {
+      return NextResponse.json({
+        contact: {
+          contact_id: contact.contact_id,
+          phone: contact.phone,
+          apollo_phone_reveal_status: "pending",
+        },
+        already_pending: true,
+      });
+    }
+
+    const company = Array.isArray(contact.companies) ? contact.companies[0] : contact.companies;
+    const companyName = String(company?.name ?? "").trim();
+
+    const supabaseAdmin = await createServiceRoleClient();
+    let domain: string | null = null;
+    try {
+      const org = await resolveOrganizationForCompany(supabaseAdmin, contact.company_id);
+      domain = org.domain;
+    } catch {
+      domain = null;
+    }
+
     const { work_phone, apollo_person_id: resolvedPersonId } = await requestPersonPhoneReveal({
       apollo_person_id: contact.apollo_person_id,
       first_name: contact.first_name,
@@ -127,7 +135,7 @@ export async function POST(req: Request) {
       patch.phone = work_phone;
     }
 
-    const { data: updated, error: updateErr } = await supabase
+    const { data: updated, error: updateErr } = await supabaseAdmin
       .from("crm_contacts")
       .update(patch)
       .eq("contact_id", contact_id)
@@ -146,10 +154,14 @@ export async function POST(req: Request) {
         "Personal/mobile numbers are delivered asynchronously (usually within a few minutes) once Apollo verifies them.",
     });
   } catch (e) {
+    if (isNextRedirectError(e)) {
+      return unauthorizedResponse();
+    }
     if (e instanceof ApolloApiError) {
       return NextResponse.json({ error: e.message }, { status: e.status >= 400 ? e.status : 502 });
     }
     const msg = e instanceof Error ? e.message : "Phone reveal failed";
+    console.error("[apollo/people/reveal-phone]", e);
     return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

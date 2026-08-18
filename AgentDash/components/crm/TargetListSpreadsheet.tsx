@@ -318,6 +318,7 @@ export function TargetListSpreadsheet({
         : "Target List";
 
   const [rows, setRows] = useState<SpreadsheetRow[] | null>(null);
+  const [canManageAssignedRows, setCanManageAssignedRows] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -468,6 +469,7 @@ export function TargetListSpreadsheet({
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Failed to load target list");
       setRows(Array.isArray(data.rows) ? data.rows : []);
+      setCanManageAssignedRows(Boolean(data.can_manage_assigned_rows));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load target list");
     } finally {
@@ -1002,6 +1004,9 @@ export function TargetListSpreadsheet({
       role: patch.role ?? null,
       email: patch.email ?? null,
       phone: patch.phone ?? null,
+      ...(canManageAssignedRows && row.owner_user_id
+        ? { owner_user_id: row.owner_user_id }
+        : {}),
     };
     if (!payload.first_name || !payload.last_name) {
       throw new Error("First and last name required");
@@ -1125,11 +1130,21 @@ export function TargetListSpreadsheet({
     setBulkFindContacts(true);
     setGlobalError(null);
     const companyIds = [...new Set(rows.map((r) => r.company_id))];
+    const companyOwners: Record<string, string> = {};
+    for (const row of rows) {
+      if (!row.owner_user_id) continue;
+      if (!companyOwners[row.company_id] || row.is_own) {
+        companyOwners[row.company_id] = row.owner_user_id;
+      }
+    }
     try {
       const body: Record<string, unknown> = {
         company_ids: companyIds,
         ...contactSearchOverridesToRequestBody(apolloSearchOverrides),
       };
+      if (Object.keys(companyOwners).length > 0) {
+        body.company_owners = companyOwners;
+      }
       const res = await fetch("/api/apollo/companies/bulk-find-contacts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1639,7 +1654,9 @@ export function TargetListSpreadsheet({
               <p className="mt-0.5 text-xs text-[#B9B2A6]">
                 {isMaster
                   ? "Every company on your roster athletes' target lists in one view. Click any cell to edit in place; changes sync to the CRM. Rows without a contact are highlighted."
-                  : "Shared target list for this athlete across the team. Filter by assignee; only your rows are editable. Assign selected brands to teammates from the toolbar."}
+                  : canManageAssignedRows
+                    ? "Shared target list for this athlete across the team. Filter by assignee. You can still view and reveal contacts on brands assigned to teammates."
+                    : "Shared target list for this athlete across the team. Filter by assignee; only your rows are editable. Assign selected brands to teammates from the toolbar."}
               </p>
               {isAthlete && athleteName && athleteId ? (
                 <Link
@@ -2372,6 +2389,7 @@ export function TargetListSpreadsheet({
                 const yellow = !fr.hasContact;
                 const yellowCell = yellow ? "bg-[#3A3418]/90" : "";
                 const readOnly = row.is_own === false;
+                const contactLocked = readOnly && !canManageAssignedRows;
                 const fullName = contact
                   ? formatContactDisplayName(contact.first_name, contact.last_name)
                   : "";
@@ -2457,11 +2475,16 @@ export function TargetListSpreadsheet({
                           />
                             </span>
                           </label>
-                          {row.is_own !== false ? (
+                          {row.is_own !== false || canManageAssignedRows ? (
                             <>
                           <ApolloFindContactsInline
                             companyId={row.company_id}
                             companyName={row.company_name}
+                            ownerUserId={
+                              canManageAssignedRows && row.owner_user_id
+                                ? row.owner_user_id
+                                : undefined
+                            }
                             searchOverrides={apolloSearchOverrides}
                             onRefineSearchClick={() => setRefineSearchOpen(true)}
                             disabled={bulkFindContacts || removingPipelineId === row.pipeline_id}
@@ -2470,6 +2493,8 @@ export function TargetListSpreadsheet({
                             }
                             onError={(msg) => setGlobalError(msg)}
                           />
+                          {row.is_own !== false ? (
+                            <>
                           <button
                             type="button"
                             className="block w-full rounded border border-[#8C3A3A]/50 bg-[#2A1818] px-1.5 py-0.5 text-[10px] font-medium text-[#F1A2A2] hover:bg-[#3A1E1E] disabled:cursor-not-allowed disabled:opacity-50"
@@ -2504,6 +2529,28 @@ export function TargetListSpreadsheet({
                               removingPipelineId === row.pipeline_id
                             }
                           />
+                            </>
+                          ) : (
+                            <>
+                            <TargetListCompanyContactActions
+                              contacts={row.contacts}
+                              selectedContactIds={selectedContactIds}
+                              onSelectedContactIdsChange={setSelectedContactIds}
+                              onRequestBulkDelete={(contactIds, mode) =>
+                                requestBulkDeleteContacts(row.company_id, contactIds, mode)
+                              }
+                              deleting={deletingContactsCompanyId === row.company_id}
+                              disabled={
+                                bulkFindContacts ||
+                                bulkPartnershipResearch ||
+                                removingPipelineId === row.pipeline_id
+                              }
+                            />
+                            <span className="text-[10px] text-[#8E877A]">
+                              Assigned to teammate — contacts stay visible
+                            </span>
+                            </>
+                          )}
                             </>
                           ) : (
                             <span className="text-[10px] text-[#8E877A]">Assigned to teammate (read-only)</span>
@@ -2647,6 +2694,7 @@ export function TargetListSpreadsheet({
                           <EditableCell
                             value={fullName}
                             placeholder="First Last"
+                            disabled={contactLocked}
                             onSave={async (next) => {
                               const { first, last } = splitName(next);
                               if (!first || !last) {
@@ -2693,7 +2741,7 @@ export function TargetListSpreadsheet({
                       <EditableCell
                         value={contact?.role ?? ""}
                         placeholder="Role / Title"
-                        disabled={!contact}
+                        disabled={!contact || contactLocked}
                         onSave={async (next) => {
                           if (!contact) return;
                           await saveContactPatch(fr.rowIndex, fr.contactIndex!, { role: next || null });
@@ -2711,7 +2759,8 @@ export function TargetListSpreadsheet({
                           contactId={contact.contact_id}
                           email={contact.email}
                           apolloRevealStatus={contact.apollo_reveal_status ?? null}
-                          hideDelete={!isDeletableTargetListContact(contact)}
+                          hideDelete={!isDeletableTargetListContact(contact) || contactLocked}
+                          disabled={contactLocked}
                           onRevealed={(updated) => {
                             patchContactLocal(fr.rowIndex, fr.contactIndex!, {
                               email: (updated.email as string) ?? contact.email,
@@ -2728,7 +2777,7 @@ export function TargetListSpreadsheet({
                         <EditableCell
                           value={contact?.email ?? ""}
                           placeholder="name@company.com"
-                          disabled={!contact}
+                          disabled={!contact || contactLocked}
                           onSave={async (next) => {
                             if (!contact) return;
                             await saveContactPatch(fr.rowIndex, fr.contactIndex!, { email: next || null });
@@ -2761,6 +2810,7 @@ export function TargetListSpreadsheet({
                         lastName={contact?.last_name}
                         apolloPersonId={contact?.apollo_person_id}
                         compact
+                        disabled={contactLocked}
                         onRevealed={(updated) => {
                           if (!contact) return;
                           patchContactLocal(fr.rowIndex, fr.contactIndex!, {
@@ -2787,6 +2837,7 @@ export function TargetListSpreadsheet({
                           firstName={contact.first_name}
                           lastName={contact.last_name}
                           compact
+                          disabled={contactLocked}
                           onRevealed={(updated) => {
                             patchContactLocal(fr.rowIndex, fr.contactIndex!, {
                               phone: (updated.phone as string) ?? contact.phone,
@@ -2804,7 +2855,7 @@ export function TargetListSpreadsheet({
                         <EditableCell
                           value={contact?.phone ?? ""}
                           placeholder="+1 (555) 555-5555"
-                          disabled={!contact}
+                          disabled={!contact || contactLocked}
                           onSave={async (next) => {
                             if (!contact) return;
                             await saveContactPatch(fr.rowIndex, fr.contactIndex!, { phone: next || null });
@@ -2833,6 +2884,7 @@ export function TargetListSpreadsheet({
                         <EditableCell
                           value={row.hq_phone ?? ""}
                           placeholder="+1 (555) 555-5555"
+                          disabled={contactLocked}
                           onSave={async (next) => {
                             await savePipelinePatch(fr.rowIndex, { hq_phone: next || null });
                             patchRowLocal(fr.rowIndex, { hq_phone: next || null });
@@ -2889,9 +2941,9 @@ export function TargetListSpreadsheet({
                             value={row.past_partnerships ?? ""}
                             placeholder="Known previous sponsorships / partnerships…"
                             multiline
-                            minHeightPx={60}
-                            disabled={bulkPartnershipResearch || researchingPipelineId === row.pipeline_id}
-                            display={(v) => <PartnershipNotesDisplay text={v} />}
+                          minHeightPx={60}
+                          disabled={readOnly}
+                          display={(v) => <PartnershipNotesDisplay text={v} />}
                             onSave={async (next) => {
                               await savePipelinePatch(fr.rowIndex, { past_partnerships: next || null });
                               patchRowLocal(fr.rowIndex, { past_partnerships: next || null });
@@ -2929,6 +2981,7 @@ export function TargetListSpreadsheet({
                           placeholder="Your personal notes for this contact…"
                           multiline
                           minHeightPx={60}
+                          disabled={contactLocked}
                           onSave={async (next) => {
                             await saveContactPatch(fr.rowIndex, fr.contactIndex!, { notes: next || null });
                             patchContactLocal(fr.rowIndex, fr.contactIndex!, { notes: next || null });

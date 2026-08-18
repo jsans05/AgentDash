@@ -4,6 +4,7 @@ import { normalizePipelineContacts } from "@/lib/crm/pipeline-contacts";
 import { setMatchScoreForAthlete } from "@/lib/crm/potential-athletes";
 import { resolveCompanyWebsiteForTargetList } from "@/lib/crm/resolve-company-website-for-target-list";
 import { fetchPipelineCardById } from "@/lib/features/crm-pipeline/service";
+import { canManageAssignedCrmRows } from "@/lib/crm/assigned-row-access";
 import { NextResponse } from "next/server";
 
 function potentialAthletesAdded(
@@ -88,7 +89,10 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   if (curErr || !current) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
-  if (current.created_by_user_id !== profile.user_id) {
+  if (
+    current.created_by_user_id !== profile.user_id &&
+    !canManageAssignedCrmRows(profile.role)
+  ) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 

@@ -42,3 +42,13 @@ export function internalServerError(cause?: unknown, context?: string, publicMes
 export function unauthorizedResponse(publicMessage = "Unauthorized") {
   return apiErrorResponse({ status: 401, publicMessage });
 }
+
+/** `redirect()` from next/navigation throws with this digest in Route Handlers. */
+export function isNextRedirectError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "digest" in error &&
+    String((error as { digest?: unknown }).digest).startsWith("NEXT_REDIRECT")
+  );
+}
