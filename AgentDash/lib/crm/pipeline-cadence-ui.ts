@@ -30,6 +30,7 @@ export type PipelineCadenceCard = {
   latest_funding_stage?: string | null;
   headcount_twelve_month_growth?: number | null;
   firmographics_enriched_at?: string | null;
+  circle_back_at?: string | null;
 };
 
 export function cardToCadenceFields(card: PipelineCadenceCard): CadenceFields {
@@ -42,6 +43,7 @@ export function cardToCadenceFields(card: PipelineCadenceCard): CadenceFields {
     next_follow_up_at: card.next_follow_up_at ?? null,
     next_action: card.next_action ?? null,
     follow_up_log: card.follow_up_log ?? null,
+    circle_back_at: card.circle_back_at ?? null,
   };
 }
 
@@ -71,13 +73,27 @@ export function dueSortScore(card: PipelineCadenceCard): number {
   const due = isActionableDue(fields) ? 1000 : 0;
   const signal = signalPriorityScore(getCardSignals(card));
   const urgency =
-    fields.next_action === "call" ? 50 : fields.follow_up_step === 5 ? 10 : 30;
+    fields.circle_back_at && isActionableDue(fields)
+      ? 80
+      : fields.next_action === "call"
+        ? 50
+        : fields.follow_up_step === 5
+          ? 10
+          : 30;
   return due + signal * 10 + urgency;
 }
 
 export type DueBucket = "email" | "call" | "linkedin";
 
+function isCircleBackDueForCard(card: PipelineCadenceCard, now = new Date()): boolean {
+  if (!card.circle_back_at) return false;
+  return new Date(card.circle_back_at).getTime() <= now.getTime();
+}
+
 export function dueBucketForCard(card: PipelineCadenceCard): DueBucket | null {
+  if (card.circle_back_at) {
+    return isCircleBackDueForCard(card) ? "email" : null;
+  }
   if (card.responded_at) return null;
   const fields = cardToCadenceFields(card);
   const step = fields.follow_up_step ?? 0;
@@ -94,6 +110,9 @@ export function dueBucketForCard(card: PipelineCadenceCard): DueBucket | null {
 
 /** True when the card needs agent action now (not passive cooling). */
 export function isActionableDue(fields: CadenceFields): boolean {
+  if (fields.circle_back_at) {
+    return new Date(fields.circle_back_at).getTime() <= Date.now();
+  }
   if (fields.responded_at) return false;
   if (fields.follow_up_step === 5) return false;
   if (fields.pipeline_stage !== "outreach" && fields.pipeline_stage !== "follow_up") return false;
@@ -110,6 +129,7 @@ export function isActionableDue(fields: CadenceFields): boolean {
 export function listDueCards(cards: PipelineCadenceCard[]): PipelineCadenceCard[] {
   return cards
     .filter((c) => {
+      if (c.circle_back_at) return isCircleBackDueForCard(c);
       if (c.responded_at) return false;
       const fields = cardToCadenceFields(c);
       if (fields.follow_up_step === 5) return false;
@@ -121,6 +141,7 @@ export function listDueCards(cards: PipelineCadenceCard[]): PipelineCadenceCard[
 
 export function listCoolingCards(cards: PipelineCadenceCard[]): PipelineCadenceCard[] {
   return cards.filter((c) => {
+    if (c.circle_back_at) return false;
     if (c.responded_at) return false;
     const fields = cardToCadenceFields(c);
     return fields.follow_up_step === 5 && fields.pipeline_stage === "follow_up";

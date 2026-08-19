@@ -279,6 +279,22 @@ test("LI4 is blocked until LI3 connection accepted", () => {
   assert.equal(isStepBlocked(li4, STEPS, accepted).blocked, false);
 });
 
+test("cadenceFieldsFromSequence uses circle_back_at while sequence is paused", () => {
+  const paused = cadenceFieldsFromSequence(
+    STEPS,
+    [],
+    {
+      sequence_id: "seq",
+      sequence_started_at: "2026-07-01T00:00:00.000Z",
+      responded_at: "2026-07-05T00:00:00.000Z",
+      circle_back_at: "2026-10-20T10:00:00.000Z",
+    },
+    new Date("2026-07-20T00:00:00.000Z")
+  );
+  assert.equal(paused.next_action, "circle_back");
+  assert.equal(paused.next_follow_up_at, "2026-10-20T10:00:00.000Z");
+});
+
 test("cadenceFieldsFromSequence sets next_action from channel", () => {
   const fields = cadenceFieldsFromSequence(
     STEPS,

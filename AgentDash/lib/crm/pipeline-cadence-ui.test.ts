@@ -45,6 +45,32 @@ test("isActionableDue includes call step 3", () => {
   );
 });
 
+test("listDueCards includes circle-back reminders that are due", () => {
+  const card: PipelineCadenceCard = {
+    ...base,
+    responded_at: "2026-08-01T00:00:00Z",
+    follow_up_step: 2,
+    next_action: "circle_back",
+    next_follow_up_at: "2026-08-01T00:00:00Z",
+    circle_back_at: "2020-01-01T00:00:00Z",
+  };
+  const due = listDueCards([card]);
+  assert.equal(due.length, 1);
+});
+
+test("listDueCards excludes future circle-back reminders", () => {
+  const card: PipelineCadenceCard = {
+    ...base,
+    responded_at: "2026-08-01T00:00:00Z",
+    follow_up_step: 2,
+    next_action: "circle_back",
+    next_follow_up_at: "2099-01-01T00:00:00Z",
+    circle_back_at: "2099-01-01T00:00:00Z",
+  };
+  const due = listDueCards([card]);
+  assert.equal(due.length, 0);
+});
+
 test("listDueCards includes FU1 when date passed", () => {
   const card: PipelineCadenceCard = {
     ...base,

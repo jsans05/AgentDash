@@ -21,7 +21,7 @@ export async function GET(req: Request) {
   const { data: rows, error } = await supabase
     .from("crm_companies_pipeline")
     .select(
-      "id, pipeline_stage, outreach_at, responded_at, follow_up_step, last_touch_at, next_follow_up_at, next_action, follow_up_log"
+      "id, pipeline_stage, outreach_at, responded_at, follow_up_step, last_touch_at, next_follow_up_at, next_action, follow_up_log, circle_back_at"
     )
     .eq("archived", false)
     .in("pipeline_stage", ["outreach", "follow_up", "ghost"]);
@@ -39,8 +39,9 @@ export async function GET(req: Request) {
       follow_up_step: Number(row.follow_up_step ?? 0),
       last_touch_at: row.last_touch_at != null ? String(row.last_touch_at) : null,
       next_follow_up_at: row.next_follow_up_at != null ? String(row.next_follow_up_at) : null,
-      next_action: row.next_action as "email" | "linkedin" | "call" | "cool" | null,
+      next_action: row.next_action as "email" | "linkedin" | "call" | "cool" | "circle_back" | null,
       follow_up_log: normalizeFollowUpLog(row.follow_up_log),
+      circle_back_at: row.circle_back_at != null ? String(row.circle_back_at) : null,
     };
 
     const patch = buildCadenceDueUpdates(card);

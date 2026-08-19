@@ -14,6 +14,12 @@ import {
   type ResponseStatus,
 } from "@/lib/crm/outreach-sequence";
 import { TimezoneSelect } from "@/components/crm/TimezoneSelect";
+import { PotentialAthletesAssign } from "@/components/crm/PotentialAthletesAssign";
+import {
+  SequenceCircleBackBanner,
+  SequenceReplyPanel,
+} from "@/components/crm/SequenceCircleBackControls";
+import { isCircleBackDue } from "@/lib/crm/circle-back";
 import {
   buildFilterOptionsFromCards,
   FILTER_UNCATEGORIZED,
@@ -28,6 +34,7 @@ type PotentialAthlete = {
   athlete_id: string;
   name?: string;
   sport?: string | null;
+  match_score?: number | null;
 };
 
 type BoardRow = {
@@ -39,6 +46,8 @@ type BoardRow = {
   sequence_id: string | null;
   sequence_started_at: string | null;
   responded_at: string | null;
+  circle_back_at: string | null;
+  circle_back_note: string | null;
   website_url?: string | null;
   company_website?: string | null;
   potential_athletes: PotentialAthlete[];
@@ -70,6 +79,10 @@ function parsePotentialAthletes(raw: unknown): PotentialAthlete[] {
         athlete_id,
         name: rec.name != null ? String(rec.name) : undefined,
         sport: rec.sport != null ? String(rec.sport) : null,
+        match_score:
+          rec.match_score != null && Number.isFinite(Number(rec.match_score))
+            ? Number(rec.match_score)
+            : undefined,
       };
     })
     .filter((p): p is PotentialAthlete => p != null);
@@ -97,6 +110,9 @@ export function SequenceBoard() {
   const [filterCategory, setFilterCategory] = useState("");
   const [filterAthleteId, setFilterAthleteId] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [filterCircleBack, setFilterCircleBack] = useState(false);
+  const [replyMenu, setReplyMenu] = useState<{ cardId: string; stepId: string } | null>(null);
+  const [athleteMenuId, setAthleteMenuId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -133,6 +149,8 @@ export function SequenceBoard() {
           let sequence_id = c.sequence_id != null ? String(c.sequence_id) : null;
           let timezone = c.timezone != null ? String(c.timezone) : null;
           let responded_at = c.responded_at != null ? String(c.responded_at) : null;
+          let circle_back_at = c.circle_back_at != null ? String(c.circle_back_at) : null;
+          let circle_back_note = c.circle_back_note != null ? String(c.circle_back_note) : null;
 
           if (sequence_started_at || ["outreach", "follow_up"].includes(String(c.pipeline_stage))) {
             const r = await fetch(`/api/crm/sequence?card_id=${encodeURIComponent(id)}`, {
@@ -146,6 +164,8 @@ export function SequenceBoard() {
                 sequence_id = j.card.sequence_id ?? sequence_id;
                 timezone = j.card.timezone ?? timezone;
                 responded_at = j.card.responded_at ?? responded_at;
+                circle_back_at = j.card.circle_back_at ?? circle_back_at;
+                circle_back_note = j.card.circle_back_note ?? circle_back_note;
               }
             }
           }
@@ -159,6 +179,8 @@ export function SequenceBoard() {
             sequence_id,
             sequence_started_at,
             responded_at,
+            circle_back_at,
+            circle_back_note,
             website_url: c.website_url != null ? String(c.website_url) : null,
             company_website: c.company_website != null ? String(c.company_website) : null,
             potential_athletes: parsePotentialAthletes(c.potential_athletes),
@@ -210,13 +232,16 @@ export function SequenceBoard() {
     if (!data) return [];
     return data.rows.filter((row) => {
       if (filterDue) {
-        const hasDue = data.steps.some((step) => {
-          const st = row.states.find((s) => s.step_id === step.id);
-          const touch = (st?.touch_status ?? "pending") as TouchStatus;
-          return isStepDue(row.sequence_started_at, step.day_offset, touch);
-        });
+        const hasDue =
+          isCircleBackDue(row.circle_back_at) ||
+          data.steps.some((step) => {
+            const st = row.states.find((s) => s.step_id === step.id);
+            const touch = (st?.touch_status ?? "pending") as TouchStatus;
+            return isStepDue(step, data.steps, row.states, row.sequence_started_at, touch);
+          });
         if (!hasDue) return false;
       }
+      if (filterCircleBack && !row.circle_back_at) return false;
       if (filterCategory) {
         if (filterCategory === FILTER_UNCATEGORIZED) {
           if (!isEffectivelyUncategorizedCompanyCategory(row.product_category)) return false;
@@ -233,7 +258,7 @@ export function SequenceBoard() {
       }
       return true;
     });
-  }, [data, filterDue, filterCategory, filterAthleteId]);
+  }, [data, filterDue, filterCircleBack, filterCategory, filterAthleteId]);
 
   const tableColSpan = useMemo(() => {
     if (!data) return 4;
@@ -264,6 +289,7 @@ export function SequenceBoard() {
 
   const postAction = async (cardId: string, body: Record<string, unknown>) => {
     setBusyId(cardId);
+    setReplyMenu(null);
     try {
       const res = await fetch("/api/crm/sequence", {
         method: "POST",
@@ -307,6 +333,38 @@ export function SequenceBoard() {
     }
   };
 
+  const saveAthletes = async (
+    cardId: string,
+    next: BoardRow["potential_athletes"]
+  ) => {
+    setBusyId(cardId);
+    try {
+      const res = await fetch(`/api/crm/pipeline/${cardId}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ potential_athletes: next }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error ?? "Failed to save athlete");
+      const saved = parsePotentialAthletes(json.card?.potential_athletes ?? next);
+      setData((prev) =>
+        prev
+          ? {
+              ...prev,
+              rows: prev.rows.map((r) =>
+                r.id === cardId ? { ...r, potential_athletes: saved } : r
+              ),
+            }
+          : prev
+      );
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   if (loading) {
     return <p className="p-8 text-sm text-[#B9B2A6]">Loading sequence board…</p>;
   }
@@ -324,7 +382,9 @@ export function SequenceBoard() {
 
   if (!data) return null;
 
-  const hasActiveFilters = Boolean(filterDue || filterCategory || filterAthleteId);
+  const hasActiveFilters = Boolean(
+    filterDue || filterCircleBack || filterCategory || filterAthleteId
+  );
 
   return (
     <div className="space-y-4 p-4 sm:p-6">
@@ -335,7 +395,8 @@ export function SequenceBoard() {
             {data.sequence
               ? `${data.sequence.name} v${data.sequence.version}`
               : "No active sequence"}{" "}
-            — click cells to cycle status (gray → green → skipped). R cells track replies.
+            — click cells to cycle status. Assign or change the athlete under the company name. R cells
+            record replies, including “circle back in a couple months.”
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -345,6 +406,13 @@ export function SequenceBoard() {
             onClick={() => setFilterDue((v) => !v)}
           >
             {filterDue ? "Showing due" : "Due today"}
+          </Button>
+          <Button
+            size="sm"
+            variant={filterCircleBack ? "secondary" : "outline"}
+            onClick={() => setFilterCircleBack((v) => !v)}
+          >
+            {filterCircleBack ? "Circle-backs" : "Circle back"}
           </Button>
           <Button size="sm" variant="outline" onClick={() => void load()}>
             Refresh
@@ -401,6 +469,7 @@ export function SequenceBoard() {
             className="h-8 text-xs text-[#D7D0C4] hover:bg-white/5 hover:text-[#F4F1EB]"
             onClick={() => {
               setFilterDue(false);
+              setFilterCircleBack(false);
               setFilterCategory("");
               setFilterAthleteId("");
             }}
@@ -473,26 +542,63 @@ export function SequenceBoard() {
               }
 
               const { row, stripe } = item;
+              const circleDue = isCircleBackDue(row.circle_back_at);
               return (
                 <tr
                   key={row.id}
                   className={cn(
                     stripe % 2 === 0 ? "bg-[#0F1311]" : "bg-[#121614]",
-                    "hover:bg-[#181E1A]"
+                    "hover:bg-[#181E1A]",
+                    circleDue && "ring-1 ring-inset ring-amber-400/50"
                   )}
                 >
-                  <td className="sticky left-0 z-10 bg-inherit px-3 py-1.5">
+                  <td
+                    className={cn(
+                      "sticky left-0 bg-inherit px-3 py-1.5",
+                      athleteMenuId === row.id ? "z-30" : "z-10"
+                    )}
+                  >
                     <Link
                       href={`/crm?pipeline_id=${row.id}`}
                       className="font-medium text-[#F4F1EB] hover:underline"
                     >
                       {row.company_name}
                     </Link>
-                    {row.potential_athletes.length > 0 ? (
-                      <div className="text-[10px] text-[#8E877A]">
-                        {row.potential_athletes
-                          .map((a) => a.name?.trim() || "Athlete")
-                          .join(", ")}
+                    <PotentialAthletesAssign
+                      compact
+                      athletes={row.potential_athletes}
+                      disabled={busyId === row.id}
+                      busy={busyId === row.id}
+                      onChange={(next) => void saveAthletes(row.id, next)}
+                      onOpenChange={(open) => setAthleteMenuId(open ? row.id : null)}
+                    />
+                    {row.circle_back_at ? (
+                      <div className="mt-1">
+                        <SequenceCircleBackBanner
+                          circleBackAt={row.circle_back_at}
+                          circleBackNote={row.circle_back_note}
+                          busy={busyId === row.id}
+                          onDone={() =>
+                            void postAction(row.id, {
+                              action: "clear_circle_back",
+                              card_id: row.id,
+                            })
+                          }
+                          onSnooze={(months) =>
+                            void postAction(row.id, {
+                              action: "circle_back",
+                              card_id: row.id,
+                              months,
+                            })
+                          }
+                          onInterested={() =>
+                            void postAction(row.id, {
+                              action: "clear_circle_back",
+                              card_id: row.id,
+                              interested: true,
+                            })
+                          }
+                        />
                       </div>
                     ) : null}
                   </td>
@@ -507,7 +613,13 @@ export function SequenceBoard() {
                     const st = row.states.find((s) => s.step_id === step.id);
                     const touch = (st?.touch_status ?? "pending") as TouchStatus;
                     const resp = (st?.response_status ?? "awaiting") as ResponseStatus;
-                    const due = isStepDue(row.sequence_started_at, step.day_offset, touch);
+                    const due = isStepDue(
+                      step,
+                      data.steps,
+                      row.states,
+                      row.sequence_started_at,
+                      touch
+                    );
                     const blocked = isStepBlocked(step, data.steps, row.states);
                     const disabled = busyId === row.id || !row.sequence_started_at;
 
@@ -517,7 +629,7 @@ export function SequenceBoard() {
                         colSpan={step.expects_response ? 2 : 1}
                         className="border-l border-white/5 px-0.5 py-1"
                       >
-                        <div className="flex items-center justify-center gap-0.5">
+                        <div className="relative flex items-center justify-center gap-0.5">
                           <button
                             type="button"
                             disabled={disabled || blocked.blocked}
@@ -551,22 +663,55 @@ export function SequenceBoard() {
                               )}
                               onClick={() => {
                                 const nextWouldBeResponded = resp === "awaiting";
-                                let move = true;
                                 if (nextWouldBeResponded) {
-                                  move = window.confirm(
-                                    `Mark response on ${step.short_code} and move to Negotiating?`
+                                  setReplyMenu(
+                                    replyMenu?.cardId === row.id && replyMenu.stepId === step.id
+                                      ? null
+                                      : { cardId: row.id, stepId: step.id }
                                   );
+                                  return;
                                 }
                                 void postAction(row.id, {
                                   action: "cycle_response",
                                   card_id: row.id,
                                   step_id: step.id,
-                                  move_to_negotiating: move,
+                                  move_to_negotiating: false,
                                 });
                               }}
                             >
                               R
                             </button>
+                          )}
+                          {replyMenu?.cardId === row.id && replyMenu.stepId === step.id && (
+                            <SequenceReplyPanel
+                              stepLabel={step.short_code}
+                              busy={busyId === row.id}
+                              onInterested={() =>
+                                void postAction(row.id, {
+                                  action: "cycle_response",
+                                  card_id: row.id,
+                                  step_id: step.id,
+                                  move_to_negotiating: true,
+                                })
+                              }
+                              onCircleBack={(opts) =>
+                                void postAction(row.id, {
+                                  action: "circle_back",
+                                  card_id: row.id,
+                                  step_id: step.id,
+                                  ...opts,
+                                })
+                              }
+                              onRecordOnly={() =>
+                                void postAction(row.id, {
+                                  action: "cycle_response",
+                                  card_id: row.id,
+                                  step_id: step.id,
+                                  move_to_negotiating: false,
+                                })
+                              }
+                              onClose={() => setReplyMenu(null)}
+                            />
                           )}
                         </div>
                       </td>

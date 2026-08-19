@@ -201,7 +201,10 @@ export type CrmCompanyPipeline = {
   archived: boolean;
   follow_up_step: number;
   last_touch_at: string | null;
-  next_action: "email" | "linkedin" | "call" | "cool" | null;
+  next_action: "email" | "linkedin" | "call" | "cool" | "circle_back" | null;
+  /** When a prospect asked to check back later; sequence stays paused until then */
+  circle_back_at: string | null;
+  circle_back_note: string | null;
   follow_up_log: Array<{
     step: number;
     channel: string;

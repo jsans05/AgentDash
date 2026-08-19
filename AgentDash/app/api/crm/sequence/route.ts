@@ -20,6 +20,11 @@ import {
 } from "@/lib/crm/outreach-sequence";
 import { clearCadenceOnResponded } from "@/lib/crm/pipeline-cadence";
 import { normalizePipelineStage, pipelineStageToFunnel } from "@/lib/crm/stage-map";
+import {
+  buildCircleBackCardUpdates,
+  clearCircleBackCardUpdates,
+  resolveCircleBackAt,
+} from "@/lib/crm/circle-back";
 
 export async function GET(req: Request) {
   await requireNonAccounting();
@@ -43,7 +48,7 @@ export async function GET(req: Request) {
   const states = await loadCardSequenceState(supabase, cardId);
   const { data: card } = await supabase
     .from("crm_companies_pipeline")
-    .select("id, sequence_id, sequence_started_at, responded_at, timezone, pipeline_stage")
+    .select("id, sequence_id, sequence_started_at, responded_at, timezone, pipeline_stage, circle_back_at, circle_back_note")
     .eq("id", cardId)
     .maybeSingle();
 
@@ -70,6 +75,7 @@ export async function POST(req: Request) {
       sequence_id: started.sequence_id,
       sequence_started_at: started.sequence_started_at,
       responded_at: null,
+      circle_back_at: null,
     });
     return NextResponse.json({
       ok: true,
@@ -192,7 +198,7 @@ export async function POST(req: Request) {
     states = await loadCardSequenceState(supabase, cardId);
     const { data: cardAfter } = await supabase
       .from("crm_companies_pipeline")
-      .select("sequence_id, sequence_started_at, responded_at")
+      .select("sequence_id, sequence_started_at, responded_at, circle_back_at")
       .eq("id", cardId)
       .single();
     if (cardAfter) {
@@ -200,6 +206,7 @@ export async function POST(req: Request) {
         sequence_id: cardAfter.sequence_id,
         sequence_started_at: cardAfter.sequence_started_at,
         responded_at: cardAfter.responded_at,
+        circle_back_at: cardAfter.circle_back_at,
       });
     }
 
@@ -308,7 +315,7 @@ export async function POST(req: Request) {
       if (!stillResponded) {
         await supabase
           .from("crm_companies_pipeline")
-          .update({ responded_at: null })
+          .update({ responded_at: null, ...clearCircleBackCardUpdates() })
           .eq("id", cardId);
       }
     }
@@ -316,7 +323,7 @@ export async function POST(req: Request) {
     states = await loadCardSequenceState(supabase, cardId);
     const { data: cardAfter } = await supabase
       .from("crm_companies_pipeline")
-      .select("sequence_id, sequence_started_at, responded_at")
+      .select("sequence_id, sequence_started_at, responded_at, circle_back_at")
       .eq("id", cardId)
       .single();
     if (cardAfter) {
@@ -324,6 +331,7 @@ export async function POST(req: Request) {
         sequence_id: cardAfter.sequence_id,
         sequence_started_at: cardAfter.sequence_started_at,
         responded_at: cardAfter.responded_at,
+        circle_back_at: cardAfter.circle_back_at,
       });
     }
 
@@ -333,6 +341,158 @@ export async function POST(req: Request) {
       event,
       response_status: nextResp,
       moved_to_negotiating: movedToNegotiating,
+    });
+  }
+
+  if (action === "circle_back") {
+    const cardId = String(body.card_id ?? "").trim();
+    if (!cardId) return NextResponse.json({ error: "card_id required" }, { status: 400 });
+
+    let circleBackAt: string;
+    try {
+      circleBackAt = resolveCircleBackAt({
+        months: body.months != null ? Number(body.months) : null,
+        follow_up_at: body.follow_up_at != null ? String(body.follow_up_at) : null,
+      });
+    } catch (e: unknown) {
+      return NextResponse.json(
+        { error: e instanceof Error ? e.message : "Invalid circle-back date" },
+        { status: 400 }
+      );
+    }
+
+    const note = body.note != null ? String(body.note) : null;
+    const stepId = String(body.step_id ?? "").trim();
+    const started = await ensureCardSequenceStarted(supabase, cardId, profile.user_id);
+    let states = await loadCardSequenceState(supabase, cardId);
+    let stateRow = null;
+    let event = null;
+
+    if (stepId) {
+      const step = started.steps.find((s) => s.id === stepId);
+      if (!step) return NextResponse.json({ error: "Unknown step" }, { status: 400 });
+      const current = states.find((s) => s.step_id === stepId);
+      const { data: upserted, error: stateErr } = await supabase
+        .from("crm_card_sequence_state")
+        .upsert(
+          {
+            card_id: cardId,
+            step_id: stepId,
+            touch_status: current?.touch_status === "pending" ? "done" : current?.touch_status ?? "done",
+            response_status: "responded",
+            done_at: current?.done_at ?? new Date().toISOString(),
+            variant_id: current?.variant_id ?? null,
+            outcome: current?.outcome ?? null,
+            notes: note ?? current?.notes ?? null,
+          },
+          { onConflict: "card_id,step_id" }
+        )
+        .select("*")
+        .single();
+      if (stateErr) return NextResponse.json({ error: stateErr.message }, { status: 500 });
+      stateRow = upserted;
+
+      const tz = await resolveTimezoneForCard(supabase, { cardId });
+      const { data: cardRow } = await supabase
+        .from("crm_companies_pipeline")
+        .select("companies(product_category)")
+        .eq("id", cardId)
+        .single();
+      const companies = cardRow?.companies as { product_category?: string | null } | null;
+      event = await insertOutreachEvent(supabase, {
+        userId: profile.user_id,
+        pipelineCardId: cardId,
+        eventType: "response",
+        channel: step.channel as OutreachChannel,
+        sequenceStepId: step.id,
+        variantId: current?.variant_id ?? null,
+        productCategory: companies?.product_category ?? null,
+        outcome: "circle_back",
+        notes: note,
+        timezone: tz,
+      });
+    }
+
+    const cadence = buildCircleBackCardUpdates({ circleBackAt, note });
+    const stage = normalizePipelineStage("follow_up");
+    const { error: updErr } = await supabase
+      .from("crm_companies_pipeline")
+      .update({
+        ...cadence,
+        funnel_stage: pipelineStageToFunnel(stage),
+      })
+      .eq("id", cardId);
+    if (updErr) return NextResponse.json({ error: updErr.message }, { status: 500 });
+
+    states = await loadCardSequenceState(supabase, cardId);
+    await syncCardCadenceFromSequence(supabase, cardId, started.steps, states, {
+      sequence_id: started.sequence_id,
+      sequence_started_at: started.sequence_started_at,
+      responded_at: cadence.responded_at,
+      circle_back_at: cadence.circle_back_at,
+    });
+
+    return NextResponse.json({
+      ok: true,
+      state: stateRow,
+      event,
+      circle_back_at: cadence.circle_back_at,
+      circle_back_note: cadence.circle_back_note,
+    });
+  }
+
+  if (action === "clear_circle_back") {
+    const cardId = String(body.card_id ?? "").trim();
+    if (!cardId) return NextResponse.json({ error: "card_id required" }, { status: 400 });
+
+    const interested = body.interested === true;
+    const resume = body.resume === true;
+    const updates: Record<string, unknown> = { ...clearCircleBackCardUpdates() };
+
+    if (interested) {
+      const stage = normalizePipelineStage("in_progress");
+      Object.assign(updates, clearCadenceOnResponded(), {
+        pipeline_stage: stage,
+        funnel_stage: pipelineStageToFunnel(stage),
+      });
+    } else if (resume) {
+      updates.responded_at = null;
+      updates.next_action = null;
+      updates.next_follow_up_at = null;
+    } else {
+      updates.next_action = null;
+      updates.next_follow_up_at = null;
+    }
+
+    const { error: updErr } = await supabase
+      .from("crm_companies_pipeline")
+      .update(updates)
+      .eq("id", cardId);
+    if (updErr) return NextResponse.json({ error: updErr.message }, { status: 500 });
+
+    const active = await getActiveSequence(supabase);
+    if (active) {
+      const states = await loadCardSequenceState(supabase, cardId);
+      const { data: cardAfter } = await supabase
+        .from("crm_companies_pipeline")
+        .select("sequence_id, sequence_started_at, responded_at, circle_back_at")
+        .eq("id", cardId)
+        .single();
+      if (cardAfter) {
+        await syncCardCadenceFromSequence(supabase, cardId, active.steps, states, {
+          sequence_id: cardAfter.sequence_id,
+          sequence_started_at: cardAfter.sequence_started_at,
+          responded_at: cardAfter.responded_at,
+          circle_back_at: cardAfter.circle_back_at,
+        });
+      }
+    }
+
+    return NextResponse.json({
+      ok: true,
+      interested,
+      resume,
+      ...clearCircleBackCardUpdates(),
     });
   }
 

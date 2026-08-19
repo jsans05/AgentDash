@@ -15,6 +15,10 @@ import {
   type ResponseStatus,
 } from "@/lib/crm/outreach-sequence";
 import type { OutreachVariant } from "@/lib/crm/outreach-variants";
+import {
+  SequenceCircleBackBanner,
+  SequenceReplyPanel,
+} from "@/components/crm/SequenceCircleBackControls";
 
 type SequenceApiPayload = {
   sequence: { id: string; name: string; version: number } | null;
@@ -26,6 +30,8 @@ type SequenceApiPayload = {
     sequence_started_at: string | null;
     responded_at: string | null;
     timezone?: string | null;
+    circle_back_at?: string | null;
+    circle_back_note?: string | null;
   } | null;
 };
 
@@ -67,6 +73,7 @@ export function SequenceStepStrip({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saveAsBody, setSaveAsBody] = useState("");
+  const [replyStepId, setReplyStepId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const res = await fetch(`/api/crm/sequence?card_id=${encodeURIComponent(cardId)}`, {
@@ -140,21 +147,10 @@ export function SequenceStepStrip({
     await updateTouch(stepId, extra);
   };
 
-  const cycleResponse = async (stepId: string) => {
-    const step = data?.steps.find((s) => s.id === stepId);
-    const state = data?.states.find((s) => s.step_id === stepId);
-    const nextWouldBeResponded =
-      !state || state.response_status === "awaiting";
-
-    let move = true;
-    if (nextWouldBeResponded && step) {
-      move = window.confirm(
-        `Mark response on ${step.short_code} and move card to Negotiating? (Cancel = record response but stay on current stage)`
-      );
-    }
-
+  const cycleResponse = async (stepId: string, moveToNegotiating: boolean) => {
     setBusy(true);
     setError(null);
+    setReplyStepId(null);
     try {
       const res = await fetch("/api/crm/sequence", {
         method: "POST",
@@ -164,8 +160,74 @@ export function SequenceStepStrip({
           action: "cycle_response",
           card_id: cardId,
           step_id: stepId,
-          move_to_negotiating: move,
+          move_to_negotiating: moveToNegotiating,
         }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error ?? "Failed");
+      await load();
+      onChanged?.();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onResponseClick = (stepId: string) => {
+    const state = data?.states.find((s) => s.step_id === stepId);
+    const nextWouldBeResponded = !state || state.response_status === "awaiting";
+    if (nextWouldBeResponded) {
+      setOpenStepId(null);
+      setReplyStepId(replyStepId === stepId ? null : stepId);
+      return;
+    }
+    void cycleResponse(stepId, false);
+  };
+
+  const postCircleBack = async (opts: {
+    stepId?: string;
+    months?: number;
+    follow_up_at?: string;
+    note?: string;
+  }) => {
+    setBusy(true);
+    setError(null);
+    setReplyStepId(null);
+    try {
+      const res = await fetch("/api/crm/sequence", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "circle_back",
+          card_id: cardId,
+          step_id: opts.stepId,
+          months: opts.months,
+          follow_up_at: opts.follow_up_at,
+          note: opts.note,
+        }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error ?? "Failed");
+      await load();
+      onChanged?.();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clearCircleBack = async (extra?: { interested?: boolean; resume?: boolean }) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/crm/sequence", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "clear_circle_back", card_id: cardId, ...extra }),
       });
       const json = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(json.error ?? "Failed");
@@ -242,12 +304,26 @@ export function SequenceStepStrip({
               ? new Date(data.card.sequence_started_at).toLocaleDateString()
               : "—"}
           </div>
-          {data.card?.responded_at && (
+          {data.card?.circle_back_at ? (
+            <span className="text-[10px] uppercase tracking-wide text-[#F4E8C0]">Circle back</span>
+          ) : data.card?.responded_at ? (
             <span className="text-[10px] uppercase tracking-wide text-[#CEE4D4]">Responded</span>
-          )}
+          ) : null}
         </div>
       )}
       {error && <p className="text-xs text-[#F1A2A2]">{error}</p>}
+
+      {data.card?.circle_back_at && (
+        <SequenceCircleBackBanner
+          circleBackAt={data.card.circle_back_at}
+          circleBackNote={data.card.circle_back_note}
+          busy={busy}
+          compact={compact}
+          onDone={() => void clearCircleBack()}
+          onSnooze={(months) => void postCircleBack({ months })}
+          onInterested={() => void clearCircleBack({ interested: true })}
+        />
+      )}
 
       <div className={cn("flex flex-wrap gap-1.5", compact ? "gap-1" : "gap-2")}>
         {steps.map((step) => {
@@ -298,10 +374,21 @@ export function SequenceStepStrip({
                     "rounded px-1 py-1 text-[9px] font-medium leading-none min-w-[1.5rem]",
                     responseClass(resp)
                   )}
-                  onClick={() => void cycleResponse(step.id)}
+                  onClick={() => onResponseClick(step.id)}
                 >
                   R
                 </button>
+              )}
+
+              {replyStepId === step.id && (
+                <SequenceReplyPanel
+                  stepLabel={step.short_code}
+                  busy={busy}
+                  onInterested={() => void cycleResponse(step.id, true)}
+                  onCircleBack={(opts) => void postCircleBack({ stepId: step.id, ...opts })}
+                  onRecordOnly={() => void cycleResponse(step.id, false)}
+                  onClose={() => setReplyStepId(null)}
+                />
               )}
 
               {openStepId === step.id && (
@@ -418,7 +505,7 @@ export function SequenceStepStrip({
 
       {!compact && (
         <p className="text-[10px] text-[#5E574C]">
-          Click cell to cycle · right-click for copy/variant · R = response
+          Click cell to cycle · right-click for copy/variant · R = reply (interested / circle back)
           {phases.length > 0 ? ` · ${phases.map(([p]) => phaseLabel(p)).join(" → ")}` : ""}
         </p>
       )}

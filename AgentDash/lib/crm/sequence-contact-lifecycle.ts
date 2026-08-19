@@ -35,7 +35,9 @@ async function resetCardSequence(supabase: SupabaseClient, cardId: string) {
     sequence_started_at: null,
     sequence_contact_id: null,
     next_follow_up_at: null,
-    next_action: null
+    next_action: null,
+    circle_back_at: null,
+    circle_back_note: null
   }).eq("id", cardId);
 }
 async function moveCardToGhost(supabase: SupabaseClient, cardId: string) {
@@ -47,7 +49,9 @@ async function moveCardToGhost(supabase: SupabaseClient, cardId: string) {
     sequence_contact_id: null,
     next_follow_up_at: null,
     next_action: null,
-    follow_up_step: 0
+    follow_up_step: 0,
+    circle_back_at: null,
+    circle_back_note: null
   }).eq("id", cardId);
   await supabase.from("crm_card_sequence_state").delete().eq("card_id", cardId);
 }
@@ -59,7 +63,9 @@ async function moveCardToBounced(supabase: SupabaseClient, cardId: string) {
     sequence_started_at: null,
     sequence_contact_id: null,
     next_follow_up_at: null,
-    next_action: null
+    next_action: null,
+    circle_back_at: null,
+    circle_back_note: null
   }).eq("id", cardId);
   await supabase.from("crm_card_sequence_state").delete().eq("card_id", cardId);
 }
@@ -194,7 +200,9 @@ async function archivePipelineCard(supabase: SupabaseClient, cardId: string) {
     sequence_contact_id: null,
     contact_of_record_id: null,
     next_follow_up_at: null,
-    next_action: null
+    next_action: null,
+    circle_back_at: null,
+    circle_back_note: null
   }).eq("id", cardId);
   if (error) throw new Error(error.message);
 }

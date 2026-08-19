@@ -43,6 +43,7 @@ export type SequenceCardFields = {
   sequence_started_at: string | null;
   responded_at: string | null;
   pipeline_stage?: string | null;
+  circle_back_at?: string | null;
 };
 
 /** Main outreach chain — each step waits for the prior one. LI1–LI3 run in parallel. */
@@ -258,9 +259,12 @@ export function cadenceFieldsFromSequence(
   now = new Date()
 ): {
   next_follow_up_at: string | null;
-  next_action: "email" | "linkedin" | "call" | "cool" | null;
+  next_action: "email" | "linkedin" | "call" | "cool" | "circle_back" | null;
   last_touch_at?: string | null;
 } {
+  if (card.circle_back_at) {
+    return { next_follow_up_at: card.circle_back_at, next_action: "circle_back" };
+  }
   if (card.responded_at) {
     return { next_follow_up_at: null, next_action: null };
   }

@@ -61,6 +61,22 @@ test("processCadenceDue moves cooling to ghost", () => {
   assert.equal(next?.pipeline_stage, "ghost");
 });
 
+test("cadenceBadgeLabel shows circle back while waiting", () => {
+  const waiting = cadenceBadgeLabel({
+    pipeline_stage: "follow_up",
+    outreach_at: "2026-07-01T00:00:00Z",
+    responded_at: "2026-08-01T00:00:00Z",
+    follow_up_step: 2,
+    last_touch_at: null,
+    next_follow_up_at: "2099-10-01T00:00:00Z",
+    next_action: "circle_back",
+    follow_up_log: [],
+    circle_back_at: "2099-10-01T00:00:00Z",
+  });
+  assert.ok(waiting?.startsWith("Circle back"));
+  assert.notEqual(waiting, "Circle back due");
+});
+
 test("cadenceBadgeLabel shows Call due at step 3", () => {
   const label = cadenceBadgeLabel({
     pipeline_stage: "follow_up",

@@ -1,6 +1,6 @@
 import type { PipelineStage } from "@/lib/crm/pipeline-stages";
 
-export type CadenceNextAction = "email" | "linkedin" | "call" | "cool";
+export type CadenceNextAction = "email" | "linkedin" | "call" | "cool" | "circle_back";
 
 export type FollowUpLogEntry = {
   step: number;
@@ -19,6 +19,8 @@ export type CadenceFields = {
   next_follow_up_at: string | null;
   next_action: CadenceNextAction | null;
   follow_up_log: FollowUpLogEntry[] | null;
+  circle_back_at?: string | null;
+  circle_back_note?: string | null;
 };
 
 const MS_DAY = 86_400_000;
@@ -67,6 +69,12 @@ export function addDaysSnapped(from: Date, days: number): string {
 }
 
 export function cadenceBadgeLabel(card: CadenceFields): string | null {
+  if (card.circle_back_at) {
+    const dueMs = new Date(card.circle_back_at).getTime();
+    if (dueMs <= Date.now()) return "Circle back due";
+    const daysLeft = Math.max(0, Math.ceil((dueMs - Date.now()) / MS_DAY));
+    return `Circle back · ${daysLeft}d`;
+  }
   if (card.responded_at) return null;
   if (card.pipeline_stage === "outreach" && card.follow_up_step === 0) {
     if (isCadenceDue(card)) return "FU1 due";
@@ -97,6 +105,9 @@ export function cadenceBadgeLabel(card: CadenceFields): string | null {
 }
 
 export function isCadenceDue(card: CadenceFields): boolean {
+  if (card.circle_back_at) {
+    return new Date(card.circle_back_at).getTime() <= Date.now();
+  }
   if (card.responded_at) return false;
   if (!card.next_follow_up_at) return false;
   return new Date(card.next_follow_up_at).getTime() <= Date.now();
@@ -120,6 +131,8 @@ export function clearCadenceOnResponded(now = new Date()): Partial<CadenceFields
     next_action: null,
     next_follow_up_at: null,
     follow_up_step: 0,
+    circle_back_at: null,
+    circle_back_note: null,
   };
 }
 
@@ -132,6 +145,8 @@ export function resetCadenceOnReengage(): Partial<CadenceFields> {
     next_action: null,
     next_follow_up_at: null,
     follow_up_log: [],
+    circle_back_at: null,
+    circle_back_note: null,
   };
 }
 
@@ -248,6 +263,7 @@ export function processCadenceDue(
   card: CadenceFields,
   now = new Date()
 ): Partial<CadenceFields> | null {
+  if (card.circle_back_at) return null;
   if (card.responded_at) return null;
   if (!card.next_follow_up_at) return null;
   if (new Date(card.next_follow_up_at).getTime() > now.getTime()) return null;

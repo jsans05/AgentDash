@@ -71,6 +71,8 @@ const PATCH_KEYS = new Set([
   "sequence_started_at",
   "contact_of_record_id",
   "sequence_contact_id",
+  "circle_back_at",
+  "circle_back_note",
 ]);
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -238,8 +240,9 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
         follow_up_step: Number(current.follow_up_step ?? 0),
         last_touch_at: current.last_touch_at != null ? String(current.last_touch_at) : null,
         next_follow_up_at: current.next_follow_up_at != null ? String(current.next_follow_up_at) : null,
-        next_action: current.next_action as "email" | "linkedin" | "call" | "cool" | null,
+        next_action: current.next_action as "email" | "linkedin" | "call" | "cool" | "circle_back" | null,
         follow_up_log: Array.isArray(current.follow_up_log) ? current.follow_up_log : [],
+        circle_back_at: current.circle_back_at != null ? String(current.circle_back_at) : null,
       },
       body as Record<string, unknown>
     );
@@ -256,6 +259,8 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     updates.next_action = null;
     updates.next_follow_up_at = null;
     updates.follow_up_step = 0;
+    updates.circle_back_at = null;
+    updates.circle_back_note = null;
   }
 
   if (updates.pipeline_stage !== undefined) {
@@ -276,8 +281,9 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
           follow_up_step: Number(current.follow_up_step ?? 0),
           last_touch_at: current.last_touch_at != null ? String(current.last_touch_at) : null,
           next_follow_up_at: current.next_follow_up_at != null ? String(current.next_follow_up_at) : null,
-          next_action: current.next_action as "email" | "linkedin" | "call" | "cool" | null,
+          next_action: current.next_action as "email" | "linkedin" | "call" | "cool" | "circle_back" | null,
           follow_up_log: Array.isArray(current.follow_up_log) ? current.follow_up_log : [],
+          circle_back_at: current.circle_back_at != null ? String(current.circle_back_at) : null,
         },
         normalizedStage,
         body as Record<string, unknown>
@@ -304,6 +310,8 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     updates.next_action = null;
     updates.next_follow_up_at = null;
     updates.follow_up_step = 0;
+    updates.circle_back_at = null;
+    updates.circle_back_note = null;
   }
 
   if (updates.pipeline_stage === "target" && normalizePipelineStage(current.pipeline_stage) === "ghost") {

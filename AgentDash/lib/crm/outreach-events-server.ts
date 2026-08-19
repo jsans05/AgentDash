@@ -193,6 +193,7 @@ export async function syncCardCadenceFromSequence(
     sequence_id: string | null;
     sequence_started_at: string | null;
     responded_at: string | null;
+    circle_back_at?: string | null;
   }
 ) {
   const cadence = cadenceFieldsFromSequence(steps, states, card);

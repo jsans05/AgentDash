@@ -41,6 +41,7 @@ import { AssignToTeammateMenu } from "@/components/crm/AssignToTeammateMenu";
 import { SequenceStepStrip } from "@/components/crm/SequenceStepStrip";
 import { TimezoneSelect } from "@/components/crm/TimezoneSelect";
 import { cadenceStepLabel, countDueInStage, getCadenceBadge } from "@/lib/crm/pipeline-cadence-ui";
+import { isCircleBackDue } from "@/lib/crm/circle-back";
 
 export type { PipelineStage } from "@/lib/crm/pipeline-stages";
 export { STAGE_LABEL } from "@/lib/crm/pipeline-stages";
@@ -66,7 +67,7 @@ export type PipelineCard = {
   follow_up_step: number;
   last_touch_at: string | null;
   next_follow_up_at: string | null;
-  next_action: "email" | "linkedin" | "call" | "cool" | null;
+  next_action: "email" | "linkedin" | "call" | "cool" | "circle_back" | null;
   follow_up_log: FollowUpLogEntry[] | null;
   idea_notes: string | null;
   company_description: string | null;
@@ -94,6 +95,8 @@ export type PipelineCard = {
   timezone?: string | null;
   sequence_id?: string | null;
   sequence_started_at?: string | null;
+  circle_back_at?: string | null;
+  circle_back_note?: string | null;
   company_website?: string | null;
   total_funding_printed?: string | null;
   latest_funding_stage?: string | null;
@@ -944,7 +947,7 @@ export function CrmPipelineKanban({ initialOpenPipelineId = null }: { initialOpe
                     >
                       <div className="flex min-w-0 items-center gap-1.5">
                         <span className="truncate text-sm font-medium text-[#F4F1EB]">{card.company_name}</span>
-                        {card.sequence_started_at && !card.responded_at && (
+                        {card.sequence_started_at && !card.responded_at && !card.circle_back_at && (
                           <span
                             className="shrink-0 rounded border border-[#2E7040]/30 bg-[#1A2A20] px-1 py-0 text-[9px] font-medium text-[#A7E0B6]"
                             title="Sequence active"
@@ -2652,7 +2655,15 @@ function ActivityTab({
       sub: "No response after full cadence",
     });
   }
-  if (card.responded_at) {
+  if (card.circle_back_at) {
+    timeline.push({
+      line: isCircleBackDue(card.circle_back_at) ? "Circle back due" : "Circle back scheduled",
+      sub: `${new Date(card.circle_back_at).toLocaleDateString()}${
+        card.circle_back_note ? ` · ${card.circle_back_note}` : ""
+      }`,
+    });
+  }
+  if (card.responded_at && !card.circle_back_at) {
     timeline.push({
       line: "Response recorded",
       sub: new Date(card.responded_at).toLocaleString(),

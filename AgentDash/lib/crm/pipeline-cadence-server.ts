@@ -14,11 +14,23 @@ export function buildCadenceUpdatesForStageChange(
     Object.assign(updates, initCadenceOnSend());
   }
 
-  if (normalized === "in_progress" && !current.responded_at && !Object.prototype.hasOwnProperty.call(body, "responded_at")) {
-    updates.responded_at = new Date().toISOString();
-    updates.next_action = null;
-    updates.next_follow_up_at = null;
-    updates.follow_up_step = 0;
+  if (normalized === "in_progress") {
+    updates.circle_back_at = null;
+    updates.circle_back_note = null;
+    if (!current.responded_at && !Object.prototype.hasOwnProperty.call(body, "responded_at")) {
+      updates.responded_at = new Date().toISOString();
+      updates.next_action = null;
+      updates.next_follow_up_at = null;
+      updates.follow_up_step = 0;
+    } else if (current.next_action === "circle_back" || current.circle_back_at) {
+      updates.next_action = null;
+      updates.next_follow_up_at = null;
+    }
+  }
+
+  if (normalized === "ghost" || normalized === "closed") {
+    updates.circle_back_at = null;
+    updates.circle_back_note = null;
   }
 
   if (normalized === "target" && current.pipeline_stage === "ghost") {
