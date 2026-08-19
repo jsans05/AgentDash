@@ -149,11 +149,6 @@ export type MarketIntelData = {
   last_sync_at: string | null;
 };
 
-const TEAM_SPONSOR_SELECT =
-  "id, entity_key, owner_name, team_name, company_name, company_name_normalized, display_name, sponsor_url, scraped_at";
-const VENUE_SPONSOR_SELECT =
-  "id, entity_key, venue_name, sport_type, company_name, company_name_normalized, display_name, sponsor_url, scraped_at";
-
 export async function getMarketIntelData(
   supabase: SupabaseClient
 ): Promise<MarketIntelData> {
@@ -167,7 +162,9 @@ export async function getMarketIntelData(
         .order("position", { ascending: true }),
       supabase
         .from("market_intel_team_sponsors")
-        .select(TEAM_SPONSOR_SELECT)
+        .select(
+          "id, entity_key, owner_name, team_name, company_name, company_name_normalized, display_name, sponsor_url, scraped_at"
+        )
         .order("owner_name", { ascending: true })
         .order("company_name", { ascending: true }),
       supabase
@@ -177,7 +174,9 @@ export async function getMarketIntelData(
         .order("name", { ascending: true }),
       supabase
         .from("market_intel_venue_sponsors")
-        .select(VENUE_SPONSOR_SELECT)
+        .select(
+          "id, entity_key, venue_name, sport_type, company_name, company_name_normalized, display_name, sponsor_url, scraped_at"
+        )
         .neq("sport_type", "mlb")
         .order("venue_name", { ascending: true })
         .order("company_name", { ascending: true }),
@@ -203,35 +202,6 @@ export async function getMarketIntelData(
     brand_enrichments: (enrichmentsRes.data ?? []) as BrandEnrichmentRow[],
     last_sync_at: runsRes.data?.[0]?.finished_at ?? null,
   };
-}
-
-/** Load only the sponsors needed to build AggregatedBrand rows for the given keys. */
-export async function getAggregatedBrandsByKeys(
-  supabase: SupabaseClient,
-  brandKeys: string[]
-): Promise<AggregatedBrand[]> {
-  const keys = [...new Set(brandKeys.map((k) => k.trim()).filter(Boolean))];
-  if (keys.length === 0) return [];
-
-  const [teamSponsorsRes, venueSponsorsRes] = await Promise.all([
-    supabase
-      .from("market_intel_team_sponsors")
-      .select(TEAM_SPONSOR_SELECT)
-      .in("company_name_normalized", keys),
-    supabase
-      .from("market_intel_venue_sponsors")
-      .select(VENUE_SPONSOR_SELECT)
-      .neq("sport_type", "mlb")
-      .in("company_name_normalized", keys),
-  ]);
-
-  if (teamSponsorsRes.error) throw teamSponsorsRes.error;
-  if (venueSponsorsRes.error) throw venueSponsorsRes.error;
-
-  return aggregateBrands(
-    (teamSponsorsRes.data ?? []) as TeamSponsorRow[],
-    (venueSponsorsRes.data ?? []) as VenueSponsorRow[]
-  );
 }
 
 export function brandEnrichmentsByKey(

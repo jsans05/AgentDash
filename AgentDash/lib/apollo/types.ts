@@ -5,12 +5,19 @@ export type ApolloSearchPerson = {
   title: string;
   seniority?: string;
   organization_name: string;
+  organization_domain?: string;
+  organization_id?: string;
+  city?: string;
+  state?: string;
+  country?: string;
   linkedin_url?: string;
   email_status?: string;
   has_email: boolean;
+  has_phone?: boolean;
 };
 
 export type ApolloMatchResult = {
+  apollo_person_id: string | null;
   email: string | null;
   linkedin_url: string | null;
   first_name: string | null;

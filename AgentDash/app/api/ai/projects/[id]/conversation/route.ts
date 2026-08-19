@@ -1,4 +1,6 @@
-import { requireProfile } from "@/lib/auth";
+import { isPendingTurnState, parseMessageMetadata } from "@/lib/ai/user-question";
+import { internalServerError, unauthorizedResponse } from "@/lib/api/http-errors";
+import { requireNonAccounting } from "@/lib/auth";
 import { createServerClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
 
@@ -11,7 +13,7 @@ async function getLatestConversation(
 ) {
   const { data: convo, error } = await supabase
     .from("ai_conversations")
-    .select("conversation_id, created_at, updated_at")
+    .select("conversation_id, created_at, updated_at, pending_turn, flow_mode")
     .eq("project_id", projectId)
     .eq("owner_user_id", ownerId)
     .order("updated_at", { ascending: false })
@@ -21,12 +23,36 @@ async function getLatestConversation(
   return convo;
 }
 
-export async function GET(_req: Request, ctx: Ctx) {
-  const profile = await requireProfile();
+export async function GET(req: Request, ctx: Ctx) {
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const { id } = await ctx.params;
+  const requestedConversationId = new URL(req.url).searchParams.get("conversation_id")?.trim() ?? "";
 
-  let convo = await getLatestConversation(supabase, id, profile.user_id);
+  let convo: Awaited<ReturnType<typeof getLatestConversation>> = null;
+  if (requestedConversationId) {
+    const { data, error } = await supabase
+      .from("ai_conversations")
+      .select("conversation_id, created_at, updated_at, pending_turn, flow_mode")
+      .eq("conversation_id", requestedConversationId)
+      .eq("project_id", id)
+      .eq("owner_user_id", profile.user_id)
+      .maybeSingle();
+    if (error) {
+      return internalServerError(error, "ai-conversation:get:by-id");
+    }
+    convo = data;
+    if (!convo) {
+      return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
+    }
+  } else {
+    try {
+      convo = await getLatestConversation(supabase, id, profile.user_id);
+    } catch (error) {
+      return internalServerError(error, "ai-conversation:get:latest");
+    }
+  }
+
   if (!convo) {
     const { data: created, error: createError } = await supabase
       .from("ai_conversations")
@@ -35,7 +61,7 @@ export async function GET(_req: Request, ctx: Ctx) {
         owner_user_id: profile.user_id,
         title: null,
       })
-      .select("conversation_id, created_at, updated_at")
+      .select("conversation_id, created_at, updated_at, pending_turn, flow_mode")
       .single();
     if (createError || !created) {
       return NextResponse.json({ error: createError?.message ?? "Failed to create conversation" }, { status: 500 });
@@ -45,7 +71,7 @@ export async function GET(_req: Request, ctx: Ctx) {
 
   const { data: messages, error: msgError } = await supabase
     .from("ai_messages")
-    .select("message_id, role, content, created_at")
+    .select("message_id, role, content, metadata, created_at")
     .eq("conversation_id", convo.conversation_id)
     .eq("owner_user_id", profile.user_id)
     .order("created_at", { ascending: true });
@@ -54,24 +80,65 @@ export async function GET(_req: Request, ctx: Ctx) {
     return NextResponse.json({ error: msgError.message }, { status: 500 });
   }
 
+  const pendingTurn = isPendingTurnState(convo.pending_turn) ? convo.pending_turn : null;
+
   return NextResponse.json({
     conversation_id: convo.conversation_id,
-    messages: (messages ?? []).map((m) => ({
-      id: m.message_id,
-      role: m.role,
-      content: m.content,
-      createdAt: m.created_at,
-    })),
+    flow_mode: (convo as { flow_mode?: string | null }).flow_mode ?? null,
+    pending_interaction: pendingTurn
+      ? {
+          tool_call_id: pendingTurn.tool_call_id,
+          prompt: pendingTurn.prompt,
+        }
+      : null,
+    messages: (() => {
+      const seen = new Set<string>();
+      return (messages ?? [])
+        .filter((m) => {
+          const id = String(m.message_id);
+          if (seen.has(id)) return false;
+          seen.add(id);
+          return true;
+        })
+        .map((m) => {
+          const meta = parseMessageMetadata(m.metadata);
+          let interactionStatus = meta?.interaction_status ?? null;
+          if (interactionStatus === "pending") {
+            const toolId = meta?.tool_call_id ?? null;
+            if (!pendingTurn || pendingTurn.tool_call_id !== toolId) {
+              interactionStatus = "expired";
+            }
+          }
+          return {
+            id: m.message_id,
+            role: m.role,
+            content: m.content,
+            createdAt: m.created_at,
+            interaction: meta?.interaction ?? null,
+            interactionStatus,
+            toolCallId: meta?.tool_call_id ?? null,
+          };
+        });
+    })(),
   });
 }
 
 export async function POST(req: Request, ctx: Ctx) {
-  const profile = await requireProfile();
+  const profile = await requireNonAccounting();
   const supabase = await createServerClient();
   const { id } = await ctx.params;
   const body = await req.json().catch(() => ({}));
 
   const title = body?.title ? String(body.title).trim() : null;
+
+  // Abandon any in-progress interest pickers on older threads in this project.
+  await supabase
+    .from("ai_conversations")
+    .update({ pending_turn: null })
+    .eq("project_id", id)
+    .eq("owner_user_id", profile.user_id)
+    .not("pending_turn", "is", null);
+
   const { data: convo, error } = await supabase
     .from("ai_conversations")
     .insert({

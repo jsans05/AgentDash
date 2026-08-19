@@ -1,8 +1,19 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { ApolloOrgPickerDialog } from "@/components/crm/ApolloOrgPickerDialog";
+import {
+  FirmographicsCell,
+  isFundingNews,
+  isHiringOrLayoffNews,
+} from "@/components/crm/FirmographicsCell";
 import { TargetListActionDialog } from "@/components/crm/TargetListActionDialog";
-import { readJsonResponse } from "@/lib/api/read-json-response";
+import { BrandFiltersBar } from "@/components/market-intel/BrandFiltersBar";
+import {
+  firmographicsFromBrandEnrichment,
+  formatMetaAdsDisplay,
+  isFirmographicsStale,
+} from "@/lib/crm/company-firmographics";
 import {
   isTargetListDialogDismissed,
   MARKET_INTEL_CONSULTING_PROFILE_KEY,
@@ -12,6 +23,7 @@ import { brandToTargetListRow } from "@/lib/market-intel/enrich-brand";
 import type {
   AggregatedBrand,
   BrandEnrichmentRow,
+  BrandFilters,
   BrandSortKey,
   CupDriverRow,
   TeamSponsorRow,
@@ -21,8 +33,12 @@ import type {
 import {
   aggregateBrands,
   brandPlacementCount,
+  collectFundingStages,
+  countActiveBrandFilters,
   countUniqueTeamOwners,
+  DEFAULT_BRAND_FILTERS,
   filterBrands,
+  hasBrandApolloFirmographics,
   sortBrands,
 } from "@/lib/market-intel/queries";
 
@@ -52,6 +68,10 @@ const SORT_OPTIONS: { value: BrandSortKey; label: string }[] = [
   { value: "placements-asc", label: "Placements (small → large)" },
   { value: "brand-asc", label: "Brand (A → Z)" },
   { value: "brand-desc", label: "Brand (Z → A)" },
+  { value: "revenue-desc", label: "Revenue (high → low)" },
+  { value: "employees-desc", label: "Employees (high → low)" },
+  { value: "funding-desc", label: "Funding (high → low)" },
+  { value: "growth12-desc", label: "12mo headcount growth" },
 ];
 
 const actionBtn =
@@ -80,32 +100,6 @@ function showsUpInChips(brand: AggregatedBrand): ShowUpInChip[] {
 
 function chipKey(chip: ShowUpInChip) {
   return chip.type === "team" ? `team:${chip.ownerName}` : `venue:${chip.entityKey}`;
-}
-
-function formatRevenue(enrichment: BrandEnrichmentRow | undefined): string | null {
-  if (!enrichment) return null;
-  if (enrichment.annual_revenue_printed) return enrichment.annual_revenue_printed;
-  const rev = enrichment.annual_revenue;
-  if (rev == null) return null;
-  if (rev >= 1_000_000_000) return `$${(rev / 1_000_000_000).toFixed(1)}B`;
-  if (rev >= 1_000_000) return `$${(rev / 1_000_000).toFixed(1)}M`;
-  return `$${rev.toLocaleString()}`;
-}
-
-function formatFunding(enrichment: BrandEnrichmentRow | undefined): string | null {
-  if (!enrichment) return null;
-  if (enrichment.total_funding_printed) return enrichment.total_funding_printed;
-  const funding = enrichment.total_funding;
-  if (funding == null) return null;
-  if (funding >= 1_000_000_000) return `$${(funding / 1_000_000_000).toFixed(1)}B`;
-  if (funding >= 1_000_000) return `$${(funding / 1_000_000).toFixed(1)}M`;
-  return `$${funding.toLocaleString()}`;
-}
-
-function formatGrowth(value: number | null): string | null {
-  if (value == null || Number.isNaN(value)) return null;
-  const sign = value >= 0 ? "+" : "";
-  return `${sign}${value.toFixed(1)}%`;
 }
 
 function fmtNewsDate(value: string | null): string {
@@ -194,60 +188,106 @@ function PlacementLink({
   );
 }
 
-function GrowthBadge({ label, value }: { label: string; value: number | null }) {
-  const text = formatGrowth(value);
-  if (!text) return null;
-  const positive = (value ?? 0) >= 0;
-  return (
-    <span
-      className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-medium ${
-        positive
-          ? "border-[#2E7040]/50 bg-[#1B2F21] text-[#DBEEE0]"
-          : "border-[#8C3A3A]/50 bg-[#3A1E1E] text-[#F8D0D0]"
-      }`}
-    >
-      {text} {label}
-    </span>
-  );
+function brandEnrichmentFirmographics(enrichment: BrandEnrichmentRow) {
+  return {
+    ...firmographicsFromBrandEnrichment(enrichment),
+    firmographics_enriched_at: enrichment.enriched_at,
+  };
 }
 
 function FirmographicsSummary({
   enrichment,
+  brandName,
 }: {
   enrichment: BrandEnrichmentRow | undefined;
+  brandName?: string;
 }) {
-  if (!enrichment) {
+  if (!hasBrandApolloFirmographics(enrichment)) {
     return <span className="text-xs text-[#8E877A]">Not enriched</span>;
   }
 
-  const revenue = formatRevenue(enrichment);
-  const funding = formatFunding(enrichment);
-
   return (
-    <div className="space-y-1.5">
-      {revenue && (
-        <p className="text-xs text-[#ECE7DF]">
-          <span className="text-[#8E877A]">Revenue:</span> {revenue}
-        </p>
-      )}
-      {(funding || enrichment.latest_funding_stage) && (
-        <p className="text-xs text-[#ECE7DF]">
-          <span className="text-[#8E877A]">Funding:</span>{" "}
-          {[funding, enrichment.latest_funding_stage].filter(Boolean).join(" · ")}
-        </p>
-      )}
-      <div className="flex flex-wrap gap-1">
-        <GrowthBadge label="6mo" value={enrichment.headcount_six_month_growth} />
-        <GrowthBadge label="12mo" value={enrichment.headcount_twelve_month_growth} />
-        <GrowthBadge label="24mo" value={enrichment.headcount_twenty_four_month_growth} />
-      </div>
-      {enrichment.enriched_at && (
-        <p className="text-[10px] text-[#8E877A]">
-          Enriched {new Date(enrichment.enriched_at).toLocaleDateString()}
-        </p>
+    <div className="space-y-1">
+      <FirmographicsCell
+        firmographics={brandEnrichmentFirmographics(enrichment!)}
+        compact
+        brandName={brandName}
+      />
+      {isFirmographicsStale(enrichment!.enriched_at, 14) && (
+        <p className="text-[10px] text-[#D4C48A]">Stale — consider re-investigating</p>
       )}
     </div>
   );
+}
+
+function InstagramCell({ enrichment }: { enrichment: BrandEnrichmentRow | undefined }) {
+  const handle = enrichment?.instagram_handle?.trim();
+  if (!handle) {
+    return <span className="text-xs text-[#8E877A]">—</span>;
+  }
+  const url = handle.startsWith("http")
+    ? handle
+    : `https://instagram.com/${handle.replace(/^@/, "")}`;
+  const label = handle.replace(/^@/, "");
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noreferrer"
+      className="text-xs text-[#CEE4D4] underline"
+      onClick={(e) => e.stopPropagation()}
+    >
+      @{label}
+    </a>
+  );
+}
+
+function MetaAdsCell({
+  enrichment,
+  brandName,
+}: {
+  enrichment: BrandEnrichmentRow | undefined;
+  brandName: string;
+}) {
+  if (!enrichment) {
+    return <span className="text-xs text-[#8E877A]">—</span>;
+  }
+  const firmographics = brandEnrichmentFirmographics(enrichment);
+  const label = formatMetaAdsDisplay(firmographics, brandName);
+  const url = enrichment.meta_ads_library_url;
+  if (label && url) {
+    return (
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        className="text-xs text-[#CEE4D4] underline"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {label}
+      </a>
+    );
+  }
+  if (label) {
+    return <span className="text-xs text-[#B9B2A6]">{label}</span>;
+  }
+  if (url) {
+    return (
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        className="text-xs text-[#CEE4D4] underline"
+        onClick={(e) => e.stopPropagation()}
+      >
+        Ads Library
+      </a>
+    );
+  }
+  if (enrichment.meta_ads_status === "not_found") {
+    return <span className="text-xs text-[#8E877A]">None found</span>;
+  }
+  return <span className="text-xs text-[#8E877A]">—</span>;
 }
 
 function BrandDetailPanel({
@@ -255,58 +295,42 @@ function BrandDetailPanel({
   enrichment,
   onNavigateToTeam,
   onNavigateToVenue,
+  onStockCorrected,
 }: {
   brand: AggregatedBrand;
   enrichment: BrandEnrichmentRow | undefined;
   onNavigateToTeam: (ownerName: string) => void;
   onNavigateToVenue: (entityKey: string) => void;
+  onStockCorrected: (brandKey: string, enrichment: BrandEnrichmentRow) => void;
 }) {
   return (
     <div className="border-t border-white/10 bg-[#121614] px-4 py-4">
-      {enrichment && (
+      {enrichment && hasBrandApolloFirmographics(enrichment) && (
         <>
           <div className="mb-4">
             <p className="mb-2 text-xs font-medium uppercase tracking-wide text-[#8E877A]">
               Firmographics
             </p>
             <div className="rounded-md border border-white/5 bg-[#151A17] px-3 py-3 text-sm text-[#ECE7DF]">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div>
-                  <p className="text-xs text-[#8E877A]">Revenue</p>
-                  <p>{formatRevenue(enrichment) ?? "—"}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-[#8E877A]">Industry</p>
-                  <p>{enrichment.industry ?? "—"}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-[#8E877A]">Employees</p>
-                  <p>
-                    {enrichment.estimated_num_employees != null
-                      ? enrichment.estimated_num_employees.toLocaleString()
-                      : "—"}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-[#8E877A]">Total funding</p>
-                  <p>
-                    {[formatFunding(enrichment), enrichment.latest_funding_stage]
-                      .filter(Boolean)
-                      .join(" · ") || "—"}
-                  </p>
-                </div>
-              </div>
-              <div className="mt-3 flex flex-wrap gap-1.5">
-                <GrowthBadge label="6mo headcount" value={enrichment.headcount_six_month_growth} />
-                <GrowthBadge
-                  label="12mo headcount"
-                  value={enrichment.headcount_twelve_month_growth}
-                />
-                <GrowthBadge
-                  label="24mo headcount"
-                  value={enrichment.headcount_twenty_four_month_growth}
-                />
-              </div>
+              <FirmographicsCell
+                brandName={brand.displayName}
+                firmographics={brandEnrichmentFirmographics(enrichment)}
+                stockCorrection={{
+                  brandKey: brand.key,
+                  companyName: brand.displayName,
+                  domain: enrichment.domain,
+                  onCorrected: (_firmographics, updatedEnrichment) => {
+                    if (updatedEnrichment) {
+                      onStockCorrected(brand.key, updatedEnrichment);
+                    }
+                  },
+                }}
+              />
+              {enrichment.industry && (
+                <p className="mt-3 text-xs text-[#8E877A]">
+                  Industry: <span className="text-[#ECE7DF]">{enrichment.industry}</span>
+                </p>
+              )}
               {enrichment.funding_events.length > 0 && (
                 <div className="mt-4 overflow-x-auto">
                   <p className="mb-2 text-xs font-medium text-[#8E877A]">Funding rounds</p>
@@ -341,10 +365,18 @@ function BrandDetailPanel({
                 Recent news
               </p>
               <ul className="space-y-2">
-                {enrichment.news_articles.map((article) => (
+                {enrichment.news_articles.map((article) => {
+                  const highlight =
+                    isHiringOrLayoffNews(article.event_categories) ||
+                    isFundingNews(article.event_categories);
+                  return (
                   <li
                     key={article.id}
-                    className="rounded-md border border-white/5 bg-[#151A17] px-3 py-2 text-sm"
+                    className={`rounded-md border px-3 py-2 text-sm ${
+                      highlight
+                        ? "border-[#2E7040]/40 bg-[#1B2F21]"
+                        : "border-white/5 bg-[#151A17]"
+                    }`}
                   >
                     <a
                       href={article.url}
@@ -376,7 +408,8 @@ function BrandDetailPanel({
                       </div>
                     )}
                   </li>
-                ))}
+                  );
+                })}
               </ul>
             </div>
           )}
@@ -476,6 +509,8 @@ export function BrandsView({
 }: Props) {
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<BrandSortKey>("placements-desc");
+  const [filters, setFilters] = useState<BrandFilters>(DEFAULT_BRAND_FILTERS);
+  const [showFilters, setShowFilters] = useState(false);
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [enrichmentByKey, setEnrichmentByKey] = useState(initialEnrichmentByKey);
   const [consultingProfiles, setConsultingProfiles] = useState<ConsultingProfile[]>([]);
@@ -486,6 +521,15 @@ export function BrandsView({
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [enrichConfirmOpen, setEnrichConfirmOpen] = useState(false);
   const [pendingEnrichKeys, setPendingEnrichKeys] = useState<string[]>([]);
+  const [orgPickerBrand, setOrgPickerBrand] = useState<AggregatedBrand | null>(null);
+  const [pendingOrgEnrichKeys, setPendingOrgEnrichKeys] = useState<string[]>([]);
+
+  const handleStockCorrected = useCallback((brandKey: string, enrichment: BrandEnrichmentRow) => {
+    setEnrichmentByKey((prev) => ({
+      ...prev,
+      [brandKey]: enrichment,
+    }));
+  }, []);
 
   useEffect(() => {
     setEnrichmentByKey(initialEnrichmentByKey);
@@ -496,7 +540,7 @@ export function BrandsView({
     void (async () => {
       try {
         const res = await fetch("/api/consulting/profiles", { credentials: "include" });
-        const data = await readJsonResponse<{ profiles?: ConsultingProfile[]; error?: string }>(res);
+        const data = await res.json();
         if (!res.ok || cancelled) return;
         const profiles = (data.profiles ?? []) as ConsultingProfile[];
         setConsultingProfiles(profiles);
@@ -536,10 +580,41 @@ export function BrandsView({
     [teamSponsors, venueSponsors]
   );
 
-  const filteredBrands = useMemo(
-    () => sortBrands(filterBrands(allBrands, search, cupDrivers), sort),
-    [allBrands, search, cupDrivers, sort]
+  const venueSportByKey = useMemo(
+    () => new Map(venues.map((v) => [v.entity_key, v.sport_type])),
+    [venues]
   );
+
+  const teamOwners = useMemo(
+    () => [...new Set(teamSponsors.map((row) => row.owner_name))].sort((a, b) => a.localeCompare(b)),
+    [teamSponsors]
+  );
+
+  const sportTypes = useMemo(() => {
+    const sports = new Set<string>();
+    if (teamSponsors.length > 0) sports.add("nascar");
+    for (const venue of venues) {
+      if (venue.sport_type) sports.add(venue.sport_type.toLowerCase());
+    }
+    return [...sports].sort();
+  }, [teamSponsors.length, venues]);
+
+  const fundingStages = useMemo(
+    () => collectFundingStages(enrichmentByKey),
+    [enrichmentByKey]
+  );
+
+  const filteredBrands = useMemo(
+    () =>
+      sortBrands(
+        filterBrands(allBrands, search, cupDrivers, filters, enrichmentByKey, venueSportByKey),
+        sort,
+        enrichmentByKey
+      ),
+    [allBrands, search, cupDrivers, filters, enrichmentByKey, venueSportByKey, sort]
+  );
+
+  const activeFilterCount = useMemo(() => countActiveBrandFilters(filters), [filters]);
 
   const stats = useMemo(
     () => ({
@@ -550,10 +625,10 @@ export function BrandsView({
     [allBrands.length, teamSponsors, venues.length]
   );
 
-  const searching = search.trim().length > 0;
+  const searching = search.trim().length > 0 || activeFilterCount > 0;
   const hasConsultingProfiles = consultingProfiles.length > 0;
 
-  const runEnrich = useCallback(async (keys: string[]) => {
+  const runEnrich = useCallback(async (keys: string[], apollo_organization_id?: string) => {
     if (keys.length === 0) return;
     setStatusMessage(null);
     setEnrichingKeys(new Set(keys));
@@ -564,20 +639,34 @@ export function BrandsView({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ brand_keys: keys }),
+        body: JSON.stringify({
+          brand_keys: keys,
+          apollo_organization_id,
+          force: Boolean(apollo_organization_id),
+        }),
       });
-      const data = await readJsonResponse<{
-        results?: Array<{
-          key: string;
-          ok: boolean;
-          enrichment?: BrandEnrichmentRow;
-          error?: string;
-        }>;
-        error?: string;
-      }>(res);
-      if (!res.ok) throw new Error(data.error || "Enrich failed");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Enrich failed");
 
-      const results = data.results ?? [];
+      const results = (data.results ?? []) as Array<{
+        key: string;
+        ok: boolean;
+        needsConfirmation?: boolean;
+        match_notes?: string | null;
+        enrichment?: BrandEnrichmentRow;
+        error?: string;
+      }>;
+
+      const needsConfirm = results.filter((r) => r.needsConfirmation);
+      if (needsConfirm.length > 0 && !apollo_organization_id) {
+        const brand = allBrands.find((b) => b.key === needsConfirm[0].key);
+        if (brand) {
+          setPendingOrgEnrichKeys(keys);
+          setOrgPickerBrand(brand);
+          setStatusMessage(needsConfirm[0].match_notes ?? "Confirm the correct Apollo company.");
+          return;
+        }
+      }
 
       setEnrichmentByKey((prev) => {
         const next = { ...prev };
@@ -590,7 +679,7 @@ export function BrandsView({
       });
 
       const okCount = results.filter((r) => r.ok).length;
-      const failCount = results.length - okCount;
+      const failCount = results.length - okCount - needsConfirm.length;
       if (failCount === 0) {
         setStatusMessage(
           keys.length === 1
@@ -598,7 +687,7 @@ export function BrandsView({
             : `Enriched ${okCount} brands.`
         );
       } else {
-        const firstErr = results.find((r) => !r.ok)?.error;
+        const firstErr = results.find((r) => !r.ok && !r.needsConfirmation)?.error;
         setStatusMessage(
           `Enriched ${okCount}; ${failCount} failed${firstErr ? `: ${firstErr}` : ""}.`
         );
@@ -609,7 +698,7 @@ export function BrandsView({
       setEnrichingKeys(new Set());
       setBulkBusy(null);
     }
-  }, []);
+  }, [allBrands]);
 
   function requestEnrich(keys: string[]) {
     if (keys.length === 0 || enrichingKeys.size > 0 || bulkBusy) return;
@@ -638,8 +727,8 @@ export function BrandsView({
             companies.length === 1 ? companies[0] : { companies }
           ),
         });
-        const data = await readJsonResponse<{ added?: number; error?: string }>(res);
-        if (!res.ok) throw new Error(data.error || "Add to list failed");
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error || "Add to list failed");
 
         if (brands.length === 1) {
           setStatusMessage(`Added ${brands[0].displayName} to target list.`);
@@ -663,6 +752,27 @@ export function BrandsView({
 
   return (
     <section className="space-y-4">
+      <ApolloOrgPickerDialog
+        open={orgPickerBrand != null}
+        brandKey={orgPickerBrand?.key}
+        companyName={orgPickerBrand?.displayName}
+        onClose={() => {
+          setOrgPickerBrand(null);
+          setPendingOrgEnrichKeys([]);
+        }}
+        onSelected={({ apollo_organization_id }) => {
+          const keys =
+            pendingOrgEnrichKeys.length > 0
+              ? pendingOrgEnrichKeys
+              : orgPickerBrand
+                ? [orgPickerBrand.key]
+                : [];
+          setOrgPickerBrand(null);
+          setPendingOrgEnrichKeys([]);
+          void runEnrich(keys, apollo_organization_id);
+        }}
+      />
+
       <TargetListActionDialog
         open={enrichConfirmOpen}
         title="Enrich brands via Apollo?"
@@ -719,7 +829,30 @@ export function BrandsView({
               </option>
             ))}
           </select>
+          <button
+            type="button"
+            className="rounded-lg border border-white/10 bg-[#151A17] px-3 py-2.5 text-sm text-[#CEE4D4]"
+            onClick={() => setShowFilters((open) => !open)}
+          >
+            {showFilters ? "Hide filters" : "Show filters"}
+            {activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
+          </button>
         </div>
+
+        {showFilters && (
+          <BrandFiltersBar
+            filters={filters}
+            fundingStages={fundingStages}
+            teamOwners={teamOwners}
+            venues={venues}
+            sportTypes={sportTypes}
+            activeFilterCount={activeFilterCount}
+            onChange={(next) => {
+              setFilters(next);
+              setExpandedKey(null);
+            }}
+          />
+        )}
 
         <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
           {hasConsultingProfiles ? (
@@ -792,6 +925,8 @@ export function BrandsView({
               <tr>
                 <th className="px-4 py-3">Brand</th>
                 <th className="px-4 py-3">Placements</th>
+                <th className="px-4 py-3">Instagram</th>
+                <th className="px-4 py-3">Meta ads</th>
                 <th className="px-4 py-3">Firmographics</th>
                 <th className="px-4 py-3">Shows up in</th>
                 <th className="px-4 py-3">Actions</th>
@@ -817,7 +952,13 @@ export function BrandsView({
                       </td>
                       <td className="px-4 py-3 tabular-nums text-[#B9B2A6]">{count}</td>
                       <td className="px-4 py-3">
-                        <FirmographicsSummary enrichment={enrichment} />
+                        <InstagramCell enrichment={enrichment} />
+                      </td>
+                      <td className="px-4 py-3">
+                        <MetaAdsCell enrichment={enrichment} brandName={brand.displayName} />
+                      </td>
+                      <td className="px-4 py-3">
+                        <FirmographicsSummary enrichment={enrichment} brandName={brand.displayName} />
                       </td>
                       <td className="px-4 py-3">
                         <ChipList
@@ -836,6 +977,17 @@ export function BrandsView({
                           >
                             {isEnriching ? "Investigating…" : "Investigate"}
                           </button>
+                          <button
+                            type="button"
+                            className={actionBtn}
+                            disabled={isEnriching || enrichBusy}
+                            onClick={() => {
+                              setOrgPickerBrand(brand);
+                              setPendingOrgEnrichKeys([brand.key]);
+                            }}
+                          >
+                            Wrong company?
+                          </button>
                           {hasConsultingProfiles && (
                             <button
                               type="button"
@@ -852,12 +1004,13 @@ export function BrandsView({
                     </tr>
                     {open && (
                       <tr>
-                        <td colSpan={6} className="p-0">
+                        <td colSpan={8} className="p-0">
                           <BrandDetailPanel
                             brand={brand}
                             enrichment={enrichment}
                             onNavigateToTeam={onNavigateToTeam}
                             onNavigateToVenue={onNavigateToVenue}
+                            onStockCorrected={handleStockCorrected}
                           />
                         </td>
                       </tr>
