@@ -86,6 +86,8 @@ type Props = {
   }) => void;
   onLifecycle?: (patch: SequenceContactLifecyclePatch) => void;
   onContactsChanged?: (count: number) => void;
+  /** Fired after contacts are added/removed so sibling tables can refresh. */
+  onContactsMutated?: () => void;
 };
 
 /**
@@ -101,6 +103,7 @@ export function SequenceContactOfRecordPanel({
   onSaved,
   onLifecycle,
   onContactsChanged,
+  onContactsMutated,
 }: Props) {
   const { contacts, loading, error, reload, setContacts } = useCompanyContacts(companyId);
   const [busy, setBusy] = useState<"save" | "bounce" | "add" | null>(null);
@@ -112,10 +115,12 @@ export function SequenceContactOfRecordPanel({
   const [email, setEmail] = useState("");
   const [linkedin, setLinkedin] = useState("");
   const autoAssignedRef = useRef<string | null>(null);
+  const onContactsChangedRef = useRef(onContactsChanged);
+  onContactsChangedRef.current = onContactsChanged;
 
   useEffect(() => {
-    onContactsChanged?.(contacts.length);
-  }, [contacts.length, onContactsChanged]);
+    onContactsChangedRef.current?.(contacts.length);
+  }, [contacts.length]);
 
   const saveFields = useCallback(
     async (patch: {
@@ -238,6 +243,7 @@ export function SequenceContactOfRecordPanel({
         remaining_contacts: json.remaining_contacts,
       });
       await reload();
+      onContactsMutated?.();
     } catch (e) {
       setLocalError(e instanceof Error ? e.message : "Failed to bounce");
     } finally {
@@ -298,6 +304,7 @@ export function SequenceContactOfRecordPanel({
       setEmail("");
       setLinkedin("");
       await reload();
+      onContactsMutated?.();
     } catch (e) {
       setLocalError(e instanceof Error ? e.message : "Failed to add contact");
     } finally {

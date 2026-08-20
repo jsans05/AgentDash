@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { Linkedin, Mail } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -89,6 +89,16 @@ export function SequenceCompanyDetails({
   const [pullingInfo, setPullingInfo] = useState(false);
   const [pullInfoMsg, setPullInfoMsg] = useState<string | null>(null);
   const [pullInfoError, setPullInfoError] = useState<string | null>(null);
+
+  // Count-only updates must NOT remount CompanyContactsTable — remounting re-fetches
+  // /contacts and stampedes Supabase auth refresh (409 "Too many concurrent token refresh").
+  const handleContactsCount = useCallback((n: number) => {
+    setContactCount(n);
+  }, []);
+
+  const refreshContactsTable = useCallback(() => {
+    setTableKey((k) => k + 1);
+  }, []);
 
   const dropCompany = async () => {
     const empty = contactCount === 0;
@@ -228,10 +238,8 @@ export function SequenceCompanyDetails({
             sequenceContactId={row.sequence_contact_id ?? null}
             onSaved={(patch) => onContactsSaved?.(patch)}
             onLifecycle={onLifecycle}
-            onContactsChanged={(n) => {
-              setContactCount(n);
-              setTableKey((k) => k + 1);
-            }}
+            onContactsChanged={handleContactsCount}
+            onContactsMutated={refreshContactsTable}
           />
         ) : (
           <p className="text-xs text-[#8E877A]">No company record linked.</p>
@@ -245,7 +253,7 @@ export function SequenceCompanyDetails({
               companyName={row.company_name}
               cardId={row.id}
               onLifecycle={onLifecycle}
-              onContactsChange={setContactCount}
+              onContactsChange={handleContactsCount}
             />
           ) : null}
 

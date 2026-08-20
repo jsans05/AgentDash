@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, Linkedin, Pencil, Trash2, X } from "lucide-react";
 import type { ApolloRevealStatus } from "@/components/crm/ApolloContactActions";
 import { ApolloFindContactsInline } from "@/components/crm/ApolloFindContactsInline";
@@ -85,6 +85,9 @@ export function CompanyContactsTable({
   const [editCompany, setEditCompany] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
 
+  const onContactsChangeRef = useRef(onContactsChange);
+  onContactsChangeRef.current = onContactsChange;
+
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -94,13 +97,13 @@ export function CompanyContactsTable({
       if (!res.ok) throw new Error(data?.error || "Failed to load contacts");
       const rows = mapRows(data.contacts);
       setContacts(rows);
-      onContactsChange?.(rows.length);
+      onContactsChangeRef.current?.(rows.length);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load contacts");
     } finally {
       setLoading(false);
     }
-  }, [companyId, onContactsChange]);
+  }, [companyId]);
 
   useEffect(() => {
     void load();
